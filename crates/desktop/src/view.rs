@@ -670,15 +670,19 @@ impl Explorer {
 
     // ------------------------------------------------------------- sidebar
 
-    fn place_row(&self, id: (&'static str, usize), place: &Place, active: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// A place in the sidebar. `framed`: with its own highlight; a drive
+    /// with its free space gets one from the block holding both.
+    fn place_row(&self, id: (&'static str, usize), place: &Place, active: bool, framed: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let path = place.path.clone();
         let middle=path.clone();
         let spring=path.clone();
-        div().id(id).mx_2().h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
+        div().id(id).h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
             .cursor_pointer()
-            .when(active, |this| this.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
-            .when(!active, |this| this.text_color(rgb(TEXT_MUTED))
-                .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
+            .when(framed, |this| this.mx_2())
+            .when(active, |this| this.text_color(rgb(TEXT)))
+            .when(active && framed, |this| this.bg(rgb(ACCENT_SOFT)))
+            .when(!active, |this| this.text_color(rgb(TEXT_MUTED)))
+            .when(!active && framed, |this| this.hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
             .child(icon(place_icon(place.kind), if active { ACCENT } else { TEXT_MUTED }))
             .child(div().flex_1().min_w_0().truncate().child(place.label.clone()))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -726,7 +730,7 @@ impl Explorer {
         for (index, place) in self.places.iter().enumerate().filter(|_| open("Места")) {
             let active = active_place.as_ref() == Some(&place.path);
             let drag_name = place.label.clone();
-            side = side.child(self.place_row(("place", index), place, active, cx)
+            side = side.child(self.place_row(("place", index), place, active, true, cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(Some(index)),cx)))
                 .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position}))
                 .drag_over::<PlaceDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
@@ -771,18 +775,31 @@ impl Explorer {
         side = side.child(self.section("Диски", cx));
         for (index, place) in self.drives.iter().enumerate().filter(|_| open("Диски")) {
             let active = active_place.as_ref() == Some(&place.path);
-            side = side.child(self.place_row(("drive", index), place, active, cx));
-            if let Some(&(free, total)) = self.drive_space.get(&place.path) {
-                let used = 1. - free as f32 / total as f32;
-                let color = if used > 0.9 { DANGER } else { TEXT_DIM };
-                side = side.child(
-                    div().mx_2().pl(px(32.)).pr_2().pb_1().flex().flex_col().gap_1()
-                        .child(div().h(px(4.)).w_full().rounded_full().bg(rgb(BORDER))
-                            .child(div().h_full().rounded_full().bg(rgb(color)).w(gpui::relative(used))))
-                        .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
-                            .child(format!("свободно {} из {}", format_size(free), format_size(total))))
-                );
-            }
+            // The free space belongs to the drive: one highlighted block.
+            let space = self.drive_space.get(&place.path).copied();
+            let row = self.place_row(("drive", index), place, active, space.is_none(), cx);
+            side = side.child(match space {
+                Some((free, total)) => {
+                    let used = 1. - free as f32 / total.max(1) as f32;
+                    let color = if used > 0.9 { DANGER } else if active { ACCENT } else { TEXT_DIM };
+                    let target = place.path.clone();
+                    div().id(("drive-block", index)).mx_2().rounded_md().group("drive-block")
+                        .when(active, |block| block.bg(rgb(ACCENT_SOFT)))
+                        .when(!active, |block| block.hover(|style| style.bg(rgb(HOVER))))
+                        .child(row.when(!active, |row| row.group_hover("drive-block", |style| style.text_color(rgb(TEXT)))))
+                        .child(div().id(("drive-space", index)).pl(px(32.)).pr_2().pb_1p5().flex().flex_col().gap_1().cursor_pointer()
+                            .child(div().h(px(4.)).w_full().rounded_full().bg(rgb(BORDER))
+                                .child(div().h_full().rounded_full().bg(rgb(color)).w(gpui::relative(used.clamp(0., 1.)))))
+                            .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                                .child(format!("свободно {} из {}", format_size(free), format_size(total))))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let side = this.active_side();
+                                this.navigate_side(side, &target, None, cx);
+                            })))
+                        .into_any_element()
+                }
+                None => row.into_any_element(),
+            });
         }
         side = side.child(div().mt_3().child(self.drop_zone(cx)));
         if !self.workspace_names.is_empty() {

@@ -727,6 +727,25 @@ impl Explorer {
         cx.notify();
     }
 
+    /// A flash drive or card plugged in (or pulled out) after start shows
+    /// in «Диски» within a couple of seconds.
+    fn start_drive_watch(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let drives = cx.background_spawn(async { places::drives() }).await;
+            let alive = weak.update(cx, |this, cx| {
+                let same = this.drives.len() == drives.len()
+                    && this.drives.iter().zip(&drives).all(|(a, b)| a.path == b.path && a.kind == b.kind);
+                if !same {
+                    this.drives = drives;
+                    this.load_drive_space(cx);
+                    cx.notify();
+                }
+            }).is_ok();
+            if !alive { break; }
+        }).detach();
+    }
+
     /// Reads free space of local drives off the UI thread. Network drives
     /// are skipped: a sleeping server must not stall anything.
     fn load_drive_space(&mut self, cx: &mut Context<Self>) {
@@ -2009,6 +2028,7 @@ fn main() {
             let explorer = cx.new(|cx| Explorer::new(window, cx));
             explorer.update(cx, |this, cx| {
                 this.load_drive_space(cx);
+                this.start_drive_watch(cx);
                 this.refresh_workspace_names();
                 this.start_project_autosave(cx);
                 this.start_update_checks(cx);
