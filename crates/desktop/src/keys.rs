@@ -217,7 +217,7 @@ impl Explorer {
         double
     }
 
-    pub(crate) fn list_widths_for(&self, group: GroupId) -> [f32; 3] {
+    pub(crate) fn list_widths_for(&self, group: GroupId) -> [f32; 4] {
         self.pane_list_widths.get(&group).copied().unwrap_or(self.list_widths)
     }
 
@@ -612,6 +612,14 @@ impl Explorer {
             cx.notify();
             return;
         }
+        // Esc during a header drag puts the column back, as in Explorer.
+        if let Some((side, index, _, width)) = self.list_resize.take() {
+            let mut widths = self.list_widths_for(side);
+            widths[index] = width;
+            self.pane_list_widths.insert(side, widths);
+            cx.notify();
+            return;
+        }
         if self.escape_marquee(cx) {return;}
         if self.dismiss_interface(window,cx) { return; }
         let had_popup = self.renaming || self.creating_folder || self.address_editing.is_some() || self.saving_workspace
@@ -786,6 +794,7 @@ impl Explorer {
         self.pane_list_widths.retain(|id,_|ids.contains(id));
         self.pane_column_widths.retain(|id,_|ids.contains(id));
         self.column_scroll_handles.retain(|id,_|ids.contains(id));
+        self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));
         self.folder_views.retain(|(id,_),_|ids.contains(id));

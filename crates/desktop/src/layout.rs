@@ -68,6 +68,38 @@ pub fn reveal_column_offset(
 pub fn resize_columns(start: f32, delta: f32) -> f32 {
     if delta.is_finite() { (start + delta).clamp(COLUMN_MIN, COLUMN_MAX) } else { start }
 }
+/// Details view, as in Explorer: name, modified, type and size each keep
+/// their own width; a wider table scrolls sideways instead of squeezing.
+pub const LIST_DEFAULT: [f32; 4] = [260., 140., 110., 90.];
+pub const LIST_MIN: f32 = 40.;
+pub const LIST_MAX: f32 = 1600.;
+/// Half the grab zone on each side of a header divider.
+pub const LIST_GRIP: f32 = 4.;
+/// Dragging a divider sizes only the column on its left; the ones to the
+/// right move along with it.
+pub fn resize_list_column(start: f32, delta: f32) -> f32 {
+    if delta.is_finite() { (start + delta).clamp(LIST_MIN, LIST_MAX) } else { start }
+}
+/// Where each divider sits: the right edge of every column.
+pub fn list_dividers(widths: &[f32; 4]) -> [f32; 4] {
+    let mut edge = 0.;
+    widths.map(|width| { edge += width; edge })
+}
+/// Saved widths; the older three-value form (no name column) gets the
+/// default name width.
+pub fn parse_list_widths(text: &str) -> Option<[f32; 4]> {
+    let values: Vec<f32> = text.split(',').map(|v| v.trim().parse().ok()).collect::<Option<_>>()?;
+    let valid = values.iter().all(|v| (LIST_MIN..=LIST_MAX).contains(v));
+    match values.as_slice() {
+        &[a, b, c, d] if valid => Some([a, b, c, d]),
+        &[b, c, d] if valid => Some([LIST_DEFAULT[0], b, c, d]),
+        _ => None,
+    }
+}
+/// Double-click on a divider: the widest content plus the cell's padding.
+pub fn fit_list_column(content: f32, padding: f32) -> f32 {
+    if content.is_finite() { (content + padding).ceil().clamp(LIST_MIN, LIST_MAX) } else { LIST_DEFAULT[0] }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +136,28 @@ mod tests {
         let widths = column_widths(600., 7, 220.);
         assert_eq!(widths, vec![COLUMN_MIN; 7]);
         assert!(widths.iter().sum::<f32>() > 600.);
+    }
+    #[test]
+    fn list_columns_resize_one_at_a_time() {
+        assert_eq!(resize_list_column(140., 30.), 170.);
+        assert_eq!(resize_list_column(140., -500.), LIST_MIN);
+        assert_eq!(resize_list_column(140., 5000.), LIST_MAX);
+        assert_eq!(resize_list_column(140., f32::NAN), 140.);
+        assert_eq!(list_dividers(&[200., 100., 50., 80.]), [200., 300., 350., 430.]);
+    }
+    #[test]
+    fn saved_list_widths_include_the_name_column() {
+        assert_eq!(parse_list_widths("300,140,110,90"), Some([300., 140., 110., 90.]));
+        assert_eq!(parse_list_widths("150, 100, 80"), Some([LIST_DEFAULT[0], 150., 100., 80.]));
+        assert_eq!(parse_list_widths("300,140,x,90"), None);
+        assert_eq!(parse_list_widths("300,140,10,90"), None);
+        assert_eq!(parse_list_widths("1,2"), None);
+    }
+    #[test]
+    fn fitting_a_column_keeps_it_within_limits() {
+        assert_eq!(fit_list_column(100.2, 16.), 117.);
+        assert_eq!(fit_list_column(0., 16.), LIST_MIN);
+        assert_eq!(fit_list_column(1e6, 16.), LIST_MAX);
     }
     #[test]
     fn resizing_changes_the_shared_width_within_limits() {

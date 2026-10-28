@@ -132,8 +132,6 @@ const COLUMN_WIDTH: &str = "column_width";
 const STACK_VERSIONS: &str = "stack_versions";
 /// A star before each folder adds it to favourites, and shows that it is one.
 const FAVORITE_STARS: &str = "favorite_stars";
-const DEFAULT_LIST_WIDTHS: [f32; 3] = [140., 110., 90.];
-pub(crate) const LIST_WIDTH_RANGE: (f32, f32) = (60., 400.);
 
 #[cfg(windows)]
 fn window_hwnd(window: &Window) -> Option<isize> {
@@ -142,12 +140,6 @@ fn window_hwnd(window: &Window) -> Option<isize> {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
         _ => None,
     })
-}
-
-fn parse_widths(text: &str) -> Option<[f32; 3]> {
-    let values: Vec<f32> = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-    let (min, max) = LIST_WIDTH_RANGE;
-    (values.len() == 3 && values.iter().all(|v| (min..=max).contains(v))).then(|| [values[0], values[1], values[2]])
 }
 
 /// Internal name of the session restored at startup.
@@ -297,6 +289,8 @@ struct Explorer {
     pane_width: f32,
     pane_measured_widths: HashMap<GroupId, f32>,
     column_scroll_handles: HashMap<GroupId, gpui::ScrollHandle>,
+    /// Sideways scroll of each pane's details table.
+    list_scroll_handles: HashMap<GroupId, gpui::ScrollHandle>,
     column_reveal_keys: HashMap<GroupId, String>,
     /// Shared width of Miller columns, changed by dragging any column edge.
     column_width: f32,
@@ -304,10 +298,10 @@ struct Explorer {
     /// Each pane's own column width; `column_width` (the last set) starts new ones.
     pane_column_widths: HashMap<GroupId, f32>,
     /// Widths of the list columns Изменён, Тип, Размер; the name takes the rest.
-    list_widths: [f32; 3],
+    list_widths: [f32; 4],
     /// Dragging a list column border: column, start x, start width.
     /// Each pane's own list columns; `list_widths` (the last set) starts new ones.
-    pane_list_widths: HashMap<GroupId, [f32; 3]>,
+    pane_list_widths: HashMap<GroupId, [f32; 4]>,
     /// The item the last single click hit (see `is_double_click`).
     last_click: Option<PathBuf>,
     /// Version stacks opened by the user: (folder, family key).
@@ -576,6 +570,7 @@ impl Explorer {
             pane_width: 800.,
             pane_measured_widths: HashMap::new(),
             column_scroll_handles: Default::default(),
+            list_scroll_handles: Default::default(),
             column_reveal_keys: HashMap::new(),
             column_width: workspaces.as_ref().and_then(|store| store.value(COLUMN_WIDTH).ok().flatten())
                 .and_then(|text| text.parse::<f32>().ok()).filter(|width| width.is_finite())
@@ -583,7 +578,7 @@ impl Explorer {
             column_resize: None,
             pane_column_widths: HashMap::new(),
             list_widths: workspaces.as_ref().and_then(|store| store.value(LIST_WIDTHS).ok().flatten())
-                .and_then(|text| parse_widths(&text)).unwrap_or(DEFAULT_LIST_WIDTHS),
+                .and_then(|text| layout::parse_list_widths(&text)).unwrap_or(layout::LIST_DEFAULT),
             pane_list_widths: HashMap::new(),
             last_click: None,
             open_stacks: HashSet::new(), stacks_rev: 0, stack_versions, favorite_stars,

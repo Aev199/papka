@@ -34,6 +34,13 @@ use crate::layout::ROW_HEIGHT;
 
 /// Fixed, as in Atlas: the sidebar does not grow with the window.
 const SIDEBAR_WIDTH: f32 = 220.;
+/// Details table geometry: where the first column starts (list padding,
+/// selection stripe and row padding), the gap between columns, the icon
+/// with its gap inside the name column, and the room after the last one.
+const LIST_LEFT: f32 = 12.;
+const LIST_GAP: f32 = 8.;
+const LIST_ICON: f32 = 24.;
+const LIST_RIGHT: f32 = 20.;
 
 fn column_scroll_area<I: Into<gpui::ElementId>>(id: I, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<I> {
     div().id(id).relative().track_scroll(scroll).flex_1().min_w_0().min_h_0()
@@ -291,6 +298,10 @@ impl Explorer {
     /// Ends a list column drag and keeps the widths for the next start.
     pub(crate) fn finish_list_resize(&mut self) {
         let Some((side, ..)) = self.list_resize.take() else { return };
+        self.keep_list_widths(side);
+    }
+
+    fn keep_list_widths(&mut self, side: GroupId) {
         // Panes still on the old shared widths keep them: only this one changed.
         for id in self.browser.leaves() {
             if id != side && !self.pane_list_widths.contains_key(&id) {
@@ -300,8 +311,8 @@ impl Explorer {
         // The last widths set start new panes, now and after a restart.
         self.list_widths = self.list_widths_for(side);
         if let Some(store)=&self.workspaces {
-            let [a,b,c]=self.list_widths;
-            let _=store.set_value(crate::LIST_WIDTHS, &format!("{a:.0},{b:.0},{c:.0}"));
+            let [a,b,c,d]=self.list_widths;
+            let _=store.set_value(crate::LIST_WIDTHS, &format!("{a:.0},{b:.0},{c:.0},{d:.0}"));
         }
     }
 
@@ -1023,9 +1034,18 @@ impl Explorer {
                 .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
         } else {
-            div().flex_1().min_h_0().flex().flex_col()
-                .child(self.list_header(side, cx))
-                .child(self.column(path.clone(), side, None, cx))
+            // Columns keep their widths, as in Explorer: a table wider than
+            // the pane scrolls sideways, header and rows together.
+            let widths = self.list_widths_for(side);
+            let scroll = self.list_scroll_handles.entry(side).or_default().clone();
+            let table = px(LIST_LEFT + crate::layout::list_dividers(&widths)[3] + LIST_GAP * 4. + LIST_RIGHT);
+            div().relative().flex_1().min_w_0().min_h_0().overflow_hidden().flex()
+                .child(div().id(SharedString::from(format!("list-table-{}", side.0))).relative().track_scroll(&scroll)
+                    .flex_1().min_w_0().min_h_0().overflow_x_scroll().restrict_scroll_to_axis()
+                    .child(div().w(table).min_w_full().h_full().flex().flex_col()
+                        .child(self.list_header(side, cx))
+                        .child(self.column(path.clone(), side, None, cx))))
+                .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
         };
         let weak = cx.weak_entity();
@@ -1095,15 +1115,8 @@ impl Explorer {
             .into_any_element()
     }
 
-    /// Narrow panes drop the type and date columns, keeping names readable.
-    fn list_columns(&self, side: GroupId) -> (bool, bool) {
-        let width = self.pane_width_for(side);
-        (width >= 520., width >= 680.)
-    }
-
     fn list_header(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
         let spec = self.sort_for(side);
-        let (show_modified, show_kind) = self.list_columns(side);
         let header = |id: &'static str, label: &'static str, key: SortKey, cx: &mut Context<Self>| {
             let active = spec.key == key;
             div().id(id).h_full().px_2().flex().items_center().gap_1().cursor_pointer()
@@ -1119,26 +1132,69 @@ impl Explorer {
                 }))
         };
         let widths = self.list_widths_for(side);
-        // A fixed column with a grip on its left border: dragging it left
-        // widens the column, as in Explorer; the name column takes the rest.
-        let sized = |index: usize, cell: Stateful<Div>, cx: &mut Context<Self>| {
-            div().relative().h_full().w(px(widths[index])).flex_none()
-                .child(cell.size_full())
-                .child(div().id(("list-resize", index)).absolute().top_0().bottom_0().left(px(-5.)).w(px(9.))
-                    .cursor_col_resize().flex().justify_center()
-                    .child(div().w(px(1.)).h_full().bg(rgb(BORDER)))
-                    .hover(|style| style.bg(rgb(HOVER)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.list_resize = Some((side, index, event.position.x, this.list_widths_for(side)[index]));
-                    })))
-        };
-        div().h(px(28.)).flex_none().flex().items_center().gap_2().pl(px(36.)).pr(px(12.))
+        let cell = |index: usize, cell: Stateful<Div>| cell.w(px(widths[index])).flex_none().overflow_hidden();
+        let dividers = crate::layout::list_dividers(&widths);
+        let grip = crate::layout::LIST_GRIP;
+        // As in Explorer: the divider on a column's right edge sizes that
+        // column alone, the ones to its right move along; a double click
+        // fits it to its contents.
+        let grips = (0..4).map(|index| {
+            let x = LIST_LEFT + dividers[index] + LIST_GAP * index as f32 + LIST_GAP / 2.;
+            div().id(("list-resize", index)).absolute().top_0().bottom_0().left(px(x - grip)).w(px(grip * 2.))
+                .cursor_col_resize().flex().justify_center()
+                .child(div().w(px(1.)).h_full().bg(rgb(BORDER)))
+                .hover(|style| style.bg(rgb(HOVER)))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    if event.click_count >= 2 {
+                        this.list_resize = None;
+                        this.fit_list_column(side, index, window);
+                        cx.notify();
+                        return;
+                    }
+                    this.list_resize = Some((side, index, event.position.x, this.list_widths_for(side)[index]));
+                    this.marquee = None;
+                }))
+        }).collect::<Vec<_>>();
+        div().relative().h(px(28.)).flex_none().flex().items_center().gap(px(LIST_GAP)).pl(px(LIST_LEFT))
             .border_b_1().border_color(rgb(BORDER)).text_size(px(12.)).bg(rgb(SURFACE))
-            .child(header("sort-name", "Имя", SortKey::Name, cx).flex_1().min_w_0())
-            .when(show_modified, |this| { let cell = header("sort-modified", "Изменён", SortKey::Modified, cx); this.child(sized(0, cell, cx)) })
-            .when(show_kind, |this| { let cell = header("sort-kind", "Тип", SortKey::Kind, cx); this.child(sized(1, cell, cx)) })
-            .child({ let cell = header("sort-size", "Размер", SortKey::Size, cx).justify_end(); sized(2, cell, cx) })
+            .child(cell(0, header("sort-name", "Имя", SortKey::Name, cx)))
+            .child(cell(1, header("sort-modified", "Изменён", SortKey::Modified, cx)))
+            .child(cell(2, header("sort-kind", "Тип", SortKey::Kind, cx)))
+            .child(cell(3, header("sort-size", "Размер", SortKey::Size, cx).justify_end()))
+            .children(grips)
+    }
+
+    /// Double click on a header divider: the column takes the width of its
+    /// widest text in the open folder (and of its own title).
+    fn fit_list_column(&mut self, side: GroupId, index: usize, window: &mut Window) {
+        let folder = self.pane_path(side);
+        let Some((listing, indices)) = self.folder_view(side, &folder) else { return };
+        let font = window.text_style().font();
+        let text_system = window.text_system().clone();
+        let measure = |text: String, size: f32| -> f32 {
+            if text.is_empty() { return 0.; }
+            let run = gpui::TextRun { len: text.len(), font: font.clone(), color: gpui::black(), background_color: None,
+                underline: None, strikethrough: None, letter_spacing: None };
+            text_system.shape_line(text.into(), px(size), &[run], None).width / px(1.)
+        };
+        let title = ["Имя", "Изменён", "Тип", "Размер"][index];
+        // The title's own padding and the sort arrow.
+        let mut widest = measure(title.to_string(), 12.) + 20.;
+        for &position in indices.iter().take(5000) {
+            let entry = &listing.entries[position];
+            let width = match index {
+                0 => measure(entry.name.clone(), 13.) + LIST_ICON,
+                1 => measure(entry.modified.map(format_time).unwrap_or_default(), 12.),
+                2 => measure(kind_label(entry), 12.),
+                _ => measure(if entry.is_directory { self.folder_size_label(&entry.path) } else { format_size(entry.size) }, 12.),
+            };
+            widest = widest.max(width);
+        }
+        let mut widths = self.list_widths_for(side);
+        widths[index] = crate::layout::fit_list_column(widest, 18.);
+        self.pane_list_widths.insert(side, widths);
+        self.keep_list_widths(side);
     }
 
     fn column(&mut self, folder: PathBuf, side: GroupId, trail: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
@@ -1304,16 +1360,25 @@ impl Explorer {
                 }
                 None => icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)).into_any_element(),
             });
+        // In the table the name keeps its column's width (less the icon).
+        let name_width = list_mode.then(|| {
+            let indent = if matches!(stack, Some(Stacked::Member { .. })) { LIST_ICON } else { 0. };
+            (self.list_widths_for(side)[0] - LIST_ICON - indent).max(0.)
+        });
+        let name_cell = || match name_width {
+            Some(width) => div().w(px(width)).flex_none().min_w_0().overflow_hidden(),
+            None => div().flex_1().min_w_0(),
+        };
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
         row = if self.renaming && side == self.active_side() && self.selected.as_ref() == Some(&path) {
             // A compact field that fits the 24 px row and starts where the name does.
-            row.child(div().flex_1().min_w_0().h(px(ROW_HEIGHT)).flex().items_center().ml(px(-5.))
+            row.child(name_cell().h(px(ROW_HEIGHT)).flex().items_center().ml(px(-5.))
                 .child(Input::new(&self.rename_input).xsmall().h(px(20.)).w_full().text_size(px(13.))))
         } else {
             let badge = |text: String| div().flex_none().px_1p5().rounded_sm().text_size(px(11.))
                 .bg(rgb(if selected { SELECTED_BORDER } else { ACCENT_SOFT })).text_color(rgb(if selected { SELECTION_TEXT } else { TEXT_MUTED }))
                 .child(text);
-            let name = div().flex_1().min_w_0().flex().items_center().gap_1p5()
+            let name = name_cell().flex().items_center().gap_1p5()
                 .child(div().min_w_0().truncate().child(entry.name.clone()));
             let name = match &stack {
                 Some(Stacked::Head { key, label, others, expanded }) => {
@@ -1354,15 +1419,14 @@ impl Explorer {
             row.child(name)
         };
         if list_mode {
-            let (show_modified, show_kind) = self.list_columns(side);
             let widths = self.list_widths_for(side);
             // Cells never wrap: a narrow column cuts its text with "…".
             row = row
-                .when(show_modified, |row| row.child(div().w(px(widths[0])).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
-                    .child(entry.modified.map(format_time).unwrap_or_default())))
-                .when(show_kind, |row| row.child(div().w(px(widths[1])).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
-                    .child(kind_label(entry))))
-                .child(div().w(px(widths[2])).flex_none().px_2().flex().justify_end().text_size(px(12.))
+                .child(div().w(px(widths[1])).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
+                    .child(entry.modified.map(format_time).unwrap_or_default()))
+                .child(div().w(px(widths[2])).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
+                    .child(kind_label(entry)))
+                .child(div().w(px(widths[3])).flex_none().px_2().flex().justify_end().text_size(px(12.))
                     .text_color(rgb(metadata_text))
                     .child(div().min_w_0().truncate()
                         .child(if is_dir { self.folder_size_label(&entry.path) } else { format_size(entry.size) })));
@@ -2698,9 +2762,8 @@ impl Render for Explorer {
                 }
                 if let Some((side, index, start, width)) = this.list_resize {
                     if !event.dragging() { this.finish_list_resize(); return; }
-                    let (min, max) = crate::LIST_WIDTH_RANGE;
                     let mut widths = this.list_widths_for(side);
-                    widths[index] = (width - (event.position.x - start) / px(1.)).clamp(min, max);
+                    widths[index] = crate::layout::resize_list_column(width, (event.position.x - start) / px(1.));
                     this.pane_list_widths.insert(side, widths);
                     cx.notify();
                     return;
