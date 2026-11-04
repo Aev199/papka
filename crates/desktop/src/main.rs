@@ -72,7 +72,7 @@ impl Render for FileDragPreview {
             .pl(self.position.x + px(12.))
             .pt(self.position.y + px(8.))
             .child(
-                div().px_3().py_1().rounded_md().bg(rgb(theme::SELECTED))
+                div().px_3().py_1().rounded(px(4.)).bg(rgb(theme::SELECTED))
                     .border_1().border_color(rgb(theme::SELECTED_BORDER))
                     .text_color(rgb(theme::SELECTION_TEXT)).text_size(px(13.))
                     .child(self.name.clone())

@@ -150,7 +150,7 @@ impl Explorer {
             let parent = path.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
             let target = path.clone();
             list = list.child(gpui::div().id(("jump-folder", index)).mx_1().h(px(40.)).px_3().flex().items_center().gap_3()
-                .rounded_md().cursor_pointer()
+                .rounded(px(4.)).cursor_pointer()
                 .when(chosen, |row| row.bg(rgb(SELECTED)))
                 .when(!chosen, |row| row.hover(|style| style.bg(rgb(HOVER))))
                 .child(gpui::svg().path("fm/folder-fill.svg").size(px(16.)).flex_none()

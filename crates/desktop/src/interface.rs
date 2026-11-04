@@ -401,7 +401,7 @@ impl Explorer {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .rounded_md()
+                        .rounded(px(4.))
                         .when(chosen, |row| row.bg(rgb(SELECTED)))
                         .text_color(rgb(fg))
                         .when(!enabled, |row| row.opacity(0.4))
@@ -412,8 +412,7 @@ impl Explorer {
                             .text_color(rgb(if chosen { SELECTION_TEXT } else { TEXT_MUTED })))
                         .child(div().flex_1().min_w_0().truncate().child(command.label))
                         .when(!command.shortcut.is_empty(), |row| row.child(
-                            div().flex_none().px_1p5().rounded_sm().border_1()
-                                .border_color(rgb(if chosen { SELECTION_TEXT } else { BORDER_STRONG }))
+                            div().flex_none()
                                 .text_size(px(11.))
                                 .text_color(rgb(if chosen { SELECTION_TEXT } else { TEXT_MUTED }))
                                 .child(command.shortcut)))
@@ -444,9 +443,9 @@ impl Explorer {
             // A check box row; arrows walk them, Space toggles.
             let check = |index: usize, cx: &mut Context<Self>| {
                 let on = flag_value(settings, index);
-                div().id(("preference", index)).h(px(30.)).px_2().rounded_md().cursor_pointer()
-                    .flex().items_center().gap_2().border_1()
-                    .border_color(if index == settings.selected { rgb(ACCENT) } else { gpui::rgba(0) })
+                div().id(("preference", index)).h(px(30.)).px_2().rounded(px(4.)).cursor_pointer()
+                    .flex().items_center().gap_2()
+                    .when(index == settings.selected, |row| row.bg(rgb(HOVER)))
                     .hover(|row| row.bg(rgb(HOVER)))
                     .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
                         .when(on, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
@@ -460,8 +459,8 @@ impl Explorer {
                         }
                     }))
             };
-            let section = |title: &'static str| div().flex().flex_col().gap_0p5().p_1().rounded_md().bg(rgb(PANEL))
-                .border_1().border_color(rgb(BORDER))
+            // Plain groups under a heading, not cards inside the dialog.
+            let section = |title: &'static str| div().flex().flex_col().gap_0p5()
                 .child(div().px_2().pt_1().pb_0p5().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT_DIM)).child(title));
             let mut body = div().flex().flex_col().gap_3().text_size(px(13.))
@@ -496,8 +495,8 @@ impl Explorer {
                 use filemanager_core::update::Channel;
                 let channel = settings.update_channel;
                 let chip = |id: &'static str, label: &'static str, chosen: bool| div().id(id).h(px(24.)).px_2().flex().flex_none()
-                    .items_center().rounded_md().cursor_pointer().text_size(px(12.)).border_1()
-                    .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
+                    .items_center().rounded(px(4.)).cursor_pointer().text_size(px(12.)).border_1()
+                    .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
                     .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
                         .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))))
                     .child(label);
@@ -561,7 +560,7 @@ impl Explorer {
                         .max_w_full()
                         .when(self.palette.is_none(), |body| body.p_4())
                         .overflow_hidden()
-                        .rounded_lg()
+                        .rounded(px(6.))
                         .bg(rgb(RAISED))
                         .border_1()
                         .border_color(rgb(BORDER_STRONG))

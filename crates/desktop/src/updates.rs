@@ -350,8 +350,8 @@ impl Explorer {
             Phase::Ready(_) | Phase::RolledBack => "Перезапустить".into(),
             _ => return None,
         };
-        Some(div().id("update-badge").mr_1().h(px(22.)).px_2().flex().items_center().gap_1().rounded_full()
-            .cursor_pointer().bg(rgb(ACCENT_SOFT)).border_1().border_color(rgb(ACCENT)).text_size(px(12.)).text_color(rgb(TEXT))
+        Some(div().id("update-badge").mr_1().h(px(22.)).px_2().flex().items_center().gap_1().rounded(px(4.))
+            .cursor_pointer().bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT))
             .child(gpui::svg().path("fm/download.svg").size(px(12.)).text_color(rgb(ACCENT)))
             .child(label)
             .on_click(cx.listener(|this, _, _, cx| { this.updates.dialog = true; this.about_open = false; cx.notify(); }))
@@ -361,15 +361,15 @@ impl Explorer {
     pub(crate) fn update_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.updates.dialog { return None; }
         let button = |id: &'static str, label: &'static str, primary: bool| {
-            div().id(id).h(px(28.)).px_3().flex().items_center().rounded_md().cursor_pointer()
+            div().id(id).h(px(28.)).px_3().flex().items_center().rounded(px(4.)).cursor_pointer()
                 .when(primary, |button| button.bg(rgb(ACCENT)).text_color(rgb(SELECTION_TEXT)))
                 .when(!primary, |button| button.border_1().border_color(rgb(BORDER_STRONG)).text_color(rgb(TEXT))
                     .hover(|style| style.bg(rgb(HOVER))))
                 .child(label)
         };
         let close = |this: &mut Explorer, cx: &mut Context<Explorer>| { this.updates.dialog = false; cx.notify(); };
-        let mut card = div().id("update-card").w(px(460.)).max_w_full().p_4().flex().flex_col().gap_3().rounded_lg()
-            .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg().text_size(px(13.)).text_color(rgb(TEXT))
+        let mut card = div().id("update-card").w(px(460.)).max_w_full().p_4().flex().flex_col().gap_3().rounded(px(6.))
+            .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).text_size(px(13.)).text_color(rgb(TEXT))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         let heading = |text: String| div().text_size(px(16.)).font_weight(gpui::FontWeight::SEMIBOLD).child(text);
         let notes = |found: &Update| {

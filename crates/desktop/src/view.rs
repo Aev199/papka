@@ -79,6 +79,10 @@ pub fn apply_component_theme(cx: &mut App) {
     // No glow outside a focused field (it came out reddish); the blue
     // border is enough, as in Atlas.
     cx.global_mut::<Theme>().focus_ring = false;
+    // Flat, as in Explorer: no drop shadows, small corners.
+    cx.global_mut::<Theme>().shadow = false;
+    cx.global_mut::<Theme>().radius = px(4.);
+    cx.global_mut::<Theme>().radius_lg = px(6.);
     // Re-project onto the base layer, which draws focus rings and scrollbars.
     Theme::sync_base(cx);
 }
@@ -104,7 +108,7 @@ fn icon_button(
     enabled: bool,
 ) -> Stateful<Div> {
     let color = if !enabled { TEXT_DIM } else if active { ACCENT } else { TEXT_MUTED };
-    div().id(id).flex_none().size(px(30.)).rounded_md().flex().items_center().justify_center()
+    div().id(id).flex_none().size(px(30.)).rounded(px(4.)).flex().items_center().justify_center()
         .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
         .when(enabled, |this| this.cursor_pointer()
             .hover(|style| style.bg(rgb(HOVER)))
@@ -134,7 +138,7 @@ pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
         ButtonKind::Danger => (0x9E3A43, 0xB8454F, 0xFFFFFF, 0x9E3A43),
         ButtonKind::Ghost => (RAISED, HOVER, TEXT, BORDER_STRONG),
     };
-    div().id(id).flex_none().h(px(28.)).px_3().rounded_md().flex().items_center()
+    div().id(id).flex_none().h(px(28.)).px_3().rounded(px(4.)).flex().items_center()
         .justify_center().bg(rgb(bg)).border_1().border_color(rgb(frame)).text_color(rgb(fg)).cursor_pointer()
         .hover(move |style| style.bg(rgb(hover)))
         .child(label.into())
@@ -200,8 +204,8 @@ impl Explorer {
             let tip=tab.pane.path.display().to_string();
             strip=strip.child(div().id(("tab",index)).group("tab").flex_none().h(px(32.))
                 .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
-                .rounded_t_md().cursor_pointer()
-                .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(TEXT)).border_t_2().border_color(rgb(ACCENT)))
+                .rounded_t(px(4.)).cursor_pointer()
+                .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
                 .when(!active,|row|row.text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
                 .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
                 .child(small_icon("fm/folder-fill.svg",if active {FOLDER} else {TEXT_DIM}))
@@ -231,7 +235,7 @@ impl Explorer {
         div().h(px(34.)).w_full().flex_none().min_w_0().overflow_hidden().flex().items_center().bg(rgb(WINDOW))
             .when_some(project, |bar,name| bar.child(div().id(SharedString::from(format!("project-{}",group.0)))
                 .flex_none().max_w(px(180.)).h(px(24.)).ml_1().pl_2().pr_0p5().flex().items_center().gap_1p5()
-                .rounded_md().bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT))
+                .rounded(px(4.)).bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT))
                 .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(format!("Проект «{name}» открыт в этой панели")).build(window,cx)})
                 .child(small_icon("fm/layers.svg",ACCENT))
                 .child(div().min_w_0().truncate().child(name))
@@ -346,11 +350,11 @@ impl Explorer {
         let dots = div().flex().gap_1().children((0..TOUR.len()).map(|i| div().size(px(6.)).rounded_full()
             .bg(rgb(if i == step { ACCENT } else { BORDER_STRONG }))));
         let card = div().id("tour").w(px(460.)).p_5().flex().flex_col().gap_3()
-            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
             .child(div().flex().items_center().gap_3()
                 .child(if step == 0 { img("app/icon.png").size(px(32.)).into_any_element() }
-                    else { div().size(px(32.)).rounded_md().bg(rgb(ACCENT_SOFT)).flex().items_center().justify_center()
+                    else { div().size(px(32.)).rounded(px(4.)).bg(rgb(ACCENT_SOFT)).flex().items_center().justify_center()
                         .child(svg().path(icon).size(px(18.)).text_color(rgb(ACCENT))).into_any_element() })
                 .child(div().text_size(px(16.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(title)))
             // One height for every step: the buttons stay under the cursor.
@@ -410,7 +414,7 @@ impl Explorer {
             }
         };
         let card = div().id("comparison").w(gpui::relative(0.85)).h(gpui::relative(0.85)).flex().flex_col()
-            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
             .child(div().p_3().flex().flex_col().gap_1().border_b_1().border_color(rgb(BORDER))
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child("Сравнение папок"))
@@ -479,7 +483,7 @@ impl Explorer {
         let (open, preview) = (path.clone(), path.clone());
         let document = crate::quick_look::is_document(&path);
         let card = div().id("quick-look").w(gpui::relative(0.8)).h(gpui::relative(0.85)).flex().flex_col()
-            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
             .child(div().h(px(40.)).flex_none().px_3().flex().items_center().gap_2().border_b_1().border_color(rgb(BORDER))
                 .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(name))
@@ -542,8 +546,8 @@ impl Explorer {
         div().id("about-backdrop").absolute().inset_0()
             .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.about_open=false;cx.notify();}))
             .child(div().id("about-panel").absolute().top(px(36.)).right(px(12.)).w(px(340.)).p_4()
-                .flex().flex_col().gap_2().rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
-                .shadow_lg().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                .flex().flex_col().gap_2().rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
+                .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                 .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
                 .child(div().flex().items_center().gap_2()
                     .child(img("app/icon.png").size(px(28.)))
@@ -615,7 +619,7 @@ impl Explorer {
         let skip = if self.pane_width_for(side)<400. && chain.len()>2 {chain.len()-1}
             else if chain.len()>6 {chain.len()-4} else {0};
         let mut crumbs = div().id("breadcrumbs").flex_1().min_w_0().h(px(30.)).px_1()
-            .flex().items_center().gap_0p5().overflow_hidden().rounded_md()
+            .flex().items_center().gap_0p5().overflow_hidden().rounded(px(4.))
             .hover(|style| style.bg(rgb(HOVER))).cursor_text()
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.focus_group(side,cx);
@@ -687,7 +691,7 @@ impl Explorer {
         let path = place.path.clone();
         let middle=path.clone();
         let spring=path.clone();
-        div().id(id).h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
+        div().id(id).h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
             .cursor_pointer()
             .when(framed, |this| this.mx_2())
             .when(active, |this| this.text_color(rgb(TEXT)))
@@ -794,7 +798,7 @@ impl Explorer {
                     let used = 1. - free as f32 / total.max(1) as f32;
                     let color = if used > 0.9 { DANGER } else if active { ACCENT } else { TEXT_DIM };
                     let target = place.path.clone();
-                    div().id(("drive-block", index)).mx_2().rounded_md().group("drive-block")
+                    div().id(("drive-block", index)).mx_2().rounded(px(4.)).group("drive-block")
                         .when(active, |block| block.bg(rgb(ACCENT_SOFT)))
                         .when(!active, |block| block.hover(|style| style.bg(rgb(HOVER))))
                         .child(row.when(!active, |row| row.group_hover("drive-block", |style| style.text_color(rgb(TEXT)))))
@@ -821,7 +825,7 @@ impl Explorer {
             let delete_name = name.clone();
             side = side.child(
                 div().id(("workspace", index)).group("workspace").mx_2().h(px(28.)).px_2().flex().items_center()
-                    .gap_2().rounded_md().cursor_pointer().text_color(rgb(TEXT_MUTED))
+                    .gap_2().rounded(px(4.)).cursor_pointer().text_color(rgb(TEXT_MUTED))
                     .when(self.browser.project_group(name).is_some(),|row|row.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                     .child(icon("fm/layers.svg", TEXT_MUTED))
@@ -868,7 +872,7 @@ impl Explorer {
         label: &'static str,
         click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
-        div().id(id).mx_2().h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
+        div().id(id).mx_2().h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
             .cursor_pointer().text_color(rgb(TEXT_MUTED))
             .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
             .child(icon(icon_path, TEXT_MUTED))
@@ -879,7 +883,7 @@ impl Explorer {
 
     fn drop_zone(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let items = self.zone.items();
-        let mut zone = div().id("drop-zone").mx_2().p_2().rounded_md().flex().flex_col().gap_1()
+        let mut zone = div().id("drop-zone").mx_2().p_2().rounded(px(4.)).flex().flex_col().gap_1()
             .when(!items.is_empty(), |zone| zone.border_1().border_color(rgb(BORDER)).bg(rgb(SURFACE)))
             .drag_over::<FileDragInfo>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)))
@@ -1088,7 +1092,7 @@ impl Explorer {
             }))
             .when_some(self.dock_hover.filter(|(id,_)|*id==side).map(|(_,zone)|zone),|pane,zone| {
                 use crate::layout::DockZone::*;
-                let overlay=div().absolute().bg(crate::theme::accent_alpha(0x22)).border_2().border_color(rgb(ACCENT)).rounded(px(6.));
+                let overlay=div().absolute().bg(crate::theme::accent_alpha(0x22)).border_1().border_color(rgb(ACCENT));
                 let overlay=match zone {
                     Left=>overlay.left_0().top_0().bottom_0().w(gpui::relative(0.5)),
                     Right=>overlay.right_0().top_0().bottom_0().w(gpui::relative(0.5)),
@@ -1326,7 +1330,7 @@ impl Explorer {
         let tint = if selected { SELECTION_TEXT } else { tint };
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
             .w_full().h(px(ROW_HEIGHT)).pl(px(6.)).pr_2().flex().items_center().gap_2()
-            .border_l_2().border_color(rgb(if selected && focused_pane { ACCENT } else { bg.unwrap_or(base) }))
+            .border_l_2().border_color(rgb(bg.unwrap_or(base)))
             .text_size(px(13.)).text_color(rgb(text)).cursor_pointer()
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
@@ -1372,7 +1376,7 @@ impl Explorer {
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
         row = if self.renaming && side == self.active_side() && self.selected.as_ref() == Some(&path) {
             // A compact field that fits the 24 px row and starts where the name does.
-            row.child(name_cell().h(px(ROW_HEIGHT)).flex().items_center().ml(px(-5.))
+            row.child(name_cell().h(px(ROW_HEIGHT)).flex().items_center().ml(px(-5.)).mr(px(5.)).text_color(rgb(TEXT))
                 .child(Input::new(&self.rename_input).xsmall().h(px(20.)).w_full().text_size(px(13.))))
         } else {
             let badge = |text: String| div().flex_none().px_1p5().rounded_sm().text_size(px(11.))
@@ -1405,9 +1409,8 @@ impl Explorer {
                     let dot = div().size(px(8.)).flex_none().rounded_full().bg(gpui::rgb(color))
                         .when(selected, |dot| dot.border_1().border_color(rgb(SELECTION_TEXT)));
                     if list_mode {
-                        name.child(div().flex_none().h(px(16.)).px_1p5().flex().items_center().gap_1().rounded_full()
+                        name.child(div().flex_none().flex().items_center().gap_1()
                             .text_size(px(11.))
-                            .bg(if selected { gpui::rgba(0xFFFFFF2E) } else { gpui::rgba((color << 8) | 0x24) })
                             .text_color(if selected { rgb(SELECTION_TEXT) } else { gpui::rgb(color) })
                             .child(dot).child(label.name()))
                     } else {
@@ -1505,9 +1508,9 @@ impl Explorer {
         use crate::search_panel::{DEPTHS, PERIODS, SYNTAX_HINT};
         let root = self.search_root.clone().unwrap_or_default();
         let chip = |id: &'static str, label: &'static str, active: bool| {
-            div().id(id).h(px(24.)).px_2().flex().items_center().gap_1().rounded_md().cursor_pointer()
+            div().id(id).h(px(24.)).px_2().flex().items_center().gap_1().rounded(px(4.)).cursor_pointer()
                 .text_size(px(12.)).border_1()
-                .when(active, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
+                .when(active, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
                 .when(!active, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
                 .child(label)
@@ -1575,7 +1578,7 @@ impl Explorer {
                 let dim = if selected { SELECTION_TEXT } else { TEXT_DIM };
                 let reveal = hit.path.clone();
                 div().id(("search-hit", index)).group("hit").w_full().h(px(ROW_HEIGHT)).px_2().flex().items_center().gap_2()
-                    .rounded_md().cursor_pointer().text_color(rgb(text))
+                    .rounded(px(4.)).cursor_pointer().text_color(rgb(text))
                     .when(selected, |row| row.bg(rgb(SELECTED)))
                     .when(!selected, |row| row.hover(|style| style.bg(rgb(HOVER))))
                     .child(match this.system_icon(&hit.path).filter(|_| !hit.is_dir) {
@@ -1662,7 +1665,7 @@ impl Explorer {
             }
             for entry in &self.operation_alerts {
                 panel = panel.child(
-                    div().p_2().rounded_md().bg(rgb(RAISED)).flex().flex_col().gap_1().text_size(px(12.))
+                    div().p_2().rounded(px(4.)).bg(rgb(RAISED)).flex().flex_col().gap_1().text_size(px(12.))
                         .child(format!("#{} · {} · {}", entry.id, entry.action, entry.status))
                         .child(match entry.phase.as_deref() {
                             Some("move_copying") => "Этап: создание копии",
@@ -1878,9 +1881,9 @@ impl Explorer {
             .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("Изменения в «{}»", browser::display_name(&current))))
             .child(div().flex().flex_wrap().gap_1().children(PERIODS.iter().enumerate().map(|(index, (label, _))| {
                 let chosen = index == self.feed.period;
-                div().id(("feed-period", index)).h(px(22.)).px_2().flex().items_center().rounded_md().cursor_pointer()
+                div().id(("feed-period", index)).h(px(22.)).px_2().flex().items_center().rounded(px(4.)).cursor_pointer()
                     .text_size(px(11.)).border_1()
-                    .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
+                    .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
                     .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED)).hover(|style| style.bg(rgb(HOVER))))
                     .child(*label)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_feed_period(index, cx)))
@@ -2001,11 +2004,11 @@ impl Explorer {
             .when_some(count, |this, count| this.child(items_label(count)))
             .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
             .when_some(self.label_filter(self.browser.active), |this, label| this.child(
-                div().id("label-filter").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded_full()
-                    .bg(gpui::rgba((crate::labels::color(label) << 8) | 0x2E)).text_color(rgb(TEXT))
+                div().id("label-filter").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded(px(4.))
+                    .bg(rgb(HOVER)).text_color(rgb(TEXT))
                     .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(crate::labels::color(label))))
                     .child(format!("Только «{}»", label.name()))
-                    .child(div().id("label-filter-clear").size(px(16.)).rounded_full().flex().items_center().justify_center()
+                    .child(div().id("label-filter-clear").size(px(16.)).rounded(px(4.)).flex().items_center().justify_center()
                         .cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
                         .child(small_icon("fm/x.svg", TEXT_MUTED))
                         .tooltip(|window, cx| Tooltip::new("Показать все файлы").build(window, cx))
@@ -2089,7 +2092,7 @@ impl Explorer {
         let tip = label.clone();
         // Long labels end in "…" with the full text in a tooltip; the
         // shortcut keeps its place inside the menu.
-        div().id(id).h(px(28.)).flex_none().px_2().flex().items_center().gap_2().rounded_md()
+        div().id(id).h(px(28.)).flex_none().px_2().flex().items_center().gap_2().rounded(px(4.))
             .text_size(px(13.)).text_color(rgb(color))
             .when(enabled, |this| this.cursor_pointer().hover(|style| style.bg(rgb(if danger { 0x3A2128 } else { HOVER }))))
             .when(tip.chars().count() > 34, |this| this.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)))
@@ -2148,7 +2151,7 @@ impl Explorer {
         let max_height = window.viewport_size().height - px(16.);
         let mut list = div().id(("context-menu", menu.serial as usize)).occlude().w(px(300.)).max_h(max_height)
             .overflow_y_scroll().p_1().flex().flex_col()
-            .rounded_lg().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .rounded(px(6.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.context_menu = None;
                 cx.notify();
@@ -2494,7 +2497,7 @@ impl Explorer {
             for error in &self.bulk_rename_errors { rows = rows.child(error.clone()); }
             return Some(div().id("bulk-rename-result").absolute().inset_0().flex().items_center().justify_center()
                 .bg(rgba(0x0000008C))
-                .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded_md().bg(rgb(RAISED))
+                .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded(px(4.)).bg(rgb(RAISED))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child("Ошибки переименования группы")
                     .child(rows)
@@ -2505,7 +2508,7 @@ impl Explorer {
         }
         let state = self.bulk_rename.as_ref()?;
         let mut rows = div().id("bulk-rename-rows").max_h(px(320.)).overflow_y_scrollbar()
-            .flex().flex_col().gap_2().p_2().rounded_md().bg(rgb(SURFACE));
+            .flex().flex_col().gap_2().p_2().rounded(px(4.)).bg(rgb(SURFACE));
         if state.loading { rows = rows.child("Проверка имён…"); }
         if let Some(error) = &state.error { rows = rows.child(error.clone()); }
         if let Some(preview) = &state.preview {
@@ -2530,8 +2533,8 @@ impl Explorer {
         }
         Some(div().id("bulk-rename-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x0000008C))
-            .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded_xl()
-                .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded(px(6.))
+                .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Массовое переименование"))
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
@@ -2549,7 +2552,7 @@ impl Explorer {
         let recycle = filemanager_core::path_utils::has_recycle_bin(&transfer.target);
         let names: Vec<String> = conflicts.iter().take(4).map(|p| browser::display_name(p)).collect();
         let more = conflicts.len().saturating_sub(names.len());
-        let mut list = div().flex().flex_col().gap_1().p_2().rounded_md().bg(rgb(SURFACE))
+        let mut list = div().flex().flex_col().gap_1().p_2().rounded(px(4.)).bg(rgb(SURFACE))
             .border_1().border_color(rgb(BORDER)).text_size(px(12.));
         for name in names {
             list = list.child(div().flex().items_center().gap_2()
@@ -2559,7 +2562,7 @@ impl Explorer {
             list = list.child(div().text_color(rgb(TEXT_DIM)).child(format!("и ещё {more}")));
         }
         let dialog = div().id("conflict-dialog").w(px(460.)).p_4().flex().flex_col().gap_3()
-            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(format!("Совпадают имена: {}", conflicts.len())))
@@ -2631,7 +2634,7 @@ impl Explorer {
             return None;
         };
         let dialog = div().id("dialog").w(px(420.)).p_4().flex().flex_col().gap_3()
-            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(body)
@@ -2903,7 +2906,7 @@ impl Render for Explorer {
                 many => format!("{} элементов", many.len()),
             };
             root=root.child(div().absolute().left(drag.position.x+px(14.)).top(drag.position.y+px(10.))
-                .px_3().py_1().rounded_md().bg(rgb(SELECTED)).border_1().border_color(rgb(SELECTED_BORDER))
+                .px_3().py_1().rounded(px(4.)).bg(rgb(SELECTED)).border_1().border_color(rgb(SELECTED_BORDER))
                 .text_color(rgb(SELECTION_TEXT)).text_size(px(13.)).child(name));
         }
         self.follow_quick_look(cx);
