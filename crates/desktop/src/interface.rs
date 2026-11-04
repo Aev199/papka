@@ -391,7 +391,7 @@ impl Explorer {
                 }
                 let enabled = self.command_enabled(&command);
                 let chosen = index == palette.selected;
-                let fg = if chosen { SELECTION_TEXT } else { TEXT };
+                let fg = TEXT;
                 list = list.child(
                     div()
                         .id(("palette-command", index))
@@ -401,20 +401,22 @@ impl Explorer {
                         .flex()
                         .items_center()
                         .gap_3()
+                        .relative()
                         .rounded(px(4.))
-                        .when(chosen, |row| row.bg(rgb(SELECTED)))
+                        // A quiet highlight with the accent mark, not a filled bar.
+                        .when(chosen, |row| row.bg(rgb(ACCENT_SOFT)).child(crate::view::focus_mark()))
                         .text_color(rgb(fg))
                         .when(!enabled, |row| row.opacity(0.4))
                         .when(enabled, |row| {
                             row.cursor_pointer().when(!chosen, |row| row.hover(|s| s.bg(rgb(HOVER))))
                         })
                         .child(gpui::svg().path(command_icon(command.id)).size(px(14.)).flex_none()
-                            .text_color(rgb(if chosen { SELECTION_TEXT } else { TEXT_MUTED })))
+                            .text_color(rgb(if chosen { ACCENT } else { TEXT_MUTED })))
                         .child(div().flex_1().min_w_0().truncate().child(command.label))
                         .when(!command.shortcut.is_empty(), |row| row.child(
                             div().flex_none()
                                 .text_size(px(11.))
-                                .text_color(rgb(if chosen { SELECTION_TEXT } else { TEXT_MUTED }))
+                                .text_color(rgb(TEXT_MUTED))
                                 .child(command.shortcut)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.execute_command(command, window, cx)
@@ -443,10 +445,10 @@ impl Explorer {
             // A check box row; arrows walk them, Space toggles.
             let check = |index: usize, cx: &mut Context<Self>| {
                 let on = flag_value(settings, index);
-                div().id(("preference", index)).h(px(30.)).px_2().rounded(px(4.)).cursor_pointer()
+                div().id(("preference", index)).relative().h(px(30.)).px_2().rounded(px(4.)).cursor_pointer()
                     .flex().items_center().gap_2()
-                    .when(index == settings.selected, |row| row.bg(rgb(HOVER)))
-                    .hover(|row| row.bg(rgb(HOVER)))
+                    .when(index == settings.selected, |row| row.bg(rgb(ACCENT_SOFT)).child(crate::view::focus_mark()))
+                    .when(index != settings.selected, |row| row.hover(|row| row.bg(rgb(HOVER))))
                     .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
                         .when(on, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
                         .when(!on, |b| b.border_1().border_color(rgb(BORDER_STRONG))))

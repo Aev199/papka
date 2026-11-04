@@ -99,6 +99,14 @@ fn small_icon(path: &'static str, color: u32) -> gpui::Svg {
     svg().path(path).flex_none().size(px(14.)).text_color(rgb(color))
 }
 
+/// The one quiet "you are here" sign, as in Windows 11: a short accent bar
+/// on the left of the current row (place, command, setting). The row must
+/// be `relative()`.
+pub(crate) fn focus_mark() -> Div {
+    div().absolute().left(px(0.)).top_0().bottom_0().flex().items_center()
+        .child(div().w(px(3.)).h(px(16.)).rounded(px(1.5)).bg(rgb(ACCENT)))
+}
+
 /// Square ghost button with an icon and a tooltip.
 fn icon_button(
     id: impl Into<ElementId>,
@@ -198,17 +206,20 @@ impl Explorer {
                 let end=this.browser.group(group).map(|g|g.tabs.len()).unwrap_or(0);
                 this.move_tab_to(drag,group,end,cx);
             }));
+        let focused=group==self.browser.active;
         for (index,tab) in tabs.iter().enumerate() {
             let active=index==active_index;
             let closable=(tabs.len()>1 || self.browser.groups.len()>1) && !tab.pinned;
             let tip=tab.pane.path.display().to_string();
-            strip=strip.child(div().id(("tab",index)).group("tab").flex_none().h(px(32.))
+            strip=strip.child(div().id(("tab",index)).group("tab").relative().flex_none().h(px(32.))
                 .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
                 .rounded_t(px(4.)).cursor_pointer()
-                .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(if focused {TEXT} else {TEXT_MUTED})))
+                .when(active && focused,|row|row.child(div().absolute().bottom_0().left(px(10.)).right(px(10.)).h(px(2.))
+                    .rounded(px(1.)).bg(rgb(ACCENT))))
                 .when(!active,|row|row.text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
                 .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
-                .child(small_icon("fm/folder-fill.svg",if active {FOLDER} else {TEXT_DIM}))
+                .child(small_icon("fm/folder-fill.svg",if active && focused {FOLDER} else {TEXT_DIM}))
                 .when(tab.pinned,|row|row.child(div().text_color(rgb(ACCENT)).child("●")))
                 .child(div().flex_1().min_w_0().truncate().child(titles[index].clone()))
                 .when(closable,|row|row.child(div().id(("tab-close",index)).flex_none().size(px(20.)).rounded_sm()
@@ -267,7 +278,7 @@ impl Explorer {
         let body=self.pane(group,cx);
         div().id(SharedString::from(format!("group-{}",group.0))).size_full().min_w_0().min_h_0()
             .flex().flex_col().overflow_hidden().border_1()
-            .border_color(rgb(if group==self.browser.active {ACTIVE_PANE} else {BORDER}))
+            .border_color(rgb(if group==self.browser.active && self.browser.leaves().len()>1 {ACTIVE_PANE} else {BORDER}))
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx|this.focus_group(group,cx)))
             .child(tabs).child(navigation).child(div().flex_1().min_h_0().child(body)).into_any_element()
     }
@@ -667,8 +678,11 @@ impl Explorer {
         let can_back = pane.can_go_back();
         let can_forward = pane.can_go_forward();
         let can_up = pane.path.parent().is_some();
+        // The pane that is not being worked in steps back a little.
+        let focused = side == self.browser.active || self.browser.leaves().len() < 2;
         div().w_full().h(px(36.)).flex_none().flex().items_center().gap_1().px_2()
             .bg(rgb(SURFACE)).border_b_1().border_color(rgb(BORDER))
+            .when(!focused, |row| row.opacity(0.6))
             .child(icon_button("back", "fm/arrow-left.svg", "Назад (Alt+←)", false, can_back)
                 .on_click(cx.listener(move |this, _, _, cx| {this.focus_group(side,cx);this.go_back(false,cx);})))
             .child(icon_button("forward", "fm/arrow-right.svg", "Вперёд (Alt+→)", false, can_forward)
@@ -691,8 +705,9 @@ impl Explorer {
         let path = place.path.clone();
         let middle=path.clone();
         let spring=path.clone();
-        div().id(id).h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
+        div().id(id).relative().h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
             .cursor_pointer()
+            .when(active && framed, |this| this.child(focus_mark()))
             .when(framed, |this| this.mx_2())
             .when(active, |this| this.text_color(rgb(TEXT)))
             .when(active && framed, |this| this.bg(rgb(ACCENT_SOFT)))
@@ -798,8 +813,8 @@ impl Explorer {
                     let used = 1. - free as f32 / total.max(1) as f32;
                     let color = if used > 0.9 { DANGER } else if active { ACCENT } else { TEXT_DIM };
                     let target = place.path.clone();
-                    div().id(("drive-block", index)).mx_2().rounded(px(4.)).group("drive-block")
-                        .when(active, |block| block.bg(rgb(ACCENT_SOFT)))
+                    div().id(("drive-block", index)).relative().mx_2().rounded(px(4.)).group("drive-block")
+                        .when(active, |block| block.bg(rgb(ACCENT_SOFT)).child(focus_mark()))
                         .when(!active, |block| block.hover(|style| style.bg(rgb(HOVER))))
                         .child(row.when(!active, |row| row.group_hover("drive-block", |style| style.text_color(rgb(TEXT)))))
                         .child(div().id(("drive-space", index)).pl(px(32.)).pr_2().pb_1p5().flex().flex_col().gap_1().cursor_pointer()
