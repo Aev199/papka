@@ -119,7 +119,7 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
         (List, "Вид список", "Ctrl+1", VIEW),
         (Columns, "Вид колонки", "Ctrl+2", VIEW),
         (Settings, "Настройки", "Ctrl+,", VIEW),
-        (Tour, "Экскурс по возможностям", "", VIEW),
+        (Tour, "Основные приёмы и клавиши", "", VIEW),
     ]
     .into_iter()
     .chain(labels)

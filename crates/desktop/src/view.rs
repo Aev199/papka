@@ -355,37 +355,35 @@ impl Explorer {
         if let Some(store)=&self.workspaces { let _=store.set_flag(crate::TOUR_SEEN); }
         cx.notify();
     }
-    fn tour_view(&self, step: usize, cx: &mut Context<Self>) -> AnyElement {
-        let (icon, title, text) = TOUR[step.min(TOUR.len()-1)];
-        let last = step + 1 >= TOUR.len();
-        let dots = div().flex().gap_1().children((0..TOUR.len()).map(|i| div().size(px(6.)).rounded_full()
-            .bg(rgb(if i == step { ACCENT } else { BORDER_STRONG }))));
-        let card = div().id("tour").w(px(460.)).p_5().flex().flex_col().gap_3()
-            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
+    /// One page of the main moves, keys on the left: read at a glance,
+    /// closed with one button or Esc.
+    fn tour_view(&self, _step: usize, cx: &mut Context<Self>) -> AnyElement {
+        let mut list = div().flex().flex_col().gap_3();
+        for (heading, rows) in TOUR {
+            let mut group = div().flex().flex_col()
+                .child(div().pb_1().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT_DIM))
+                    .child(*heading));
+            for (keys, action) in *rows {
+                group = group.child(div().flex().items_start().gap_3().py(px(3.)).text_size(px(13.)).line_height(px(18.))
+                    .child(div().w(px(130.)).flex_none().text_color(rgb(TEXT_MUTED)).child(*keys))
+                    .child(div().flex_1().min_w_0().text_color(rgb(TEXT)).child(*action)));
+            }
+            list = list.child(group);
+        }
+        let card = div().id("tour").w(px(520.)).max_w_full().p_5().flex().flex_col().gap_4()
+            .rounded(px(6.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
-            .child(div().flex().items_center().gap_3()
-                .child(if step == 0 { img("app/icon.png").size(px(32.)).into_any_element() }
-                    else { div().size(px(32.)).rounded(px(4.)).bg(rgb(ACCENT_SOFT)).flex().items_center().justify_center()
-                        .child(svg().path(icon).size(px(18.)).text_color(rgb(ACCENT))).into_any_element() })
-                .child(div().text_size(px(16.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(title)))
-            // One height for every step: the buttons stay under the cursor.
-            .child(div().min_h(px(120.)).text_size(px(13.)).line_height(px(20.)).text_color(rgb(TEXT_MUTED)).child(text))
-            .child(div().pt_2().flex().items_center().gap_2()
-                .child(dots)
-                .child(div().flex_1())
-                .when(!last, |row| row.child(text_button("tour-skip", "Пропустить", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this,_,_,cx| this.close_tour(cx)))))
-                .when(step > 0, |row| row.child(text_button("tour-back", "Назад", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this,_,_,cx| {this.tour=this.tour.map(|s| s.saturating_sub(1));cx.notify();}))))
-                .child(text_button("tour-next", if last { "Начать работу" } else { "Далее" }, ButtonKind::Primary)
-                    .on_click(cx.listener(move |this,_,_,cx| {
-                        if last { this.close_tour(cx); } else { this.tour=Some(step+1); cx.notify(); }
-                    }))));
+            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child("Основные приёмы"))
+            .child(list)
+            .child(div().pt_1().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                    .child("Открыть снова: «?» вверху справа или Ctrl+K"))
+                .child(text_button("tour-next", "Понятно", ButtonKind::Primary)
+                    .on_click(cx.listener(|this,_,_,cx| this.close_tour(cx)))));
         div().id("tour-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x0000008C))
             .child(card)
-            .with_animation("tour-appear", motion(150),
-                |this, delta| this.opacity(delta))
+            .with_animation("tour-appear", motion(130), |this, delta| this.opacity(delta))
             .into_any_element()
     }
 
@@ -575,7 +573,7 @@ impl Explorer {
                         .on_click(|_,_,cx| cx.open_url("https://t.me/aevd19"))))
                 .child(div().text_color(rgb(TEXT_DIM)).child(format!("Настройки и журналы: {data}")))
                 .child(div().pt_1().flex().flex_wrap().gap_1()
-                    .child(text_button("about-tour", "Экскурс по возможностям", ButtonKind::Ghost)
+                    .child(text_button("about-tour", "Основные приёмы", ButtonKind::Ghost)
                         .on_click(cx.listener(|this,_,_,cx| {this.about_open=false;this.open_tour(cx);})))
                     .child(text_button("about-update", if matches!(self.updates.phase, crate::updates::Phase::Checking) {"Проверяем…"} else {"Проверить обновления"}, ButtonKind::Ghost)
                         .on_click(cx.listener(|this,_,_,cx| this.check_updates(true,cx))))
@@ -2940,33 +2938,30 @@ fn outside_window(position: Point<Pixels>, window: &Window) -> bool {
     position.x < px(0.) || position.y < px(0.) || position.x >= size.width || position.y >= size.height
 }
 
-/// The feature tour: icon, title, text. Shown once at first start and again
+/// The main moves, by group: keys and what they do. Shown once at first start and again
 /// from «О программе» or the command palette.
-const TOUR: &[(&str, &str, &str)] = &[
-    ("fm/app.svg", "Добро пожаловать в Papka",
-        "Короткий экскурс по возможностям — 7 шагов. Его можно открыть снова: кнопка «?» в заголовке окна \
-        или палитра команд (Ctrl+K)."),
-    ("fm/columns.svg", "Колонки и список",
-        "Колонки показывают весь путь к папке: → открывает папку, ← возвращает к родительской. \
-        Ctrl+1 — список с датами и размерами, Ctrl+2 — колонки; у каждой панели вид свой. \
-        Боковые кнопки мыши листают историю, как в Проводнике."),
-    ("fm/split.svg", "Панели и вкладки",
-        "Ctrl+Shift+S делит окно справа, Ctrl+Alt+S — снизу, до четырёх панелей. У каждой панели свои вкладки: \
-        Ctrl+T — новая, Ctrl+W — закрыть. Вкладку можно перетащить в другую панель или на край. \
-        Закреплённая вкладка (правая кнопка → «Закрепить вкладку») не закрывается."),
-    ("fm/layers.svg", "Проекты и избранное",
-        "«Создать проект…» в боковой панели запоминает вкладки активной панели. Проект открывается в одной панели, \
-        остальные не меняются; крестик на плашке проекта возвращает прежние вкладки. \
-        Звезда в строке пути добавляет папку в избранное."),
-    ("fm/move.svg", "Перетаскивание и удаление",
-        "Перетащите файлы в другую панель: на том же диске — перенос, на другом — копия; с Ctrl — копия, с Shift — перенос. \
-        Правой кнопкой — меню «Копировать / Переместить». За край окна — в Проводник или расчётную программу. \
-        Del — в Корзину, Ctrl+Z — отменить."),
-    ("fm/search.svg", "Поиск и команды",
-        "Ctrl+F — поиск файлов, Ctrl+L — ввести путь, Ctrl+K — все команды с клавишами. \
-        Набор в английской раскладке тоже находит: «yfcnh» — это «настр»."),
-    ("fm/history.svg", "Версии и лента изменений",
-        "Версии одного документа («Отчёт_v_1_6») показываются одной строкой — последней; стрелка у метки раскрывает прежние. \
-        Ctrl+I открывает панель сведений с лентой изменений папки: что и когда появилось, изменилось или пропало. \
-        Хранятся только сведения о файлах, не их копии."),
+const TOUR: &[(&str, &[(&str, &str)])] = &[
+    ("ПАПКИ", &[
+        ("→  ←", "в колонках: войти в папку и выйти из неё"),
+        ("Ctrl+1  Ctrl+2", "список или колонки, у каждой панели свой"),
+        ("Alt+←  Alt+→", "назад и вперёд, или боковые кнопки мыши"),
+        ("Ctrl+L", "ввести путь"),
+    ]),
+    ("ПАНЕЛИ И ВКЛАДКИ", &[
+        ("Ctrl+Shift+S", "разделить окно вправо"),
+        ("Ctrl+Alt+S", "разделить окно вниз"),
+        ("Tab", "перейти в другую панель"),
+        ("Ctrl+T  Ctrl+W", "новая вкладка, закрыть вкладку"),
+    ]),
+    ("ФАЙЛЫ", &[
+        ("Перетаскивание", "на том же диске — перенос, на другом — копия"),
+        ("+Ctrl  +Shift", "при перетаскивании: копия, перенос"),
+        ("F2", "переименовать"),
+        ("Del  Ctrl+Z", "в Корзину, отменить"),
+    ]),
+    ("ПОИСК И СВЕДЕНИЯ", &[
+        ("Ctrl+F", "поиск файлов"),
+        ("Ctrl+K", "все команды и их клавиши"),
+        ("Ctrl+I", "сведения о файле и лента изменений папки"),
+    ]),
 ];
