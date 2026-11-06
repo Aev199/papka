@@ -17,6 +17,7 @@ actions!(filemanager, [
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
     CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
     OpenJump, FilterEnter, FilterSearch, LabelWork, LabelReview, LabelIssued, LabelObsolete, LabelImportant, LabelClear,
+    CopyToOther, MoveToOther, NewFile, Terminal, TerminalAdmin,
 ]);
 
 const CONTEXT: &str = "Filemanager";
@@ -71,6 +72,11 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-l", AddressBar, Some(CONTEXT)),
         KeyBinding::new("f2", RenameSelected, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-n", NewFolder, Some(CONTEXT)),
+        KeyBinding::new("ctrl-n", NewFile, Some(CONTEXT)),
+        KeyBinding::new("alt-c", CopyToOther, Some(CONTEXT)),
+        KeyBinding::new("alt-m", MoveToOther, Some(CONTEXT)),
+        KeyBinding::new("f10", Terminal, Some(CONTEXT)),
+        KeyBinding::new("ctrl-f10", TerminalAdmin, Some(CONTEXT)),
         KeyBinding::new("escape", DismissOverlay, Some(CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(CONTEXT)),
         KeyBinding::new("up", SelectPrev, Some(CONTEXT)),
@@ -529,14 +535,30 @@ impl Explorer {
     }
 
     pub(crate) fn begin_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_new_item(false, window, cx);
+    }
+
+    /// Ctrl+N: an empty text file, named in the same dialog as a folder.
+    pub(crate) fn begin_new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_new_item(true, window, cx);
+    }
+
+    fn begin_new_item(&mut self, file: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         let folder = self.pane_path(self.active_side());
         if self.refuse_in_archive(&folder, cx) { return; }
         self.creating_folder = true;
-        // As Explorer: the suggested name is selected, typing replaces it.
+        self.creating_file = file;
+        let name = filemanager_core::path_utils::free_name(&folder, if file { "Новый текстовый документ.txt" } else { "Новая папка" });
+        // As Explorer: the suggested name is selected (a file's without its
+        // extension), typing replaces it.
+        let stem = name.rfind('.').filter(|dot| file && *dot > 0);
         self.folder_input.update(cx, |input, cx| {
-            input.set_value("Новая папка", window, cx);
-            input.select_all(window, cx);
+            input.set_value(name.clone(), window, cx);
+            match stem {
+                Some(dot) => input.set_selected_range(0..dot, cx),
+                None => input.select_all(window, cx),
+            }
         });
         let focus = self.folder_input.focus_handle(cx);
         window.focus(&focus, cx);
@@ -588,6 +610,40 @@ impl Explorer {
     }
     pub(crate) fn key_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_new_folder(window, cx);
+    }
+
+    /// Alt+C / Alt+M: the selection goes to the folder of the other pane,
+    /// through the same checked transfer as a drag.
+    pub(crate) fn transfer_to_other(&mut self, copy: bool, cx: &mut Context<Self>) {
+        let Some(other) = self.browser.other_group(self.browser.active) else {
+            self.status = "Откройте вторую панель (Ctrl+Shift+S): туда пойдут файлы".into();
+            cx.notify();
+            return;
+        };
+        let paths = self.selection();
+        if paths.is_empty() {
+            self.status = "Сначала выберите файлы".into();
+            cx.notify();
+            return;
+        }
+        let target = self.pane_path(other);
+        if paths.iter().all(|path| path.parent() == Some(target.as_path())) {
+            self.status = "Во второй панели та же папка".into();
+            cx.notify();
+            return;
+        }
+        self.drop_into(&paths, target, copy, cx);
+    }
+
+    /// F10 / Ctrl+F10: a terminal in the current folder.
+    pub(crate) fn open_terminal(&mut self, admin: bool, cx: &mut Context<Self>) {
+        let folder = self.pane_path(self.active_side());
+        if self.refuse_in_archive(&folder, cx) { return; }
+        self.status = match filemanager_core::terminal::open(&folder, admin) {
+            Ok(()) => format!("Терминал открыт в «{}»", browser::display_name(&folder)),
+            Err(error) => format!("Не удалось открыть терминал: {error}"),
+        };
+        cx.notify();
     }
 
     /// Escape never submits a filesystem change or silently cancels a copy.

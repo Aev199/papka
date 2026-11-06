@@ -326,6 +326,8 @@ struct Explorer {
     bulk_rename_generation: u64,
     folder_input: Entity<InputState>,
     creating_folder: bool,
+    /// The new-item dialog makes a file rather than a folder.
+    creating_file: bool,
     renaming: bool,
     undo_stack: Vec<Undo>,
     directory_cache: HashMap<PathBuf, Arc<browser::Listing>>,
@@ -592,6 +594,7 @@ impl Explorer {
             bulk_template_input, bulk_rename: None, bulk_rename_errors: Vec::new(), bulk_rename_generation: 0,
             renaming: false,
             creating_folder: false,
+            creating_file: false,
             undo_stack: Vec::new(),
             directory_cache: HashMap::new(),
             directory_loading: HashMap::new(),
@@ -1319,18 +1322,21 @@ impl Explorer {
             cx.notify();
             return;
         }
+        let file = self.creating_file;
+        let what = if file { "файл" } else { "папку" };
         let name = self.folder_input.read(cx).value().to_string();
         if let Err(error) = filemanager_core::operations::validate_leaf_name(name.trim()) {
-            self.status = format!("Недопустимое имя папки: {error}");
+            self.status = format!("Недопустимое имя: {error}");
             cx.notify();
             return;
         }
         let parent = self.browser.active().active().path.clone();
         let destination = parent.join(name.trim());
-        let plan = match Plan::prepare(Action::CreateFolder, &parent, Some(&destination)) {
+        let action = if file { Action::CreateFile } else { Action::CreateFolder };
+        let plan = match Plan::prepare(action, &parent, Some(&destination)) {
             Ok(plan) => plan,
             Err(error) => {
-                self.status = format!("Не удалось создать папку: {error}");
+                self.status = format!("Не удалось создать {what}: {error}");
                 cx.notify();
                 return;
             }
@@ -1357,14 +1363,14 @@ impl Explorer {
                         if let Some(ref dest) = receipt.destination {
                             this.refresh_parent_of(dest, cx);
                         }
-                        this.status = "Папка создана".into();
+                        this.status = if file { "Файл создан" } else { "Папка создана" }.into();
                         if let Some(dest) = receipt.destination.clone() {
-                            let label = format!("создание папки «{}»", browser::display_name(&dest));
+                            let label = format!("создание {} «{}»", if file { "файла" } else { "папки" }, browser::display_name(&dest));
                             this.push_undo(vec![receipt.clone()], label);
                         }
                         this.selected = normalized(receipt.destination);
                     }
-                    Err(error) => this.status = format!("Не удалось создать папку: {error}"),
+                    Err(error) => this.status = format!("Не удалось создать {what}: {error}"),
                 }
                 cx.notify();
             });

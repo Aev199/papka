@@ -31,6 +31,11 @@ pub enum CommandId {
     Address,
     Rename,
     NewFolder,
+    NewFile,
+    CopyToOther,
+    MoveToOther,
+    Terminal,
+    TerminalAdmin,
     ToggleHidden,
     Sidebar,
     Inspector,
@@ -59,7 +64,8 @@ impl CommandSpec {
     pub fn enabled(&self, has_selection: bool, busy: bool) -> bool {
         match self.id {
             CommandId::Rename => has_selection && !busy,
-            CommandId::NewFolder => !busy,
+            CommandId::NewFolder | CommandId::NewFile => !busy,
+            CommandId::CopyToOther | CommandId::MoveToOther => has_selection && !busy,
             CommandId::SetLabel(_) => has_selection,
             _ => true,
         }
@@ -111,6 +117,11 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
         (Find, "Поиск файлов", "Ctrl+F", NAVIGATION),
         (Refresh, "Обновить папку", "F5", NAVIGATION),
         (NewFolder, "Новая папка", "Ctrl+Shift+N", FILES),
+        (NewFile, "Новый текстовый файл", "Ctrl+N", FILES),
+        (CopyToOther, "Копировать во вторую панель", "Alt+C", FILES),
+        (MoveToOther, "Переместить во вторую панель", "Alt+M", FILES),
+        (Terminal, "Терминал в этой папке", "F10", FILES),
+        (TerminalAdmin, "Терминал от администратора", "Ctrl+F10", FILES),
         (Rename, "Переименовать выбранное", "F2", FILES),
         (Compare, "Сравнить с соседней панелью", "", FILES),
         (ToggleHidden, "Показать скрытые файлы", "Ctrl+.", VIEW),

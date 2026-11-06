@@ -7,6 +7,7 @@ pub mod labels;
 pub mod jump;
 pub mod archive;
 pub mod table;
+pub mod terminal;
 pub mod pdf;
 pub mod operations;
 pub mod bulk_rename;

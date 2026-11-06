@@ -16,7 +16,12 @@ use std::time::SystemTime;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// `Delete` removes permanently. It exists only for folders without a
 /// Recycle Bin (network shares), after an explicit confirmation, like Explorer.
-pub enum Action { Copy, Move, Rename, Recycle, Delete, CreateFolder }
+pub enum Action { Copy, Move, Rename, Recycle, Delete, CreateFolder, CreateFile }
+
+impl Action {
+    /// A new item made inside the source folder, not a change to it.
+    pub fn creates(self) -> bool { matches!(self, Action::CreateFolder | Action::CreateFile) }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct UndoOutcome {
@@ -368,7 +373,7 @@ impl Plan {
         // Only existing local paths can be operated on.
         crate::folder_copy::reject_link(source)?;
         let source = crate::path_utils::canonical(source)?;
-        if source.parent().is_none() && action != Action::CreateFolder {
+        if source.parent().is_none() && !action.creates() {
             return Err(invalid("Cannot operate on a filesystem root"));
         }
         if fs::symlink_metadata(&source)?.file_type().is_symlink() {
@@ -388,13 +393,13 @@ impl Plan {
                 let parent = crate::path_utils::canonical(destination.parent().ok_or_else(|| invalid("Missing parent"))?)?;
                 if !parent.is_dir() { return Err(invalid("Destination parent is not a directory")); }
                 let normalized = parent.join(name);
-                if action == Action::CreateFolder && (!source.is_dir() || source != parent) {
+                if action.creates() && (!source.is_dir() || source != parent) {
                     return Err(invalid("A new folder must be created directly inside the selected parent"));
                 }
                 // A rename that changes only letter case finds its own file there.
                 let own_name = action == Action::Rename && same_entry(&source, &normalized);
                 if occupied(&normalized)? && !replacing && !own_name { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
-                if action != Action::CreateFolder && source.is_dir() && parent.starts_with(&source) {
+                if !action.creates() && source.is_dir() && parent.starts_with(&source) {
                     return Err(invalid("Cannot move or copy a folder inside itself"));
                 }
                 Some(normalized)
@@ -573,6 +578,12 @@ impl Plan {
                 created_snapshot = crate::undo_snapshot::Snapshot::capture(dest).ok()
                     .filter(|snapshot| snapshot.is_empty_directory());
             }
+            Action::CreateFile => {
+                let dest = destination.as_ref().ok_or_else(|| invalid("Missing new file path"))?;
+                // create_new never replaces a file that appeared meanwhile.
+                fs::OpenOptions::new().write(true).create_new(true).open(dest)?;
+                created_snapshot = crate::undo_snapshot::Snapshot::capture(dest).ok();
+            }
         }
         let last_metadata = if let Some(ref dest) = destination { fs::metadata(dest).ok() } else { None };
         Ok(Receipt {
@@ -604,7 +615,7 @@ impl Receipt {
             return undo.can_undo() && self.created_snapshot.is_some();
         }
         match self.action {
-            Action::Copy | Action::CreateFolder => self.created_snapshot.is_some(),
+            Action::Copy | Action::CreateFolder | Action::CreateFile => self.created_snapshot.is_some(),
             Action::Recycle => self.recycled.is_some(),
             Action::Delete => false,
             Action::Move | Action::Rename => self.completed_stamp.is_some(),
@@ -614,7 +625,7 @@ impl Receipt {
     pub(crate) fn undo_destination(&self) -> Option<String> {
         if self.replacement.is_some() { return self.destination.as_ref().map(|path| path.to_string_lossy().into_owned()); }
         match self.action {
-            Action::Copy | Action::CreateFolder => None,
+            Action::Copy | Action::CreateFolder | Action::CreateFile => None,
             _ => Some(self.source.to_string_lossy().into_owned()),
         }
     }
@@ -648,7 +659,7 @@ impl Receipt {
             ));
             return Ok(UndoOutcome { restored_path: Some(restored_path), warning });
         }
-        if self.action == Action::Copy || self.action == Action::CreateFolder {
+        if self.action == Action::Copy || self.action.creates() {
             let dest = self.destination.as_ref().ok_or_else(|| invalid("Missing destination"))?;
             let snapshot = self.created_snapshot.as_ref().ok_or_else(|| invalid("Original identity unavailable; undo refused"))?;
             snapshot.verify(dest)?;
@@ -1037,6 +1048,19 @@ mod tests {
         assert!(queue.run_all()[0].1.is_ok());
         assert!(new_folder.is_dir());
         assert!(Plan::prepare(Action::CreateFolder, temp.path(), Some(&new_folder)).is_err());
+    }
+
+    #[test]
+    fn new_file_is_created_empty_and_undone_while_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("Новый документ.txt");
+        let receipt = Plan::prepare(Action::CreateFile, temp.path(), Some(&file)).unwrap().execute().unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"");
+        assert!(receipt.can_undo());
+        assert!(Plan::prepare(Action::CreateFile, temp.path(), Some(&file)).is_err());
+        fs::write(&file, b"typed").unwrap();
+        assert!(receipt.undo().is_err());
+        assert!(file.exists());
         assert!(validate_leaf_name("CON.txt").is_err());
         assert!(validate_leaf_name("bad/name").is_err());
         assert!(validate_leaf_name("bad\\\\name").is_err());

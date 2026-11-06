@@ -2278,6 +2278,7 @@ impl Explorer {
                 let copy_paths = if stage_target.contains(path) { stage_target.clone() } else { vec![path.clone()] };
                 let network = filemanager_core::path_utils::is_network_path(path) && !path.to_string_lossy().starts_with(r"\\");
                 let count = stage_target.len();
+                let has_other = self.browser.other_group(self.browser.active).is_some();
                 list = list.child(Self::separator())
                     .child(Self::menu_item("m-copy", "fm/copy.svg", "Копировать", "Ctrl+C", false, true)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2289,6 +2290,16 @@ impl Explorer {
                             this.context_menu = None;
                             this.clipboard_put(true, cx);
                         })))
+                    .child(Self::menu_item("m-copy-other", "fm/copy.svg", "Копировать во вторую панель", "Alt+C", false, has_other)
+                        .when(has_other, |item| item.on_click(cx.listener(|this, _, _, cx| {
+                            this.context_menu = None;
+                            this.transfer_to_other(true, cx);
+                        }))))
+                    .child(Self::menu_item("m-move-other", "fm/move.svg", "Переместить во вторую панель", "Alt+M", false, has_other)
+                        .when(has_other, |item| item.on_click(cx.listener(|this, _, _, cx| {
+                            this.context_menu = None;
+                            this.transfer_to_other(false, cx);
+                        }))))
                     .child(Self::menu_item("m-rename", "fm/pencil.svg", "Переименовать", "F2", false, true)
                         .on_click(cx.listener(|this, _, window, cx| this.begin_rename(window, cx))))
                     .child(Self::menu_item("m-copy-path", "fm/clipboard.svg",
@@ -2347,6 +2358,7 @@ impl Explorer {
                 let copy_target = folder.clone();
                 let tab_target = folder.clone();
                 let (f1, f2, f3, f4) = (folder.clone(), folder.clone(), folder.clone(), folder.clone());
+                let (f5, f6) = (folder.clone(), folder.clone());
                 let explorer_folder = folder.clone();
                 if let Some(undo) = self.undo_stack.last() {
                     list = list
@@ -2366,6 +2378,11 @@ impl Explorer {
                             this.enter_folder(&f1, cx);
                             this.begin_new_folder(window, cx);
                         })))
+                    .child(Self::menu_item("m-new-file", "fm/file-plus.svg", "Новый текстовый файл", "Ctrl+N", false, true)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.enter_folder(&f5, cx);
+                            this.begin_new_file(window, cx);
+                        })))
                     .child(Self::menu_item("m-clipboard-paste", "fm/clipboard.svg", "Вставить", "Ctrl+V", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.enter_folder(&f2, cx);
@@ -2383,6 +2400,12 @@ impl Explorer {
                             this.move_staged(cx);
                         }))))
                     .child(Self::separator())
+                    .child(Self::menu_item("m-terminal", "fm/terminal.svg", "Терминал здесь", "F10", false, true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.enter_folder(&f6, cx);
+                            this.context_menu = None;
+                            this.open_terminal(false, cx);
+                        })))
                     .child(Self::menu_item("m-refresh", "fm/refresh.svg", "Обновить", "F5", false, true)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.context_menu = None;
@@ -2612,7 +2635,7 @@ impl Explorer {
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(error.clone()))
                 .into_any_element(), "Закрыть без сохранения", ButtonKind::Danger)
         } else if self.creating_folder {
-            ("Новая папка", div().flex().flex_col().gap_2()
+            (if self.creating_file { "Новый файл" } else { "Новая папка" }, div().flex().flex_col().gap_2()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                     .child(format!("В папке: {}", self.pane_path(self.active_side()).display())))
                 .child(Input::new(&self.folder_input)).into_any_element(), "Создать", ButtonKind::Primary)
@@ -2837,6 +2860,11 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_address(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_rename(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_new_folder(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::NewFile,window,cx| { if !this.interface_modal() { this.begin_new_file(window,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::CopyToOther,_,cx| { if !this.interface_modal() { this.transfer_to_other(true,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::MoveToOther,_,cx| { if !this.interface_modal() { this.transfer_to_other(false,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::Terminal,_,cx| { if !this.interface_modal() { this.open_terminal(false,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::TerminalAdmin,_,cx| { if !this.interface_modal() { this.open_terminal(true,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { Self::key_dismiss(this,event,window,cx); }))
             .on_action(cx.listener(|this,event,window,cx| { Self::key_select_next(this,event,window,cx); }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_filter_enter(this,event,window,cx); } }))

@@ -235,6 +235,19 @@ pub fn canonicalize_parent(path: &Path) -> PathBuf {
 
 /// Whether `text` names `path` as the Shell and listings show it: long
 /// folder names and no `\\?\` (temp folders may be given as 8.3 names).
+/// `name` in `folder`, or Explorer's «name (2).ext», «name (3).ext»… when
+/// it is taken.
+pub fn free_name(folder: &Path, name: &str) -> String {
+    if !folder.join(name).exists() { return name.to_owned(); }
+    let (stem, ext) = match name.rfind('.').filter(|dot| *dot > 0) {
+        Some(dot) => (&name[..dot], &name[dot..]),
+        None => (name, ""),
+    };
+    (2..10_000).map(|n| format!("{stem} ({n}){ext}"))
+        .find(|candidate| !folder.join(candidate).exists())
+        .unwrap_or_else(|| name.to_owned())
+}
+
 #[cfg(test)]
 pub(crate) fn mentions(text: &str, path: &Path) -> bool {
     let text = text.replace(r"\\?\", "");
@@ -335,5 +348,19 @@ mod tests {
             normalize_extended_path(Path::new(r"\\?\UNC\host\share\model.gts")),
             Path::new(r"\\host\share\model.gts"),
         );
+    }
+}
+
+#[cfg(test)]
+mod free_name_tests {
+    #[test]
+    fn taken_names_get_a_number() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(super::free_name(temp.path(), "Новая папка"), "Новая папка");
+        std::fs::create_dir(temp.path().join("Новая папка")).unwrap();
+        assert_eq!(super::free_name(temp.path(), "Новая папка"), "Новая папка (2)");
+        std::fs::write(temp.path().join("a.txt"), b"").unwrap();
+        std::fs::write(temp.path().join("a (2).txt"), b"").unwrap();
+        assert_eq!(super::free_name(temp.path(), "a.txt"), "a (3).txt");
     }
 }

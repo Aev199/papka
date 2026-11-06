@@ -36,6 +36,7 @@ fn action_name(action: Action) -> &'static str {
         Action::Recycle => "recycle",
         Action::Delete => "delete",
         Action::CreateFolder => "create_folder",
+        Action::CreateFile => "create_file",
     }
 }
 
