@@ -108,7 +108,7 @@ const UNDO_LIMIT: usize = 50;
 
 /// Files whose preview comes from the Windows Shell thumbnail: documents,
 /// video and very large images (decoding those directly costs memory).
-fn wants_shell_thumbnail(path: &std::path::Path) -> bool {
+pub(crate) fn wants_shell_thumbnail(path: &std::path::Path) -> bool {
     if !cfg!(windows) {
         return false;
     }

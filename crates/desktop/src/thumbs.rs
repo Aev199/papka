@@ -64,9 +64,13 @@ impl Explorer {
         cx.notify();
     }
 
-    /// The picture of a tile, once made; asks for it otherwise.
+    /// The picture of a tile, once made; asks for it otherwise. Only kinds
+    /// that have a picture are asked for; the rest keep their icon.
     pub(crate) fn thumb(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<PathBuf> {
         if let Some(found) = self.thumbs.map.get(path) { return found.clone(); }
+        let wanted = crate::wants_shell_thumbnail(path) || is_picture(path)
+            || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dwg"));
+        if !wanted || filemanager_core::archive::is_inside(path) { return None; }
         // Browsing many folders must not keep every picture.
         if self.thumbs.map.len() > 4000 { self.thumbs.map.clear(); }
         self.thumbs.map.insert(path.to_path_buf(), None);
@@ -80,8 +84,15 @@ impl Explorer {
         self.thumbs.running = true;
         let batch: Vec<PathBuf> = (0..12).filter_map(|_| self.thumbs.queue.pop_front()).collect();
         let task = cx.background_spawn(async move {
+            let exe = std::env::current_exe().ok();
             batch.into_iter().map(|path| {
-                let made = filemanager_core::thumbnail::thumbnail(&path, EDGE).ok()
+                // A drawing's own picture is read here; the Shell's (with
+                // third-party handlers) only in a helper process, as for
+                // the details panel, so a bad handler cannot take Papka down.
+                let dwg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dwg"));
+                let made = if dwg { filemanager_core::thumbnail::thumbnail(&path, EDGE).ok() }
+                    else { exe.as_ref().and_then(|exe| filemanager_core::preview_host::isolated_thumbnail(exe, &path, EDGE).ok()) };
+                let made = made
                     // Without the Shell (or when it fails) a picture is its own thumbnail.
                     .or_else(|| is_picture(&path).then(|| path.clone()));
                 (path, made)
