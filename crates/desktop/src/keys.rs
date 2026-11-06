@@ -813,10 +813,13 @@ impl Explorer {
     }
 
     pub(crate) fn key_column_left(&mut self, _: &ColumnLeft, _: &mut Window, cx: &mut Context<Self>) {
+        // In the quick look ← → turn the pages of a PDF.
+        if self.quick_look_paged() { self.quick_look_page(-1, cx); return; }
         if self.miller(self.active_side()) { self.go_up(cx); }
     }
 
     pub(crate) fn key_column_right(&mut self, _: &ColumnRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_look_paged() { self.quick_look_page(1, cx); return; }
         if !self.miller(self.active_side()) { return; }
         if let Some(entry) = self.selected_entry().filter(|entry| entry.is_directory) {
             let side = self.active_side();

@@ -24,6 +24,48 @@ pub(crate) enum QuickContent {
 pub(crate) struct QuickLook {
     pub(crate) path: PathBuf,
     pub(crate) content: QuickContent,
+    /// A picture or a page enlarged: 1 fits the window.
+    pub(crate) zoom: f32,
+    /// Where the enlarged picture's corner sits in its frame.
+    pub(crate) pan: gpui::Point<f32>,
+    /// The frame, as last drawn: zoom keeps the point under the cursor.
+    pub(crate) frame: gpui::Bounds<gpui::Pixels>,
+    /// The pointer while the picture is dragged.
+    pub(crate) grab: Option<gpui::Point<gpui::Pixels>>,
+}
+
+impl QuickLook {
+    fn new(path: PathBuf, content: QuickContent) -> Self {
+        Self { path, content, zoom: 1., pan: gpui::point(0., 0.), frame: gpui::Bounds::default(), grab: None }
+    }
+
+    /// Enlarges by `factor` around `at` (window position); 1 fits again.
+    pub(crate) fn zoom_at(&mut self, factor: f32, at: gpui::Point<gpui::Pixels>) {
+        let zoom = (self.zoom * factor).clamp(1., 10.);
+        let cursor = gpui::point((at.x - self.frame.origin.x) / gpui::px(1.), (at.y - self.frame.origin.y) / gpui::px(1.));
+        // The picture point under the cursor stays under it.
+        let scale = zoom / self.zoom;
+        self.pan = gpui::point(cursor.x - (cursor.x - self.pan.x) * scale, cursor.y - (cursor.y - self.pan.y) * scale);
+        self.zoom = zoom;
+        self.clamp_pan();
+    }
+
+    pub(crate) fn drag_to(&mut self, at: gpui::Point<gpui::Pixels>) {
+        let Some(from) = self.grab.replace(at) else { return };
+        self.pan = gpui::point(self.pan.x + (at.x - from.x) / gpui::px(1.), self.pan.y + (at.y - from.y) / gpui::px(1.));
+        self.clamp_pan();
+    }
+
+    /// The enlarged picture never leaves a gap at the frame's edges.
+    fn clamp_pan(&mut self) {
+        if self.zoom <= 1. { self.zoom = 1.; self.pan = gpui::point(0., 0.); return; }
+        let (w, h) = (self.frame.size.width / gpui::px(1.), self.frame.size.height / gpui::px(1.));
+        self.pan = gpui::point(self.pan.x.clamp(w - w * self.zoom, 0.), self.pan.y.clamp(h - h * self.zoom, 0.));
+    }
+
+    pub(crate) fn zoomable(&self) -> bool {
+        matches!(self.content, QuickContent::Image(_) | QuickContent::Pdf { .. })
+    }
 }
 
 const TEXT_LIMIT: usize = 64 * 1024;
@@ -136,6 +178,11 @@ impl Explorer {
         }
     }
 
+    /// Whether ← → turn pages now.
+    pub(crate) fn quick_look_paged(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(|look| matches!(look.content, QuickContent::Pdf { pages, .. } if pages > 1))
+    }
+
     /// PageDown / PageUp and the arrows under a PDF: another page.
     pub(crate) fn quick_look_page(&mut self, delta: i64, cx: &mut Context<Self>) {
         let Some(look) = &self.quick_look else { return };
@@ -161,6 +208,9 @@ impl Explorer {
             let _ = this.update(cx, |this, cx| {
                 if let Some(look) = this.quick_look.as_mut().filter(|look| look.path == path) {
                     look.content = content;
+                    // A new page starts fitted.
+                    look.zoom = 1.;
+                    look.pan = gpui::point(0., 0.);
                     cx.notify();
                 }
             });
@@ -169,11 +219,11 @@ impl Explorer {
 
     fn show_quick_look(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if is_picture(&path) {
-            self.quick_look = Some(QuickLook { content: QuickContent::Image(path.clone()), path });
+            self.quick_look = Some(QuickLook::new(path.clone(), QuickContent::Image(path)));
             cx.notify();
             return;
         }
-        self.quick_look = Some(QuickLook { path: path.clone(), content: QuickContent::Loading });
+        self.quick_look = Some(QuickLook::new(path.clone(), QuickContent::Loading));
         let target = path.clone();
         let task = cx.background_spawn(async move { load(&target) });
         cx.spawn(async move |this, cx| {

@@ -457,23 +457,65 @@ impl Explorer {
         let look = self.quick_look.as_ref().unwrap();
         let path = look.path.clone();
         let name = browser::display_name(&path);
+        // A picture or a page: the wheel enlarges it around the cursor, a
+        // drag moves it, a double click switches between fitted and ×2.
+        let zoomed = |file: &std::path::PathBuf| -> AnyElement {
+            let weak = cx.weak_entity();
+            div().id("quick-look-frame").relative().size_full().overflow_hidden()
+                .when(look.zoom > 1., |frame| frame.cursor_grab())
+                .on_prepaint(move |bounds, _, cx| {
+                    let weak = weak.clone();
+                    cx.defer(move |cx| { let _ = weak.update(cx, |this, _| {
+                        if let Some(look) = this.quick_look.as_mut() { look.frame = bounds; }
+                    }); });
+                })
+                .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    let Some(look) = this.quick_look.as_mut() else { return };
+                    let dy = event.delta.pixel_delta(px(20.)).y / px(1.);
+                    if dy == 0. { return; }
+                    look.zoom_at(if dy > 0. { 1.15 } else { 1. / 1.15 }, event.position);
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let Some(look) = this.quick_look.as_mut() else { return };
+                    if event.click_count >= 2 {
+                        look.zoom_at(if look.zoom > 1. { 0. } else { 2. }, event.position);
+                    } else if look.zoom > 1. {
+                        look.grab = Some(event.position);
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                    let Some(look) = this.quick_look.as_mut().filter(|look| look.grab.is_some()) else { return };
+                    if event.pressed_button != Some(MouseButton::Left) { look.grab = None; return; }
+                    look.drag_to(event.position);
+                    cx.notify();
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
+                    if let Some(look) = this.quick_look.as_mut() { look.grab = None; }
+                }))
+                .child(img(file.clone()).absolute().left(px(look.pan.x)).top(px(look.pan.y))
+                    .w(gpui::relative(look.zoom)).h(gpui::relative(look.zoom)).object_fit(ObjectFit::Contain))
+                .into_any_element()
+        };
         let body: AnyElement = match &look.content {
             QuickContent::Loading => div().text_color(rgb(TEXT_DIM)).child("Загрузка…").into_any_element(),
-            QuickContent::Image(file) => img(file.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            QuickContent::Image(file) => zoomed(file),
             QuickContent::Text(text) => div().id("quick-look-text").size_full().overflow_y_scroll().p_3()
                 .font_family("Consolas").text_size(px(12.)).line_height(px(18.)).text_color(rgb(TEXT))
                 .child(text.clone()).into_any_element(),
             QuickContent::Message(message) => div().max_w(px(420.)).text_color(rgb(TEXT_MUTED)).child(message.clone()).into_any_element(),
-            QuickContent::Pdf { image, .. } => img(image.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            QuickContent::Pdf { image, .. } => zoomed(image),
             QuickContent::Table(table) => Self::quick_table(table),
         };
         // Under a PDF: pages; under a workbook: its sheets.
         let footer: AnyElement = match &look.content {
             QuickContent::Pdf { page, pages, .. } => div().flex().items_center().gap_2()
-                .child(icon_button("quick-look-prev", "fm/arrow-left.svg", "Предыдущая страница (PageUp)", false, *page > 0)
+                .child(icon_button("quick-look-prev", "fm/arrow-left.svg", "Предыдущая страница (← или PageUp)", false, *page > 0)
                     .on_click(cx.listener(|this,_,_,cx| this.quick_look_page(-1, cx))))
                 .child(format!("Страница {} из {pages}", page + 1))
-                .child(icon_button("quick-look-next", "fm/arrow-right.svg", "Следующая страница (PageDown)", false, page + 1 < *pages)
+                .child(icon_button("quick-look-next", "fm/arrow-right.svg", "Следующая страница (→ или PageDown)", false, page + 1 < *pages)
                     .on_click(cx.listener(|this,_,_,cx| this.quick_look_page(1, cx))))
                 .into_any_element(),
             QuickContent::Table(table) if table.sheets.len() > 1 => div().flex().items_center().gap_1().min_w_0().overflow_hidden()
@@ -509,7 +551,11 @@ impl Explorer {
             .child(div().flex_1().min_h_0().p_2().flex().items_center().justify_center().child(body))
             .child(div().h(px(30.)).flex_none().px_3().flex().items_center().gap_3().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                 .child(div().flex_1().min_w_0().child(footer))
-                .child(div().flex_none().child("Пробел или Esc — закрыть · ↑ ↓ — соседние файлы")));
+                .child(div().flex_none().child(if look.zoomable() {
+                    "Колесо — крупнее · двойной щелчок — ×2 · ↑ ↓ — соседние файлы · Пробел, Esc — закрыть"
+                } else {
+                    "Пробел или Esc — закрыть · ↑ ↓ — соседние файлы"
+                })));
         div().id("quick-look-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x00000080))
             .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))
