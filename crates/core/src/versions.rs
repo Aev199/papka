@@ -15,11 +15,15 @@ pub struct Version {
     pub number: Vec<u32>,
     /// Extension without the dot, e.g. `docx`; empty if none.
     pub extension: String,
+    /// How the version reads when it is not a plain number (`B`,
+    /// `28.10.2026`); empty for numbers.
+    pub tag: String,
 }
 
 impl Version {
     /// `1.6`, or an empty string for the original.
     pub fn label(&self) -> String {
+        if !self.tag.is_empty() { return self.tag.clone(); }
         self.number.iter().map(u32::to_string).collect::<Vec<_>>().join(".")
     }
 
@@ -75,21 +79,207 @@ fn split_stem(stem: &str) -> Option<(String, Vec<u32>)> {
 }
 
 /// Splits a file name into document and version; an unversioned name is
-/// the original (empty number) of its own family.
+/// the original (empty number) of its own family. The user's templates
+/// (see `set_rules`) are tried first, then the built-in `_v_1_6` family.
 pub fn parse(name: &str) -> Version {
+    parse_with(&RULES.read().unwrap_or_else(|poisoned| poisoned.into_inner()), name)
+}
+
+fn parse_with(rules: &Rules, name: &str) -> Version {
     let path = Path::new(name);
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let extension = path.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     // `Отчёт_v1.6` without an extension: `.6` is the version, not a type.
-    if !extension.is_empty() && extension.chars().all(|c| c.is_ascii_digit()) {
-        if let Some((base, number)) = split_stem(name) {
-            return Version { base, number, extension: String::new() };
+    let candidates: &[(&str, &str)] = if !extension.is_empty() && extension.chars().all(|c| c.is_ascii_digit()) {
+        &[(name, ""), (&stem, &extension)]
+    } else {
+        &[(&stem, &extension)]
+    };
+    for &(stem, extension) in candidates {
+        for template in &rules.templates {
+            if let Some((base, number, tag)) = template.split(stem) {
+                return Version { base, number, extension: extension.to_owned(), tag };
+            }
+        }
+        if rules.builtin {
+            if let Some((base, number)) = split_stem(stem) {
+                return Version { base, number, extension: extension.to_owned(), tag: String::new() };
+            }
         }
     }
-    match split_stem(&stem) {
-        Some((base, number)) => Version { base, number, extension },
-        None => Version { base: stem, number: Vec::new(), extension },
+    Version { base: stem, number: Vec::new(), extension, tag: String::new() }
+}
+
+/// Which suffixes mark versions: the built-in ones and the user's own.
+pub struct Rules {
+    pub builtin: bool,
+    templates: Vec<Template>,
+}
+
+static RULES: std::sync::RwLock<Rules> = std::sync::RwLock::new(Rules { builtin: true, templates: Vec::new() });
+
+/// Sets the version rules for the whole program. `templates` are what
+/// follows the document's name, with `{N}` a number (`2`, `1.6`, `1_6`),
+/// `{A}` a letter (`A`, `Б`) and `{дата}` a date; `_ - . ` and space match
+/// one another. Returns the templates that could not be read.
+pub fn set_rules(builtin: bool, templates: &[String]) -> Vec<String> {
+    let (rules, errors) = Rules::new(builtin, templates);
+    *RULES.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = rules;
+    errors
+}
+
+impl Rules {
+    fn new(builtin: bool, templates: &[String]) -> (Self, Vec<String>) {
+        let mut parsed = Vec::new();
+        let mut errors = Vec::new();
+        for text in templates.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+            match Template::compile(text) {
+                Some(template) => parsed.push(template),
+                None => errors.push(text.to_owned()),
+            }
+        }
+        (Self { builtin, templates: parsed }, errors)
     }
+}
+
+/// Templates as saved: one string, `;` between them.
+pub fn split_templates(text: &str) -> Vec<String> {
+    text.split(';').map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()).collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Token { Text(Vec<char>), Number, Letter, Date }
+
+#[derive(Clone, Debug)]
+struct Template(Vec<Token>);
+
+impl Template {
+    /// `None` without exactly one version token or with an unknown `{…}`.
+    fn compile(text: &str) -> Option<Self> {
+        let mut tokens = Vec::new();
+        let mut literal = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            if let Some(after) = rest.strip_prefix('{') {
+                let end = after.find('}')?;
+                let token = match after[..end].trim().to_lowercase().as_str() {
+                    "n" | "н" | "номер" => Token::Number,
+                    "a" | "а" | "буква" => Token::Letter,
+                    "дата" | "date" => Token::Date,
+                    _ => return None,
+                };
+                if !literal.is_empty() { tokens.push(Token::Text(std::mem::take(&mut literal))); }
+                tokens.push(token);
+                rest = &after[end + 1..];
+            } else {
+                let c = rest.chars().next()?;
+                literal.extend(c.to_lowercase());
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+        if !literal.is_empty() { tokens.push(Token::Text(literal)); }
+        let versions = tokens.iter().filter(|t| !matches!(t, Token::Text(_))).count();
+        (versions == 1).then_some(Self(tokens))
+    }
+
+    /// The shortest suffix of `stem` this template matches: the document
+    /// name before it, the version's sort key and, for letters and dates,
+    /// how it reads.
+    fn split(&self, stem: &str) -> Option<(String, Vec<u32>, String)> {
+        let chars: Vec<char> = stem.chars().collect();
+        for start in (1..chars.len()).rev() {
+            if let Some((number, tag)) = matches(&self.0, &chars[start..]) {
+                let base: String = chars[..start].iter().collect();
+                let base = base.trim_end_matches(is_separator).to_owned();
+                if !base.is_empty() { return Some((base, number, tag)); }
+            }
+        }
+        None
+    }
+}
+
+/// Matches all of `text` against `tokens`.
+fn matches(tokens: &[Token], text: &[char]) -> Option<(Vec<u32>, String)> {
+    let Some((token, rest)) = tokens.split_first() else {
+        return text.is_empty().then(|| (Vec::new(), String::new()));
+    };
+    // `_rev{A}` also reads `_rev.B`: a separator may stand before the version.
+    if !matches!(token, Token::Text(_)) && text.first().is_some_and(|&c| is_separator(c)) {
+        if let Some(found) = matches_version(token, rest, &text[1..]) { return Some(found); }
+    }
+    match token {
+        Token::Text(_) => {}
+        _ => return matches_version(token, rest, text),
+    }
+    match token {
+        Token::Text(literal) => {
+            if text.len() < literal.len() { return None; }
+            let same = literal.iter().zip(text).all(|(&want, &got)| {
+                (is_separator(want) && is_separator(got)) || got.to_lowercase().eq(std::iter::once(want))
+            });
+            if same { matches(rest, &text[literal.len()..]) } else { None }
+        }
+        _ => None,
+    }
+}
+
+fn matches_version(token: &Token, rest: &[Token], text: &[char]) -> Option<(Vec<u32>, String)> {
+    match token {
+        Token::Text(_) => None,
+        Token::Number => {
+            // Digit groups joined by `_ . -`, longest first.
+            let mut ends = Vec::new();
+            let mut i = 0;
+            let mut groups = 0;
+            while i < text.len() && text[i].is_ascii_digit() {
+                while i < text.len() && text[i].is_ascii_digit() { i += 1; }
+                groups += 1;
+                ends.push(i);
+                if groups == 4 || i + 1 >= text.len() || !matches!(text[i], '_' | '.' | '-') || !text[i + 1].is_ascii_digit() { break; }
+                i += 1;
+            }
+            for &end in ends.iter().rev() {
+                if matches(rest, &text[end..]).is_some() {
+                    let number = text[..end].iter().collect::<String>()
+                        .split(['_', '.', '-']).map(|g| g.parse::<u32>().ok()).collect::<Option<Vec<_>>>()?;
+                    return Some((number, String::new()));
+                }
+            }
+            None
+        }
+        Token::Letter => {
+            let c = *text.first()?;
+            let upper = c.to_uppercase().next()?;
+            let index = if upper.is_ascii_uppercase() { upper as u32 - 'A' as u32 + 1 }
+                else if ('А'..='Я').contains(&upper) { upper as u32 - 'А' as u32 + 1 }
+                else if upper == 'Ё' { 7 }
+                else { return None };
+            matches(rest, &text[1..]).map(|_| (vec![index], upper.to_string()))
+        }
+        Token::Date => {
+            // 2026-10-28, 2026.10.28, 20261028, 28.10.2026, 28-10-2026.
+            for len in [10, 8] {
+                if text.len() < len { continue; }
+                let piece: String = text[..len].iter().collect();
+                if let Some(ymd) = read_date(&piece) {
+                    if matches(rest, &text[len..]).is_some() {
+                        return Some((ymd.to_vec(), format!("{:02}.{:02}.{}", ymd[2], ymd[1], ymd[0])));
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+fn read_date(text: &str) -> Option<[u32; 3]> {
+    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+    let separators: Vec<char> = text.chars().filter(|c| !c.is_ascii_digit()).collect();
+    if digits.len() != 8 || !separators.iter().all(|&c| matches!(c, '-' | '.' | '_')) { return None; }
+    let number = |range: std::ops::Range<usize>| digits[range].parse::<u32>().ok();
+    let year_first = text.len() == 8 || text.chars().nth(4).is_some_and(|c| !c.is_ascii_digit());
+    let [y, m, d] = if year_first { [number(0..4)?, number(4..6)?, number(6..8)?] } else { [number(4..8)?, number(2..4)?, number(0..2)?] };
+    ((1900..=2200).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d)).then_some([y, m, d])
 }
 
 /// Whether `name` carries a version suffix.
@@ -168,7 +358,9 @@ pub fn family_key(name: &str) -> String {
 
 /// "v1.6", or "исходный" for the unversioned original.
 pub fn short_label(version: &Version) -> String {
-    if version.number.is_empty() { "исходный".to_owned() } else { format!("v{}", version.label()) }
+    if version.number.is_empty() { "исходный".to_owned() }
+    else if !version.tag.is_empty() { version.tag.clone() }
+    else { format!("v{}", version.label()) }
 }
 
 /// Collapses versions of one document (`Отчёт.docx`, `Отчёт_v_1_5.docx`,
@@ -267,6 +459,28 @@ mod tests {
             assert!(!is_versioned(name), "{name}");
         }
         assert_eq!(v("Отчёт.docx"), ("Отчёт".into(), vec![], "docx".into()));
+    }
+
+    #[test]
+    fn own_templates_add_suffixes() {
+        let (rules, errors) = Rules::new(true, &split_templates("_изм{N}; ({N}); _rev{A}; _{дата}; _{X}; _изм"));
+        assert_eq!(errors, ["_{X}", "_изм"]);
+        let v = |name: &str| { let version = parse_with(&rules, name); (version.base, version.number, version.extension) };
+        let label = |name: &str| parse_with(&rules, name).label();
+        assert_eq!(v("Отчёт_изм2.docx"), ("Отчёт".into(), vec![2], "docx".into()));
+        assert_eq!(v("Отчёт изм.3.docx"), ("Отчёт".into(), vec![3], "docx".into()));
+        assert_eq!(v("Отчёт-ИЗМ12.docx"), ("Отчёт".into(), vec![12], "docx".into()));
+        assert_eq!(v("Отчёт (2).docx"), ("Отчёт".into(), vec![2], "docx".into()));
+        assert_eq!(v("Схема_rev.B.dwg"), ("Схема".into(), vec![2], "dwg".into()));
+        assert_eq!(label("Схема_revБ.dwg"), "Б");
+        assert_eq!(v("План_2026-10-28.pdf"), ("План".into(), vec![2026, 10, 28], "pdf".into()));
+        assert_eq!(label("План_28.10.2026.pdf"), "28.10.2026");
+        assert!(parse_with(&rules, "План_2026-10-28.pdf").number > parse_with(&rules, "План_27.10.2026.pdf").number);
+        // The built-in suffixes still work alongside, and can be switched off.
+        assert_eq!(v("Отчёт_v_1_6.docx"), ("Отчёт".into(), vec![1, 6], "docx".into()));
+        let (plain, _) = Rules::new(false, &[]);
+        assert!(parse_with(&plain, "Отчёт_v_1_6.docx").number.is_empty());
+        assert!(!is_versioned("Отчёт_изм2.docx"));
     }
 
     #[test]

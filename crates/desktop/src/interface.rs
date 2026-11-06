@@ -26,7 +26,7 @@ const SETTING_FLAGS: [&str; 8] = [
     "Панель сведений",
     "Показывать скрытые файлы",
     "Значки программ у файлов, как в Проводнике",
-    "Показывать только последнюю версию файла (Отчёт_v_1_6 и т. п.)",
+    "Показывать только последнюю версию файла",
     "Звёздочка избранного у папок",
     "Проверять обновления раз в день",
 ];
@@ -495,7 +495,8 @@ impl Explorer {
                     .child(div().flex().gap_1p5().children(swatches)));
             }
             body = body.child(look)
-                .child(section("ФАЙЛЫ").child(check(3, cx)).child(check(4, cx)).child(check(5, cx)).child(check(6, cx)));
+                .child(section("ФАЙЛЫ").child(check(3, cx)).child(check(4, cx)).child(check(5, cx))
+                    .child(self.version_rules_row(cx)).child(check(6, cx)));
 
             // Updates: daily checks and the channel.
             {

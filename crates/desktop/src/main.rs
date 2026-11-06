@@ -22,6 +22,7 @@ mod feed;
 mod labels;
 mod jump;
 mod archives;
+mod version_rules;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -330,6 +331,11 @@ struct Explorer {
     creating_folder: bool,
     /// The new-item dialog makes a file rather than a folder.
     creating_file: bool,
+    /// «Шаблоны версий» while open; the saved rules below.
+    version_editing: Option<version_rules::Editing>,
+    version_input: Entity<InputState>,
+    version_templates: String,
+    version_builtin: bool,
     renaming: bool,
     undo_stack: Vec<Undo>,
     directory_cache: HashMap<PathBuf, Arc<browser::Listing>>,
@@ -409,6 +415,10 @@ impl Explorer {
             if matches!(event, InputEvent::Change) { this.schedule_bulk_preview(cx); }
         });
         let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Имя папки"));
+        let version_input = cx.new(|cx| InputState::new(window, cx).placeholder("_изм{N}; _rev{A}; _{дата}"));
+        let version_subscription = cx.subscribe_in(&version_input, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) { this.save_version_rules(window, cx); }
+        });
         let workspace_input = cx.new(|cx| InputState::new(window, cx).placeholder("Например: Проект «Мост»"));
         let workspace_subscription = cx.subscribe_in(&workspace_input, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -595,6 +605,10 @@ impl Explorer {
             renaming: false,
             creating_folder: false,
             creating_file: false,
+            version_editing: None,
+            version_input,
+            version_templates: String::new(),
+            version_builtin: true,
             undo_stack: Vec::new(),
             directory_cache: HashMap::new(),
             directory_loading: HashMap::new(),
@@ -626,7 +640,7 @@ impl Explorer {
                 cx.observe_window_activation(window, |this, window, cx| {
                     if !window.is_window_active() { this.drag_out_on_deactivate(window, cx); }
                 }),
-                search_subscription, address_subscription, rename_subscription, folder_subscription,
+                search_subscription, address_subscription, rename_subscription, folder_subscription, version_subscription,
                 workspace_subscription,
                 bulk_subscription,
                 comment_subscription,
@@ -2026,7 +2040,11 @@ fn main() {
             ..gpui_component::TitleBar::window_options()
         };
         cx.open_window(options, |window, cx| {
-            let explorer = cx.new(|cx| Explorer::new(window, cx));
+            let explorer = cx.new(|cx| {
+                let mut explorer = Explorer::new(window, cx);
+                explorer.load_version_rules();
+                explorer
+            });
             explorer.update(cx, |this, cx| {
                 this.load_drive_space(cx);
                 this.start_drive_watch(cx);

@@ -2962,6 +2962,7 @@ impl Render for Explorer {
         if let Some(dialog)=self.update_dialog(cx) { root=root.child(dialog); }
         if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
+        if let Some(dialog)=self.version_rules_dialog(cx) { root=root.child(dialog); }
         root
     }
 }
