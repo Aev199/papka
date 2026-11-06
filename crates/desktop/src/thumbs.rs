@@ -9,12 +9,19 @@ use gpui::{AppContext, Context};
 
 use crate::{Explorer, GroupId};
 
-/// Tile size and the gap between tiles.
-pub(crate) const TILE_WIDTH: f32 = 132.;
-pub(crate) const TILE_HEIGHT: f32 = 148.;
+/// The gap between tiles.
 pub(crate) const TILE_GAP: f32 = 6.;
-/// The picture area inside a tile.
-pub(crate) const PICTURE: f32 = 96.;
+/// «Размер миниатюр»: small, medium, large.
+pub(crate) const SIZES: [&str; 3] = ["Мелкие", "Средние", "Крупные"];
+const SCALES: [f32; 3] = [0.75, 1., 1.5];
+static SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+pub(crate) fn set_size(index: usize) { SIZE.store(index.min(SIZES.len() - 1), std::sync::atomic::Ordering::Relaxed); }
+pub(crate) fn size() -> usize { SIZE.load(std::sync::atomic::Ordering::Relaxed) }
+fn scale() -> f32 { SCALES[size()] }
+/// The picture area inside a tile, and the tile around it with its name.
+pub(crate) fn picture() -> f32 { (96. * scale()).round() }
+pub(crate) fn tile_width() -> f32 { picture() + 36. }
+pub(crate) fn tile_height() -> f32 { picture() + 52. }
 /// Pixels a thumbnail is made at: sharp on high-DPI screens too.
 const EDGE: u32 = 256;
 const GROUPS_KEY: &str = "thumbnail_panes";
@@ -31,7 +38,7 @@ pub(crate) struct Thumbs {
 
 /// Tiles in a row of a pane `width` wide.
 pub(crate) fn columns(width: f32) -> usize {
-    (((width - 16.) / (TILE_WIDTH + TILE_GAP)).floor() as usize).max(1)
+    (((width - 16.) / (tile_width() + TILE_GAP)).floor() as usize).max(1)
 }
 
 pub(crate) fn is_picture(path: &Path) -> bool {
@@ -123,7 +130,7 @@ mod tests {
     fn tiles_fill_the_pane_and_never_vanish() {
         assert_eq!(super::columns(0.), 1);
         assert_eq!(super::columns(100.), 1);
-        assert_eq!(super::columns(16. + 3. * (super::TILE_WIDTH + super::TILE_GAP)), 3);
+        assert_eq!(super::columns(16. + 3. * (super::tile_width() + super::TILE_GAP)), 3);
         assert_eq!(super::columns(1100.), 7);
     }
 }

@@ -5,10 +5,7 @@ use crate::{
 };
 use filemanager_core::interface::{CommandId, CommandSpec, Preferences, commands};
 use gpui::{AnimationExt, AnyElement, Context, Entity, Focusable, Window, div, prelude::*, px};
-use gpui_component::{
-    input::{Input, InputState},
-    theme::{Theme, ThemeMode},
-};
+use gpui_component::input::{Input, InputState};
 
 pub(crate) struct Palette {
     pub input: Entity<InputState>,
@@ -20,7 +17,7 @@ pub(crate) struct Palette {
     pub folders: Option<crate::jump::Folders>,
 }
 /// Check boxes of the settings window, in the order arrows walk them.
-const SETTING_FLAGS: [&str; 8] = [
+const SETTING_FLAGS: [&str; 9] = [
     "Светлая тема",
     "Боковая панель",
     "Панель сведений",
@@ -29,7 +26,10 @@ const SETTING_FLAGS: [&str; 8] = [
     "Показывать только последнюю версию файла",
     "Звёздочка избранного у папок",
     "Проверять обновления раз в день",
+    "Как в Windows: светлая или тёмная по системе",
 ];
+/// The order arrows walk the check boxes in, as they are shown.
+const SETTING_ORDER: [usize; 9] = [0, 8, 1, 2, 3, 4, 5, 6, 7];
 
 fn flag_value(s: &Settings, index: usize) -> bool {
     match index {
@@ -40,6 +40,7 @@ fn flag_value(s: &Settings, index: usize) -> bool {
         4 => s.system_icons,
         5 => s.stack_versions,
         6 => s.favorite_stars,
+        8 => s.system_theme,
         _ => s.update_auto,
     }
 }
@@ -53,6 +54,7 @@ fn toggle_flag(s: &mut Settings, index: usize) {
         4 => &mut s.system_icons,
         5 => &mut s.stack_versions,
         6 => &mut s.favorite_stars,
+        8 => &mut s.system_theme,
         _ => &mut s.update_auto,
     };
     *flag = !*flag;
@@ -70,6 +72,11 @@ pub(crate) struct Settings {
     pub system_icons: bool,
     pub stack_versions: bool,
     pub favorite_stars: bool,
+    /// «Оформление»: theme by Windows, row density, folder colour, tile size.
+    pub system_theme: bool,
+    pub density: usize,
+    pub folder_color: usize,
+    pub tile_size: usize,
     pub saving: bool,
     pub error: Option<String>,
 }
@@ -265,6 +272,10 @@ impl Explorer {
             system_icons: self.icons.enabled,
             stack_versions: self.stack_versions,
             favorite_stars: self.favorite_stars,
+            system_theme: self.system_theme,
+            density: crate::appearance::density(),
+            folder_color: theme::folder_color(),
+            tile_size: crate::thumbs::size(),
             saving: false,
             error: None,
         });
@@ -290,7 +301,8 @@ impl Explorer {
     }
     pub(crate) fn settings_move(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(s) = self.settings.as_mut().filter(|s| !s.saving) {
-            s.selected = s.selected.saturating_add_signed(delta).min(SETTING_FLAGS.len() - 1);
+            let at = SETTING_ORDER.iter().position(|&index| index == s.selected).unwrap_or(0);
+            s.selected = SETTING_ORDER[at.saturating_add_signed(delta).min(SETTING_ORDER.len() - 1)];
             cx.notify();
         }
     }
@@ -316,6 +328,8 @@ impl Explorer {
         let system_icons = settings.system_icons;
         let stack_versions = settings.stack_versions;
         let favorite_stars = settings.favorite_stars;
+        let look = crate::appearance::Look { system_theme: settings.system_theme, density: settings.density,
+            folder_color: settings.folder_color, tile_size: settings.tile_size };
         cx.spawn(async move |weak, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -341,18 +355,10 @@ impl Explorer {
                     this.show_hidden = prefs.show_hidden;
                     this.show_sidebar = prefs.show_sidebar;
                     this.show_inspector = prefs.show_inspector;
-                    theme::set_light(prefs.light);
                     theme::set_accents(accent_dark, accent_light);
-                    Theme::change(
-                        if prefs.light {
-                            ThemeMode::Light
-                        } else {
-                            ThemeMode::Dark
-                        },
-                        None,
-                        cx,
-                    );
-                    crate::view::apply_component_theme(cx);
+                    this.light_preference = prefs.light;
+                    this.set_look(look);
+                    this.apply_theme(cx);
                     this.settings = None;
                     this.interface_focus_pending = true;
                     this.status = "Настройки сохранены".into();
@@ -471,11 +477,10 @@ impl Explorer {
             let section = |title: &'static str| div().flex().flex_col().gap_0p5()
                 .child(div().px_2().pt_1().pb_0p5().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT_DIM)).child(title));
-            let mut body = div().flex().flex_col().gap_3().text_size(px(13.))
-                .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Настройки"));
+            let mut body = div().flex().flex_col().gap_3().text_size(px(13.));
 
             // Appearance, with the accent colours chosen separately for each theme.
-            let mut look = section("ВИД").child(check(0, cx)).child(check(1, cx)).child(check(2, cx));
+            let mut look = section("ОФОРМЛЕНИЕ").child(check(0, cx)).child(check(8, cx)).child(check(1, cx)).child(check(2, cx));
             for (light, label, chosen) in [(false, "Акцент тёмной темы", settings.accent_dark), (true, "Акцент светлой темы", settings.accent_light)] {
                 let swatches = theme::ACCENT_SCHEMES.iter().enumerate().map(|(index, scheme)| {
                     let colour = if light { scheme.light[0] } else { scheme.dark[0] };
@@ -495,6 +500,38 @@ impl Explorer {
                     .child(div().flex_1().child(label))
                     .child(div().flex().gap_1p5().children(swatches)));
             }
+            // Row density and tile size: a row of choices each.
+            let choices = |id: &'static str, label: &'static str, names: &[&'static str], chosen: usize, pick: fn(&mut Settings, usize), cx: &mut Context<Self>| {
+                div().h(px(30.)).px_2().flex().items_center().gap_1()
+                    .child(div().flex_1().child(label))
+                    .children(names.iter().enumerate().map(|(index, name)| {
+                        let on = index == chosen;
+                        div().id((id, index)).h(px(24.)).px_2().flex().flex_none().items_center().rounded(px(4.)).cursor_pointer()
+                            .text_size(px(12.)).border_1()
+                            .when(on, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
+                            .when(!on, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED)).hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))))
+                            .child(*name)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { pick(s, index); cx.notify(); }
+                            }))
+                    }))
+            };
+            look = look.child(choices("density", "Плотность строк", &crate::appearance::DENSITIES, settings.density, |s, i| s.density = i, cx));
+            let folder_swatches = theme::FOLDER_COLORS.iter().enumerate().map(|(index, (name, dark, light))| {
+                let colour = if theme::is_light() { *light } else { *dark };
+                div().id(("folder-color", index)).size(px(20.)).flex_none().rounded_full().cursor_pointer()
+                    .flex().items_center().justify_center()
+                    .when(index == settings.folder_color, |dot| dot.border_2().border_color(rgb(TEXT)))
+                    .child(gpui::svg().path("fm/folder-fill.svg").size(px(14.)).text_color(gpui::rgb(colour)))
+                    .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(*name).build(window, cx))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.folder_color = index; cx.notify(); }
+                    }))
+            });
+            look = look.child(div().h(px(30.)).px_2().flex().items_center().gap_2()
+                .child(div().flex_1().child("Цвет папок"))
+                .child(div().flex().gap_1p5().children(folder_swatches)));
+            look = look.child(choices("tile-size", "Размер миниатюр", &crate::thumbs::SIZES, settings.tile_size, |s, i| s.tile_size = i, cx));
             body = body.child(look)
                 .child(section("ФАЙЛЫ").child(check(3, cx)).child(check(4, cx)).child(check(5, cx))
                     .child(self.version_rules_row(cx)).child(check(6, cx)));
@@ -525,16 +562,18 @@ impl Explorer {
             if let Some(error) = settings.error.as_ref() {
                 body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error.clone()));
             }
-            body.child(
-                div().flex().items_center().gap_2()
+            // Only the options scroll; the title and the buttons stay put.
+            div().flex().flex_col().gap_3().min_h_0().text_size(px(13.))
+                .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Настройки"))
+                .child(div().id("settings-options").flex_1().min_h_0().overflow_y_scroll().child(body))
+                .child(div().flex().items_center().gap_2()
                     .child(div().flex_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                         .child("↑ ↓ выбор · Пробел переключить · Enter сохранить"))
                     .child(crate::view::text_button("cancel-settings", "Отмена", crate::view::ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, window, cx| { this.dismiss_interface(window, cx); })))
                     .child(crate::view::text_button("apply-settings", if settings.saving { "Сохранение…" } else { "Сохранить" },
                         crate::view::ButtonKind::Primary)
-                        .on_click(cx.listener(|this, _, _, cx| this.apply_settings(cx)))),
-            )
+                        .on_click(cx.listener(|this, _, _, cx| this.apply_settings(cx)))))
         } else {
             return None;
         };
@@ -565,10 +604,11 @@ impl Explorer {
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),
                 )
                 .child(
-                    body.w(px(if self.palette.is_some() { 560. } else { 520. }))
+                    body.id("interface-body").w(px(if self.palette.is_some() { 560. } else { 520. }))
                         .max_w_full()
-                        .when(self.palette.is_none(), |body| body.p_4())
-                        .overflow_hidden()
+                        // The settings scroll on a small screen.
+                        .when(self.palette.is_none(), |body| body.p_4().max_h(gpui::relative(0.82)).flex().flex_col())
+                        .when(self.palette.is_some(), |body| body.overflow_hidden())
                         .rounded(px(6.))
                         .bg(rgb(RAISED))
                         .border_1()
@@ -758,7 +798,7 @@ impl Explorer {
         m.moved = true;
         let rows = filemanager_core::selection::marquee_rows(
             m.indices.len(),
-            crate::layout::ROW_HEIGHT,
+            crate::layout::row_height(),
             (m.start.y - m.bounds.top()) / px(1.),
             (m.current.y - m.bounds.top()) / px(1.),
             m.bounds.size.height / px(1.),
@@ -788,7 +828,7 @@ impl Explorer {
         } else {
             let rows = filemanager_core::selection::marquee_rows(
                 m.indices.len(),
-                crate::layout::ROW_HEIGHT,
+                crate::layout::row_height(),
                 (m.start.y - m.bounds.top()) / px(1.),
                 (m.current.y - m.bounds.top()) / px(1.),
                 m.bounds.size.height / px(1.),

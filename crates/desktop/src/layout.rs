@@ -4,9 +4,19 @@
 pub const COLUMN_DEFAULT: f32 = 220.;
 pub const COLUMN_MIN: f32 = 150.;
 pub const COLUMN_MAX: f32 = 600.;
-pub const ROW_HEIGHT: f32 = 24.;
+/// Row heights of «Плотность строк»: compact, normal, roomy.
+pub const DENSITIES: [f32; 3] = [22., 24., 28.];
+static ROW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(24f32.to_bits());
+/// The height of a file row, as chosen in the settings.
+pub fn row_height() -> f32 {
+    f32::from_bits(ROW.load(std::sync::atomic::Ordering::Relaxed))
+}
+pub fn set_density(index: usize) {
+    let height = DENSITIES[index.min(DENSITIES.len() - 1)];
+    ROW.store(height.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
 pub fn row_index(local_y: f32, scroll: f32) -> usize {
-    ((local_y + scroll).max(0.) / ROW_HEIGHT).floor() as usize
+    ((local_y + scroll).max(0.) / row_height()).floor() as usize
 }
 pub fn effective_pane_width(estimate: f32, measured: Option<f32>) -> f32 {
     measured

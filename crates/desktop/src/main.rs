@@ -24,6 +24,7 @@ mod jump;
 mod archives;
 mod version_rules;
 mod thumbs;
+mod appearance;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -338,6 +339,10 @@ struct Explorer {
     version_templates: String,
     version_builtin: bool,
     thumbs: thumbs::Thumbs,
+    /// The theme follows Windows; what Windows uses now; the user's own choice.
+    system_theme: bool,
+    system_light: bool,
+    light_preference: bool,
     /// Tiles per row of each pane in the thumbnails view, as last drawn.
     thumb_columns: HashMap<GroupId, usize>,
     renaming: bool,
@@ -614,6 +619,9 @@ impl Explorer {
             version_templates: String::new(),
             version_builtin: true,
             thumbs: Default::default(),
+            system_theme: false,
+            system_light: false,
+            light_preference: false,
             thumb_columns: HashMap::new(),
             undo_stack: Vec::new(),
             directory_cache: HashMap::new(),
@@ -2051,6 +2059,7 @@ fn main() {
                 let mut explorer = Explorer::new(window, cx);
                 explorer.load_version_rules();
                 explorer.load_thumb_panes();
+                explorer.load_look(window, cx);
                 explorer
             });
             explorer.update(cx, |this, cx| {

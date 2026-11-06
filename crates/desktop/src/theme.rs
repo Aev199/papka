@@ -44,8 +44,28 @@ pub fn set_accents(dark: usize, light: usize) {
 pub fn accents() -> (usize, usize) {
     (ACCENT_DARK.load(std::sync::atomic::Ordering::Relaxed), ACCENT_LIGHT.load(std::sync::atomic::Ordering::Relaxed))
 }
+/// «Цвет папок»: the label and the dark/light colour of each choice; the
+/// first is the palette's own.
+pub const FOLDER_COLORS: [(&str, u32, u32); 4] = [
+    ("Жёлтый", 0xE6B54A, 0xB9831B),
+    ("Синий", 0x6FA8EE, 0x2F6FC4),
+    ("Зелёный", 0x62B97C, 0x2E8A4E),
+    ("Серый", 0x9AA3AE, 0x6B7480),
+];
+pub const FOLDER_COLOR_KEY: &str = "folder_color";
+static FOLDER_COLOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub fn set_folder_color(index: usize) {
+    FOLDER_COLOR.store(index.min(FOLDER_COLORS.len() - 1), std::sync::atomic::Ordering::Relaxed);
+}
+pub fn folder_color() -> usize {
+    FOLDER_COLOR.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub fn themed(color: u32) -> u32 {
     let light = is_light();
+    if color == FOLDER {
+        let (_, dark, bright) = FOLDER_COLORS[folder_color()];
+        return if light { bright } else { dark };
+    }
     let (dark, light_scheme) = accents();
     resolve_with(light, if light { light_scheme } else { dark }, color)
 }

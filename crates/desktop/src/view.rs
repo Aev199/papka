@@ -30,7 +30,7 @@ use crate::keys;
 use crate::theme::*;
 use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, GroupId, TabDrag};
 
-use crate::layout::ROW_HEIGHT;
+use crate::layout::row_height;
 
 /// Fixed, as in Atlas: the sidebar does not grow with the window.
 const SIDEBAR_WIDTH: f32 = 220.;
@@ -1271,7 +1271,7 @@ impl Explorer {
             .when(!list_mode, |this| this.border_r_1().border_color(rgb(BORDER)));
         if !list_mode {
             let current = folder == self.pane_path(side);
-            column = column.child(div().h(px(ROW_HEIGHT)).flex_none().px_2().flex().items_center()
+            column = column.child(div().h(px(row_height())).flex_none().px_2().flex().items_center()
                 .border_b_1().border_color(rgb(BORDER)).text_size(px(12.))
                 .text_color(rgb(if current { TEXT } else { TEXT_MUTED }))
                 .child(div().min_w_0().truncate().child(browser::display_name(&folder))));
@@ -1331,7 +1331,7 @@ impl Explorer {
                             let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
                                 .map(|position| { let entry = listing.entries[indices[position]].clone(); this.tile(&entry, &folder, side, cx) })
                                 .collect::<Vec<_>>();
-                            div().h(px(crate::thumbs::TILE_HEIGHT + crate::thumbs::TILE_GAP)).flex().gap(px(crate::thumbs::TILE_GAP))
+                            div().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP)).flex().gap(px(crate::thumbs::TILE_GAP))
                                 .children(tiles).into_any_element()
                         }).collect::<Vec<_>>()
                     }}))
@@ -1392,7 +1392,7 @@ impl Explorer {
     /// A tile of the thumbnails view: the picture (or a large icon) and the
     /// name under it; clicks, drags and the menu work as on a list row.
     fn tile(&mut self, entry: &Entry, folder: &Path, side: GroupId, cx: &mut Context<Self>) -> AnyElement {
-        use crate::thumbs::{PICTURE, TILE_HEIGHT, TILE_WIDTH};
+        let (picture_size, tile_h, tile_w) = (crate::thumbs::picture(), crate::thumbs::tile_height(), crate::thumbs::tile_width());
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
         let selected = self.is_selected(&path);
@@ -1402,18 +1402,18 @@ impl Explorer {
         let right_target = is_dir && self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&path);
         let renaming = self.renaming && focused_pane && self.selected.as_ref() == Some(&path);
         let mut tile = div().id(SharedString::from(format!("tile-{}", path.display())))
-            .w(px(TILE_WIDTH)).h(px(TILE_HEIGHT)).flex_none().p_1().flex().flex_col().items_center().gap_1()
+            .w(px(tile_w)).h(px(tile_h)).flex_none().p_1().flex().flex_col().items_center().gap_1()
             .rounded(px(4.)).cursor_pointer().text_size(px(12.)).text_color(rgb(if entry.hidden { TEXT_MUTED } else { TEXT }))
             .when(selected, |tile| tile.bg(rgb(if focused_pane { ACCENT_SOFT } else { HOVER })))
             .when(!selected && right_target, |tile| tile.bg(rgb(ACCENT_SOFT)))
             .when(!selected && !right_target, |tile| tile.hover(|style| style.bg(rgb(HOVER))))
-            .child(div().w_full().h(px(PICTURE)).flex_none().flex().items_center().justify_center()
+            .child(div().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
                 .child(match picture {
-                    Some(file) => img(file).max_w(px(TILE_WIDTH - 12.)).max_h(px(PICTURE)).object_fit(ObjectFit::Contain)
+                    Some(file) => img(file).max_w(px(tile_w - 12.)).max_h(px(picture_size)).object_fit(ObjectFit::Contain)
                         // A file that only looks like a picture keeps its icon.
-                        .with_fallback(move || svg().path(icon_path).size(px(48.)).text_color(rgb(tint)).into_any_element())
+                        .with_fallback(move || svg().path(icon_path).size(px((picture_size / 2.).round())).text_color(rgb(tint)).into_any_element())
                         .when(entry.hidden, |image| image.opacity(0.55)).into_any_element(),
-                    None => svg().path(icon_path).size(px(48.)).text_color(rgb(tint))
+                    None => svg().path(icon_path).size(px((picture_size / 2.).round())).text_color(rgb(tint))
                         .when(entry.hidden, |svg| svg.opacity(0.55)).into_any_element(),
                 }));
         tile = if renaming {
@@ -1500,7 +1500,7 @@ impl Explorer {
         let metadata_text = if selected { SELECTION_TEXT } else { TEXT_MUTED };
         let tint = if selected { SELECTION_TEXT } else { tint };
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
-            .w_full().h(px(ROW_HEIGHT)).pl(px(6.)).pr_2().flex().items_center().gap_2()
+            .w_full().h(px(row_height())).pl(px(6.)).pr_2().flex().items_center().gap_2()
             .border_l_2().border_color(rgb(bg.unwrap_or(base)))
             .text_size(px(13.)).text_color(rgb(text)).cursor_pointer()
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
@@ -1547,7 +1547,7 @@ impl Explorer {
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
         row = if self.renaming && side == self.active_side() && self.selected.as_ref() == Some(&path) {
             // A compact field that fits the 24 px row and starts where the name does.
-            row.child(name_cell().h(px(ROW_HEIGHT)).flex().items_center().ml(px(-5.)).mr(px(5.)).text_color(rgb(TEXT))
+            row.child(name_cell().h(px(row_height())).flex().items_center().ml(px(-5.)).mr(px(5.)).text_color(rgb(TEXT))
                 .child(Input::new(&self.rename_input).xsmall().h(px(20.)).w_full().text_size(px(13.))))
         } else {
             let badge = |text: String| div().flex_none().px_1p5().rounded_sm().text_size(px(11.))
@@ -1748,7 +1748,7 @@ impl Explorer {
                 let text = if selected { SELECTION_TEXT } else { TEXT };
                 let dim = if selected { SELECTION_TEXT } else { TEXT_DIM };
                 let reveal = hit.path.clone();
-                div().id(("search-hit", index)).group("hit").w_full().h(px(ROW_HEIGHT)).px_2().flex().items_center().gap_2()
+                div().id(("search-hit", index)).group("hit").w_full().h(px(row_height())).px_2().flex().items_center().gap_2()
                     .rounded(px(4.)).cursor_pointer().text_color(rgb(text))
                     .when(selected, |row| row.bg(rgb(SELECTED)))
                     .when(!selected, |row| row.hover(|style| style.bg(rgb(HOVER))))
