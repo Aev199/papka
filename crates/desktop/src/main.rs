@@ -23,6 +23,7 @@ mod labels;
 mod jump;
 mod archives;
 mod version_rules;
+mod thumbs;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -336,6 +337,9 @@ struct Explorer {
     version_input: Entity<InputState>,
     version_templates: String,
     version_builtin: bool,
+    thumbs: thumbs::Thumbs,
+    /// Tiles per row of each pane in the thumbnails view, as last drawn.
+    thumb_columns: HashMap<GroupId, usize>,
     renaming: bool,
     undo_stack: Vec<Undo>,
     directory_cache: HashMap<PathBuf, Arc<browser::Listing>>,
@@ -609,6 +613,8 @@ impl Explorer {
             version_input,
             version_templates: String::new(),
             version_builtin: true,
+            thumbs: Default::default(),
+            thumb_columns: HashMap::new(),
             undo_stack: Vec::new(),
             directory_cache: HashMap::new(),
             directory_loading: HashMap::new(),
@@ -1827,6 +1833,7 @@ impl Explorer {
     }
 
     fn load_directory(&mut self, folder: PathBuf, force: bool, cx: &mut Context<Self>) {
+        if force { self.forget_thumbs(&folder); }
         if !force && (self.directory_cache.contains_key(&folder)
             || self.directory_loading.contains_key(&folder)
             || self.directory_errors.contains_key(&folder)) {
@@ -2043,6 +2050,7 @@ fn main() {
             let explorer = cx.new(|cx| {
                 let mut explorer = Explorer::new(window, cx);
                 explorer.load_version_rules();
+                explorer.load_thumb_panes();
                 explorer
             });
             explorer.update(cx, |this, cx| {

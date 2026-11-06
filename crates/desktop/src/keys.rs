@@ -17,7 +17,7 @@ actions!(filemanager, [
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
     CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
     OpenJump, FilterEnter, FilterSearch, LabelWork, LabelReview, LabelIssued, LabelObsolete, LabelImportant, LabelClear,
-    CopyToOther, MoveToOther, NewFile, Terminal, TerminalAdmin,
+    CopyToOther, MoveToOther, NewFile, Terminal, TerminalAdmin, ViewThumbs,
 ]);
 
 const CONTEXT: &str = "Filemanager";
@@ -92,6 +92,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-i", ToggleInspector, Some(CONTEXT)),
         KeyBinding::new("ctrl-1", ViewList, Some(CONTEXT)),
         KeyBinding::new("ctrl-2", ViewColumns, Some(CONTEXT)),
+        KeyBinding::new("ctrl-3", ViewThumbs, Some(CONTEXT)),
         KeyBinding::new("alt-1", LabelWork, Some(CONTEXT)),
         KeyBinding::new("alt-2", LabelReview, Some(CONTEXT)),
         KeyBinding::new("alt-3", LabelIssued, Some(CONTEXT)),
@@ -346,7 +347,10 @@ impl Explorer {
         let Some(folder) = selected.parent().map(Path::to_path_buf) else { return };
         let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
         if let Some(position) = indices.iter().position(|&i| listing.entries[i].path == selected) {
-            self.scroll_handle(self.browser.active, &folder).scroll_to_item(position, ScrollStrategy::Nearest);
+            // In tiles the list's items are rows of them.
+            let side = self.browser.active;
+            let item = if self.thumbs_view(side) { position / self.thumb_columns.get(&side).copied().unwrap_or(1).max(1) } else { position };
+            self.scroll_handle(side, &folder).scroll_to_item(item, ScrollStrategy::Nearest);
         }
     }
 
@@ -376,6 +380,13 @@ impl Explorer {
         self.selected = Some(order[next].clone());
         self.reveal_selected();
         cx.notify();
+    }
+
+    /// ↑ ↓: a row up or down; in tiles, a whole row of them.
+    fn move_rows(&mut self, rows: isize, cx: &mut Context<Self>) {
+        let side = self.active_side();
+        let step = if self.thumbs_view(side) { self.thumb_columns.get(&side).copied().unwrap_or(1) as isize } else { 1 };
+        self.move_selection(rows * step, None, cx);
     }
 
     fn move_selection(&mut self, delta: isize, edge: Option<bool>, cx: &mut Context<Self>) {
@@ -494,10 +505,6 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn set_miller(&mut self, miller: bool, cx: &mut Context<Self>) {
-        self.browser.active_group_mut().miller = miller;
-        cx.notify();
-    }
 
     pub(crate) fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.copy_paths(&[path.to_path_buf()], crate::CopyAs::Path, cx);
@@ -716,8 +723,8 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn key_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(1,cx); } else if self.settings.is_some() {self.settings_move(1,cx);} else if self.search_active { self.move_search_selection(1, cx); } else if !self.interface_modal() { self.move_selection(1, None, cx); } }
-    pub(crate) fn key_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(-1,cx); } else if self.settings.is_some() {self.settings_move(-1,cx);} else if self.search_active { self.move_search_selection(-1, cx); } else if !self.interface_modal() { self.move_selection(-1, None, cx); } }
+    pub(crate) fn key_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(1,cx); } else if self.settings.is_some() {self.settings_move(1,cx);} else if self.search_active { self.move_search_selection(1, cx); } else if !self.interface_modal() { self.move_rows(1, cx); } }
+    pub(crate) fn key_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(-1,cx); } else if self.settings.is_some() {self.settings_move(-1,cx);} else if self.search_active { self.move_search_selection(-1, cx); } else if !self.interface_modal() { self.move_rows(-1, cx); } }
 
     /// Enter in the quick filter: the selected match opens (a folder, a
     /// file); with nothing matching here, the subfolders are searched.
@@ -815,11 +822,13 @@ impl Explorer {
     pub(crate) fn key_column_left(&mut self, _: &ColumnLeft, _: &mut Window, cx: &mut Context<Self>) {
         // In the quick look ← → turn the pages of a PDF.
         if self.quick_look_paged() { self.quick_look_page(-1, cx); return; }
+        if self.thumbs_view(self.active_side()) { self.move_selection(-1, None, cx); return; }
         if self.miller(self.active_side()) { self.go_up(cx); }
     }
 
     pub(crate) fn key_column_right(&mut self, _: &ColumnRight, _: &mut Window, cx: &mut Context<Self>) {
         if self.quick_look_paged() { self.quick_look_page(1, cx); return; }
+        if self.thumbs_view(self.active_side()) { self.move_selection(1, None, cx); return; }
         if !self.miller(self.active_side()) { return; }
         if let Some(entry) = self.selected_entry().filter(|entry| entry.is_directory) {
             let side = self.active_side();
@@ -901,8 +910,8 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn key_view_list(&mut self, _: &ViewList, _: &mut Window, cx: &mut Context<Self>) { self.set_miller(false, cx); }
-    pub(crate) fn key_view_columns(&mut self, _: &ViewColumns, _: &mut Window, cx: &mut Context<Self>) { self.set_miller(true, cx); }
+    pub(crate) fn key_view_list(&mut self, _: &ViewList, _: &mut Window, cx: &mut Context<Self>) { self.set_view(false, false, cx); }
+    pub(crate) fn key_view_columns(&mut self, _: &ViewColumns, _: &mut Window, cx: &mut Context<Self>) { self.set_view(true, false, cx); }
 
     pub(crate) fn key_copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
         let mut paths = self.selection();

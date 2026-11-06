@@ -1096,6 +1096,10 @@ impl Explorer {
                 .child(column_scroll_area(gpui::SharedString::from(format!("columns-{}",side.0)), &scroll).child(group))
                 .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
+        } else if self.thumbs_view(side) {
+            div().flex_1().min_h_0().flex().flex_col()
+                .child(self.column(path.clone(), side, None, cx))
+                .into_any_element()
         } else {
             // Columns keep their widths, as in Explorer: a table wider than
             // the pane scrolls sideways, header and rows together.
@@ -1316,6 +1320,26 @@ impl Explorer {
             let count = indices.len();
             let list_id = SharedString::from(format!("list-{}-{}", side.0, folder.display()));
             let background_marquee_folder=folder.clone();
+            if list_mode && self.thumbs_view(side) {
+                // Tiles: each list item is a row of them.
+                let per_row = crate::thumbs::columns(self.pane_width_for(side));
+                self.thumb_columns.insert(side, per_row);
+                let rows = count.div_ceil(per_row);
+                return column.child(div().flex_1().min_h_0().child(
+                    uniform_list(list_id, rows, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
+                        range.map(|row| {
+                            let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
+                                .map(|position| { let entry = listing.entries[indices[position]].clone(); this.tile(&entry, &folder, side, cx) })
+                                .collect::<Vec<_>>();
+                            div().h(px(crate::thumbs::TILE_HEIGHT + crate::thumbs::TILE_GAP)).flex().gap(px(crate::thumbs::TILE_GAP))
+                                .children(tiles).into_any_element()
+                        }).collect::<Vec<_>>()
+                    }}))
+                    .track_scroll(&handle)
+                    .h_full()
+                    .pt_2().pl_2().pr(px(12.))
+                )).into_any_element();
+            }
             column = column.child(
                 div().flex_1().min_h_0().child(
                     uniform_list(list_id, count, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
@@ -1363,6 +1387,94 @@ impl Explorer {
             );
         }
         column.into_any_element()
+    }
+
+    /// A tile of the thumbnails view: the picture (or a large icon) and the
+    /// name under it; clicks, drags and the menu work as on a list row.
+    fn tile(&mut self, entry: &Entry, folder: &Path, side: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        use crate::thumbs::{PICTURE, TILE_HEIGHT, TILE_WIDTH};
+        let path = entry.path.clone();
+        let is_dir = entry.is_directory;
+        let selected = self.is_selected(&path);
+        let focused_pane = side == self.active_side();
+        let picture = if is_dir { None } else { self.thumb(&path, cx) };
+        let (icon_path, tint) = entry_icon(entry);
+        let right_target = is_dir && self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&path);
+        let renaming = self.renaming && focused_pane && self.selected.as_ref() == Some(&path);
+        let mut tile = div().id(SharedString::from(format!("tile-{}", path.display())))
+            .w(px(TILE_WIDTH)).h(px(TILE_HEIGHT)).flex_none().p_1().flex().flex_col().items_center().gap_1()
+            .rounded(px(4.)).cursor_pointer().text_size(px(12.)).text_color(rgb(if entry.hidden { TEXT_MUTED } else { TEXT }))
+            .when(selected, |tile| tile.bg(rgb(if focused_pane { ACCENT_SOFT } else { HOVER })))
+            .when(!selected && right_target, |tile| tile.bg(rgb(ACCENT_SOFT)))
+            .when(!selected && !right_target, |tile| tile.hover(|style| style.bg(rgb(HOVER))))
+            .child(div().w_full().h(px(PICTURE)).flex_none().flex().items_center().justify_center()
+                .child(match picture {
+                    Some(file) => img(file).max_w(px(TILE_WIDTH - 12.)).max_h(px(PICTURE)).object_fit(ObjectFit::Contain)
+                        // A file that only looks like a picture keeps its icon.
+                        .with_fallback(move || svg().path(icon_path).size(px(48.)).text_color(rgb(tint)).into_any_element())
+                        .when(entry.hidden, |image| image.opacity(0.55)).into_any_element(),
+                    None => svg().path(icon_path).size(px(48.)).text_color(rgb(tint))
+                        .when(entry.hidden, |svg| svg.opacity(0.55)).into_any_element(),
+                }));
+        tile = if renaming {
+            tile.child(div().w_full().h(px(24.)).flex().items_center().text_color(rgb(TEXT))
+                .child(Input::new(&self.rename_input).xsmall().h(px(22.)).w_full().text_size(px(12.))))
+        } else {
+            tile.child(div().w_full().text_center().line_clamp(2).line_height(px(16.)).child(entry.name.clone()))
+        };
+        if renaming {
+            return tile.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).into_any_element();
+        }
+        if is_dir {
+            let (internal_target, external_target, hover_target) = (path.clone(), path.clone(), path.clone());
+            tile = tile
+                .drag_over::<FileDragInfo>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
+                .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
+                .on_drop(cx.listener(move |this, data: &FileDragInfo, window, cx| {
+                    cx.stop_propagation();
+                    this.drop_files(&data.paths, internal_target.clone(), window.modifiers(), cx);
+                }))
+                .on_drop(cx.listener(move |this, data: &ExternalPaths, _, cx| {
+                    cx.stop_propagation();
+                    this.drop_into(data.paths(), external_target.clone(), true, cx);
+                }))
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    if let Some(drag) = this.right_drag.as_mut().filter(|drag| drag.active && !drag.claimed) {
+                        drag.target = Some(hover_target.clone());
+                        drag.claimed = true;
+                    }
+                    this.spring_hover(crate::spring::SpringTarget::Folder(side, hover_target.clone()), cx);
+                }));
+        }
+        let (menu_path, menu_folder, column_folder) = (path.clone(), folder.to_path_buf(), folder.to_path_buf());
+        let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
+        tile.on_drag(FileDragInfo { paths: drag_paths }, |info: &FileDragInfo, position, _, cx| {
+                let name = match info.paths.as_slice() {
+                    [single] => browser::display_name(single),
+                    many => format!("{} элементов", many.len()),
+                };
+                cx.new(|_| FileDragPreview { name, position })
+            })
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                if !this.is_selected(&menu_path) {
+                    this.navigate_side(side, &menu_folder, Some(menu_path.clone()), cx);
+                }
+                let paths = if this.is_selected(&menu_path) { this.selection() } else { vec![menu_path.clone()] };
+                this.context_menu = None;
+                this.right_drag = Some(crate::RightDrag {
+                    paths, start: event.position, position: event.position, active: false,
+                    target: None, claimed: false, click_menu: MenuTarget::Entry(menu_path.clone()),
+                });
+            }))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if this.is_double_click(event, &path) {
+                    this.open_entry(path.clone(), is_dir, side, cx);
+                } else {
+                    this.click_entry(side, &column_folder, path.clone(), event.modifiers(), cx);
+                }
+            }))
+            .into_any_element()
     }
 
     fn row(&self, entry: &Entry, folder: &Path, side: GroupId, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -2128,10 +2240,12 @@ impl Explorer {
                     this.show_hidden = !this.show_hidden;
                     cx.notify();
                 })))
-            .child(bar_button("bar-list", "fm/list.svg", "Список (Ctrl+1)", !self.miller(self.active_side()))
-                .on_click(cx.listener(|this, _, _, cx| this.set_miller(false, cx))))
+            .child(bar_button("bar-list", "fm/list.svg", "Список (Ctrl+1)", !self.miller(self.active_side()) && !self.thumbs_view(self.active_side()))
+                .on_click(cx.listener(|this, _, _, cx| this.set_view(false, false, cx))))
             .child(bar_button("bar-columns", "fm/columns.svg", "Колонки (Ctrl+2)", self.miller(self.active_side()))
-                .on_click(cx.listener(|this, _, _, cx| this.set_miller(true, cx)))))
+                .on_click(cx.listener(|this, _, _, cx| this.set_view(true, false, cx))))
+            .child(bar_button("bar-thumbs", "fm/grid.svg", "Миниатюры (Ctrl+3)", self.thumbs_view(self.active_side()))
+                .on_click(cx.listener(|this, _, _, cx| this.set_view(false, true, cx)))))
     }
 
     // ------------------------------------------------------- context menu
@@ -2941,6 +3055,7 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_toggle_inspector(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_view_list(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_view_columns(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::ViewThumbs,_,cx| { if !this.interface_modal() { this.set_view(false,true,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_copy_path(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_all(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_clipboard_copy(this,event,window,cx); } }))
@@ -3023,7 +3138,7 @@ fn outside_window(position: Point<Pixels>, window: &Window) -> bool {
 const TOUR: &[(&str, &[(&str, &str)])] = &[
     ("ПАПКИ", &[
         ("→  ←", "в колонках: войти в папку и выйти из неё"),
-        ("Ctrl+1  Ctrl+2", "список или колонки, у каждой панели свой"),
+        ("Ctrl+1  Ctrl+2  Ctrl+3", "список, колонки или миниатюры"),
         ("Alt+←  Alt+→", "назад и вперёд, или боковые кнопки мыши"),
         ("Ctrl+L", "ввести путь"),
     ]),

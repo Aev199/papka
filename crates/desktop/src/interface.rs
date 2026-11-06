@@ -228,8 +228,9 @@ impl Explorer {
             ToggleHidden => self.key_toggle_hidden(&crate::keys::ToggleHidden, window, cx),
             Sidebar => self.key_toggle_sidebar(&crate::keys::ToggleSidebar, window, cx),
             Inspector => self.key_toggle_inspector(&crate::keys::ToggleInspector, window, cx),
-            List => self.set_miller(false, cx),
-            Columns => self.set_miller(true, cx),
+            List => self.set_view(false, false, cx),
+            Columns => self.set_view(true, false, cx),
+            Thumbnails => self.set_view(false, true, cx),
             PinTab => {
                 self.browser.toggle_pin(self.browser.active, self.browser.active_group().active_tab);
                 cx.notify();
@@ -873,6 +874,7 @@ fn command_icon(id: CommandId) -> &'static str {
         Inspector => "fm/panel-right.svg",
         List => "fm/list.svg",
         Columns => "fm/columns.svg",
+        Thumbnails => "fm/grid.svg",
         Settings => "fm/settings.svg",
         Tour => "fm/help.svg",
         Compare => "fm/split.svg",

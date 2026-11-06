@@ -41,6 +41,7 @@ pub enum CommandId {
     Inspector,
     List,
     Columns,
+    Thumbnails,
     PinTab,
     Settings,
     Tour,
@@ -129,6 +130,7 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
         (Inspector, "Панель сведений", "Ctrl+I", VIEW),
         (List, "Вид список", "Ctrl+1", VIEW),
         (Columns, "Вид колонки", "Ctrl+2", VIEW),
+        (Thumbnails, "Вид миниатюры", "Ctrl+3", VIEW),
         (Settings, "Настройки", "Ctrl+,", VIEW),
         (Tour, "Основные приёмы и клавиши", "", VIEW),
     ]
