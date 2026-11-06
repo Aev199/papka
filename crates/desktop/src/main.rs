@@ -285,6 +285,8 @@ struct Explorer {
     address_editing: Option<GroupId>,
     /// The name filter field is shown in the bottom bar (Ctrl+F or the magnifier).
     filter_open: bool,
+    /// The bottom field searches subfolders (Ctrl+F) rather than filtering.
+    search_mode: bool,
     /// Width of one file pane at the last layout, for column dropping.
     pane_width: f32,
     pane_measured_widths: HashMap<GroupId, f32>,
@@ -363,7 +365,6 @@ struct Explorer {
     marked: Vec<PathBuf>,
     /// Fixed end of a Shift range.
     anchor: Option<PathBuf>,
-    typeahead: String,
     /// Lower-case name filter for the focused folder ("" = none).
     filter: String,
     /// Set when navigation should reset the filter at the next render.
@@ -373,7 +374,6 @@ struct Explorer {
     saving_workspace: bool,
     /// Transfer paused on name conflicts, with the conflicting items.
     pending_transfer: Option<(Transfer, Vec<PathBuf>)>,
-    typeahead_at: Option<std::time::Instant>,
     status: String,
     search_input: Entity<InputState>,
     address_input: Entity<InputState>,
@@ -460,12 +460,13 @@ impl Explorer {
             match event {
                 InputEvent::Change => {
                     this.search_query = input.read(cx).value().to_string();
-                    this.filter = this.search_query.trim().to_lowercase();
-                    if this.filter.is_empty() && this.search_active {
+                    // Ctrl+F's search leaves the folder behind unfiltered.
+                    this.filter = if this.search_mode { String::new() } else { this.search_query.trim().to_lowercase() };
+                    if this.search_query.trim().is_empty() && this.search_active {
                         this.close_search();
                     } else if this.search_active {
                         this.schedule_search(cx);
-                    } else {
+                    } else if !this.search_mode {
                         this.select_first_match(cx);
                     }
                     cx.notify();
@@ -559,16 +560,15 @@ impl Explorer {
             scroll_handles: HashMap::new(),
             address_editing: None,
             filter_open: false,
+            search_mode: false,
             marked: Vec::new(),
             anchor: None,
-            typeahead: String::new(),
             filter: String::new(),
             clear_filter: false,
             workspace_names: Vec::new(),
             workspace_input,
             saving_workspace: false,
             pending_transfer: None,
-            typeahead_at: None,
             pane_width: 800.,
             pane_measured_widths: HashMap::new(),
             column_scroll_handles: Default::default(),

@@ -194,6 +194,7 @@ impl Explorer {
         let side = self.active_side();
         self.close_search();
         self.filter_open = false;
+        self.search_mode = false;
         self.filter.clear();
         self.search_query.clear();
         self.clear_filter = true;

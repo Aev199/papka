@@ -2005,13 +2005,17 @@ impl Explorer {
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             // Atlas: a magnifier in the corner; the filter field opens in place.
             .when(!filter_shown, |this| this.child(
-                bar_button("filter-open", "fm/search.svg", "Фильтр по имени (Ctrl+F)", false)
+                bar_button("filter-open", "fm/search.svg", "Поиск во вложенных папках (Ctrl+F). Фильтр этой папки — просто начните набирать имя", false)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.key_find(&crate::keys::Find, window, cx);
                     }))))
             .when(filter_shown, |this| this.child(
                 div().id("filter-field").key_context("QuickFilter").flex_none().w(px(200.))
-                    .tooltip(|window, cx| Tooltip::new("Фильтр по имени в этой папке: ↑ ↓ — выбор, Enter — открыть, Shift+Enter — искать во вложенных папках, Esc — закрыть.").build(window, cx))
+                    .tooltip({ let search = self.search_mode; move |window, cx| Tooltip::new(if search {
+                        "Поиск в этой папке и во всех вложенных: Enter — найти, ↑ ↓ — выбор, Esc — закрыть."
+                    } else {
+                        "Фильтр по имени в этой папке: ↑ ↓ — выбор, Enter — открыть, Shift+Enter — искать во вложенных папках, Esc — закрыть."
+                    }).build(window, cx) })
                     .child(Input::new(&self.search_input).h(px(24.)).text_size(px(12.))
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
             .when_some(count, |this, count| this.child(items_label(count)))
@@ -2919,7 +2923,8 @@ impl Render for Explorer {
                 if let Some(text) = event.keystroke.key_char.as_deref()
                     .filter(|t| t.chars().count() == 1 && t.chars().all(|c| !c.is_control() && c != ' '))
                 {
-                    this.type_ahead(text, cx);
+                    this.type_to_filter(text, window, cx);
+                    cx.stop_propagation();
                 }
             }))
             // Atlas: the sidebar runs the full height; tabs, navigation,
@@ -2988,7 +2993,8 @@ const TOUR: &[(&str, &[(&str, &str)])] = &[
         ("Del  Ctrl+Z", "в Корзину, отменить"),
     ]),
     ("ПОИСК И СВЕДЕНИЯ", &[
-        ("Ctrl+F", "поиск файлов"),
+        ("Набор букв", "фильтр по имени в этой папке"),
+        ("Ctrl+F", "поиск во вложенных папках"),
         ("Ctrl+K", "все команды и их клавиши"),
         ("Ctrl+I", "сведения о файле и лента изменений папки"),
     ]),

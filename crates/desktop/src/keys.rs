@@ -323,25 +323,21 @@ impl Explorer {
         cx.notify();
     }
 
-    /// Type-ahead: letters typed within a second jump to the first name
-    /// starting with them.
-    pub(crate) fn type_ahead(&mut self, text: &str, cx: &mut Context<Self>) {
-        let now = std::time::Instant::now();
-        if self.typeahead_at.is_none_or(|at| now.duration_since(at).as_millis() > 1000) {
-            self.typeahead.clear();
-        }
-        self.typeahead_at = Some(now);
-        self.typeahead.push_str(&text.to_lowercase());
-        let side = self.active_side();
-        let folder = self.pane_path(side);
-        let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
-        let needle = self.typeahead.clone();
-        let found = indices.iter().map(|&i| &listing.entries[i])
-            .find(|entry| entry.name.to_lowercase().starts_with(&needle))
-            .map(|entry| entry.path.clone());
-        if let Some(path) = found {
-            self.navigate_side(side, &folder, Some(path), cx);
-        }
+    /// A letter typed in the file list opens the name filter with it, as
+    /// in OneCommander: the folder narrows down as you type.
+    pub(crate) fn type_to_filter(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_mode = false;
+        self.filter_open = true;
+        self.search_input.update(cx, |input, cx| {
+            input.set_placeholder("Фильтр · Shift+Enter — во вложенных", window, cx);
+            input.set_value(text.to_owned(), window, cx);
+        });
+        self.search_query = text.to_owned();
+        self.filter = text.trim().to_lowercase();
+        self.select_first_match(cx);
+        let focus = self.search_input.focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
     }
 
     /// Scrolls the list holding the selection so it is visible.
@@ -595,8 +591,19 @@ impl Explorer {
         self.refresh_visible_directories(cx);
     }
     pub(crate) fn key_stage(&mut self, _: &Stage, _: &mut Window, cx: &mut Context<Self>) { self.stage(cx); }
+    /// Ctrl+F: search in this folder and all its subfolders; Enter starts it.
+    /// (Typing in the list is the name filter of this folder.)
     pub(crate) fn key_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_mode = true;
         self.filter_open = true;
+        // The filter narrows the folder behind; a search does not.
+        self.filter.clear();
+        self.search_input.update(cx, |input, cx| {
+            input.set_placeholder("Поиск во вложенных папках · Enter", window, cx);
+            let query = self.search_query.clone();
+            input.set_value(query, window, cx);
+            input.select_all(window, cx);
+        });
         let focus = self.search_input.focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -693,7 +700,8 @@ impl Explorer {
         self.context_menu = None;
         self.confirm_recycle = None;
         self.filter_open = false;
-        if self.search_active || !self.filter.is_empty() {
+        self.search_mode = false;
+        if self.search_active || !self.filter.is_empty() || !self.search_query.is_empty() {
             self.close_search();
             self.filter.clear();
             self.search_query.clear();
@@ -717,6 +725,7 @@ impl Explorer {
             if let Some(index) = self.search.selected { self.open_search_hit(index, cx); }
             return;
         }
+        if self.search_mode { self.start_full_search(cx); return; }
         if self.selected_entry().is_none() { self.select_first_match(cx); }
         match self.selected_entry() {
             Some(entry) => {
