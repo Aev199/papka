@@ -260,7 +260,8 @@ impl Explorer {
             focus,
             selected: 0,
             draft: Preferences {
-                light: theme::is_light(),
+                // The user's own choice, not what Windows shows right now.
+                light: if self.system_theme { self.light_preference } else { theme::is_light() },
                 show_hidden: self.show_hidden,
                 show_sidebar: self.show_sidebar,
                 show_inspector: self.show_inspector,

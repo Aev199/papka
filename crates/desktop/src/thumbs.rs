@@ -38,7 +38,8 @@ pub(crate) struct Thumbs {
 
 /// Tiles in a row of a pane `width` wide.
 pub(crate) fn columns(width: f32) -> usize {
-    (((width - 16.) / (tile_width() + TILE_GAP)).floor() as usize).max(1)
+    // The list's own padding: 8 px left, 12 px right, and a little slack.
+    (((width - 24.) / (tile_width() + TILE_GAP)).floor() as usize).max(1)
 }
 
 pub(crate) fn is_picture(path: &Path) -> bool {
@@ -87,7 +88,15 @@ impl Explorer {
     }
 
     fn pump_thumbs(&mut self, cx: &mut Context<Self>) {
-        if self.thumbs.running || self.thumbs.queue.is_empty() { return; }
+        if self.thumbs.running { return; }
+        // Folders no longer shown in tiles wait until they are again.
+        let shown: Vec<PathBuf> = self.browser.leaves().into_iter()
+            .filter(|&side| self.thumbs_view(side)).map(|side| self.pane_path(side)).collect();
+        let (keep, drop): (VecDeque<PathBuf>, VecDeque<PathBuf>) = std::mem::take(&mut self.thumbs.queue).into_iter()
+            .partition(|path| path.parent().is_some_and(|parent| shown.iter().any(|folder| folder == parent)));
+        for path in drop { self.thumbs.map.remove(&path); }
+        self.thumbs.queue = keep;
+        if self.thumbs.queue.is_empty() { return; }
         self.thumbs.running = true;
         let batch: Vec<PathBuf> = (0..12).filter_map(|_| self.thumbs.queue.pop_front()).collect();
         let task = cx.background_spawn(async move {
@@ -130,7 +139,8 @@ mod tests {
     fn tiles_fill_the_pane_and_never_vanish() {
         assert_eq!(super::columns(0.), 1);
         assert_eq!(super::columns(100.), 1);
-        assert_eq!(super::columns(16. + 3. * (super::tile_width() + super::TILE_GAP)), 3);
+        assert_eq!(super::columns(24. + 3. * (super::tile_width() + super::TILE_GAP)), 3);
+        assert_eq!(super::columns(23. + 3. * (super::tile_width() + super::TILE_GAP)), 2);
         assert_eq!(super::columns(1100.), 7);
     }
 }

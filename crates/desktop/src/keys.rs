@@ -327,14 +327,19 @@ impl Explorer {
     /// A letter typed in the file list opens the name filter with it, as
     /// in OneCommander: the folder narrows down as you type.
     pub(crate) fn type_to_filter(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Over the quick look or the search results letters do nothing.
+        if self.quick_look.is_some() || self.search_active { return; }
+        // A filter already open grows: a click into the list in between
+        // must not throw away what was typed.
+        let query = if self.filter_open && !self.search_mode { format!("{}{text}", self.search_query) } else { text.to_owned() };
         self.search_mode = false;
         self.filter_open = true;
         self.search_input.update(cx, |input, cx| {
             input.set_placeholder("Фильтр · Shift+Enter — во вложенных", window, cx);
-            input.set_value(text.to_owned(), window, cx);
+            input.set_value(query.clone(), window, cx);
         });
-        self.search_query = text.to_owned();
-        self.filter = text.trim().to_lowercase();
+        self.filter = query.trim().to_lowercase();
+        self.search_query = query;
         self.select_first_match(cx);
         let focus = self.search_input.focus_handle(cx);
         window.focus(&focus, cx);
@@ -626,6 +631,11 @@ impl Explorer {
         self.begin_new_folder(window, cx);
     }
 
+    /// The file panes have the keyboard (no field, dialog or overlay).
+    pub(crate) fn list_focused(&self, window: &Window) -> bool {
+        !self.interface_modal() && self.focus_handle.is_focused(window)
+    }
+
     /// Alt+C / Alt+M: the selection goes to the folder of the other pane,
     /// through the same checked transfer as a drag.
     pub(crate) fn transfer_to_other(&mut self, copy: bool, cx: &mut Context<Self>) {
@@ -872,6 +882,7 @@ impl Explorer {
         self.pane_list_widths.retain(|id,_|ids.contains(id));
         self.pane_column_widths.retain(|id,_|ids.contains(id));
         self.column_scroll_handles.retain(|id,_|ids.contains(id));
+        self.thumbs.groups.retain(|id| ids.contains(id));
         self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));

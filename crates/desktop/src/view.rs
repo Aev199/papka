@@ -473,7 +473,9 @@ impl Explorer {
                     let Some(look) = this.quick_look.as_mut() else { return };
                     let dy = event.delta.pixel_delta(px(20.)).y / px(1.);
                     if dy == 0. { return; }
-                    look.zoom_at(if dy > 0. { 1.15 } else { 1. / 1.15 }, event.position);
+                    // In step with the wheel: a notch is about ×1.15, a
+                    // touchpad's many small deltas zoom smoothly.
+                    look.zoom_at((dy * 0.0025).exp(), event.position);
                     cx.stop_propagation();
                     cx.notify();
                 }))
@@ -1420,7 +1422,11 @@ impl Explorer {
             tile.child(div().w_full().h(px(24.)).flex().items_center().text_color(rgb(TEXT))
                 .child(Input::new(&self.rename_input).xsmall().h(px(22.)).w_full().text_size(px(12.))))
         } else {
-            tile.child(div().w_full().text_center().line_clamp(2).line_height(px(16.)).child(entry.name.clone()))
+            // The work label, as a dot before the name.
+            let label = self.label_of(&path).map(|label| div().size(px(8.)).flex_none().rounded_full().bg(gpui::rgb(crate::labels::color(label))));
+            tile.child(div().w_full().flex().items_start().justify_center().gap_1()
+                .when_some(label, |name, dot| name.child(div().h(px(16.)).flex().items_center().child(dot)))
+                .child(div().min_w_0().text_center().line_clamp(2).line_height(px(16.)).child(entry.name.clone())))
         };
         if renaming {
             return tile.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).into_any_element();
@@ -3024,11 +3030,13 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_address(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_rename(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_new_folder(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,_: &keys::NewFile,window,cx| { if !this.interface_modal() { this.begin_new_file(window,cx); } }))
-            .on_action(cx.listener(|this,_: &keys::CopyToOther,_,cx| { if !this.interface_modal() { this.transfer_to_other(true,cx); } }))
-            .on_action(cx.listener(|this,_: &keys::MoveToOther,_,cx| { if !this.interface_modal() { this.transfer_to_other(false,cx); } }))
-            .on_action(cx.listener(|this,_: &keys::Terminal,_,cx| { if !this.interface_modal() { this.open_terminal(false,cx); } }))
-            .on_action(cx.listener(|this,_: &keys::TerminalAdmin,_,cx| { if !this.interface_modal() { this.open_terminal(true,cx); } }))
+            // Only from the file list: a rename or a filter being typed
+            // never sends files elsewhere.
+            .on_action(cx.listener(|this,_: &keys::NewFile,window,cx| { if this.list_focused(window) { this.begin_new_file(window,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::CopyToOther,window,cx| { if this.list_focused(window) { this.transfer_to_other(true,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::MoveToOther,window,cx| { if this.list_focused(window) { this.transfer_to_other(false,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::Terminal,window,cx| { if this.list_focused(window) { this.open_terminal(false,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::TerminalAdmin,window,cx| { if this.list_focused(window) { this.open_terminal(true,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { Self::key_dismiss(this,event,window,cx); }))
             .on_action(cx.listener(|this,event,window,cx| { Self::key_select_next(this,event,window,cx); }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_filter_enter(this,event,window,cx); } }))
