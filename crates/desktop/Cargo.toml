@@ -1,0 +1,24 @@
+[package]
+name = "filemanager-desktop"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Native Windows GPUI file manager"
+
+[[bin]]
+name = "filemanager-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+winresource = "0.1"
+
+[dependencies]
+filemanager-core = { path = "../core" }
+gpui = { package = "gpui-ce", version = "=0.2.2" }
+gpui_platform = { package = "gpui_ce_platform", version = "=0.1.0" }
+open = "5"
+gpui-component = { package = "gpui_ce_components", version = "=0.2.0" }
+gpui_component_assets = { package = "gpui_ce_components_assets", version = "=0.2.0" }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
