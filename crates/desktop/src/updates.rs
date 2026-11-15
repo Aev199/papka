@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use filemanager_core::update::{self, Channel, Update};
+use filemanager_core::update::{self, Channel, Origin, Update};
 use gpui::{AnimationExt, AnyElement, Context, MouseButton, div, prelude::*, px};
 
 use crate::Explorer;
@@ -156,15 +156,30 @@ impl Explorer {
                     best = Some(found);
                 }
             };
-            if let Some((path, version)) = update::downloads_dir()
-                .and_then(|downloads| update::find_downloaded(&downloads, VERSION, &update::exe_version)) {
-                if let Ok(found) = update::downloaded_update(&path, &version) { consider(found); }
+            // A file waiting in Downloads is worth a request of its own:
+            // it is compared with the release it claims to be.
+            let downloads = update::downloads_dir();
+            let waiting = downloads.as_ref()
+                .is_some_and(|downloads| !update::downloaded_candidates(downloads, VERSION, &update::exe_version).is_empty());
+            let list = (online || waiting).then(|| update::fetch(&update::releases_url(), &mut |_, _| {}));
+            let mut refused = None;
+            if let Some(downloads) = downloads.as_ref().filter(|_| waiting) {
+                match update::downloaded_offer(downloads, VERSION, &update::exe_version,
+                    list.as_ref().and_then(|list| list.as_deref().ok()), &update::fetch) {
+                    Some(Ok(found)) => consider(found),
+                    Some(Err(error)) => refused = Some(error.to_string()),
+                    None => {}
+                }
             }
-            let online_result = online.then(|| update::check(VERSION, channel, &update::fetch));
+            let online_result = list.filter(|_| online)
+                .map(|list| list.and_then(|list| update::check_in(&list, VERSION, channel, &update::fetch)));
             if let Some(Ok(Some(found))) = &online_result { consider(found.clone()); }
             if let Some(found) = best { return Outcome::Found(found); }
             match online_result {
-                None | Some(Ok(_)) => Outcome::Latest,
+                None | Some(Ok(_)) => match refused {
+                    Some(reason) if manual => Outcome::Failed(format!("файл из «Загрузок» отклонён: {reason}")),
+                    _ => Outcome::Latest,
+                },
                 Some(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => Outcome::Failed(error.to_string()),
                 Some(Err(error)) => Outcome::Blocked(error.to_string()),
             }
@@ -190,7 +205,7 @@ impl Explorer {
                         this.updates.dialog = true;
                         this.updates.phase = Phase::Blocked(reason);
                     },
-                    Outcome::Failed(reason) => if manual { this.updates.note = Some(format!("Не удалось проверить: {reason}")); },
+                    Outcome::Failed(reason) => if manual { this.updates.note = Some(format!("Проверка обновлений: {reason}")); },
                 }
                 cx.notify();
             });
@@ -211,12 +226,23 @@ impl Explorer {
             while started.elapsed() < WATCH {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
                 let found = cx.background_spawn(async {
-                    update::downloads_dir()
-                        .and_then(|downloads| update::find_downloaded(&downloads, VERSION, &update::exe_version))
-                        .and_then(|(path, version)| update::downloaded_update(&path, &version).ok())
+                    let downloads = update::downloads_dir()?;
+                    if update::downloaded_candidates(&downloads, VERSION, &update::exe_version).is_empty() { return None; }
+                    // GitHub is usually out of reach here; if it answers
+                    // after all, the file is compared with its release.
+                    let list = update::fetch(&update::releases_url(), &mut |_, _| {}).ok();
+                    update::downloaded_offer(&downloads, VERSION, &update::exe_version, list.as_deref(), &update::fetch)
                 }).await;
                 let stop = this.update(cx, |this, cx| {
-                    let Some(found) = found else { return false };
+                    let found = match found {
+                        None => return false,
+                        Some(Err(error)) => {
+                            this.status = format!("Файл из «Загрузок» отклонён: {error}");
+                            cx.notify();
+                            return true;
+                        }
+                        Some(Ok(found)) => found,
+                    };
                     if matches!(this.updates.phase, Phase::Idle | Phase::Blocked(_)) {
                         this.status = format!("Найдена скачанная версия {}", found.version);
                         this.updates.phase = Phase::Available(found);
@@ -300,7 +326,7 @@ impl Explorer {
 
     /// Saves the session, starts the installed EXE and closes this one.
     pub(crate) fn restart_for_update(&mut self, cx: &mut Context<Self>) {
-        if self.copy_in_progress || self.operation_busy {
+        if self.transfers.copying || self.transfers.busy {
             self.status = "Дождитесь окончания операции с файлами, затем перезапустите".into();
             cx.notify();
             return;
@@ -386,6 +412,10 @@ impl Explorer {
                     .child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child(current))
                     .when(!found.exe_url.starts_with("https://"), |card| card.child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM))
                         .child(format!("Файл: {}", found.exe_url))))
+                    .when(found.origin == Origin::DownloadedVerified, |card| card.child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                        .child("Файл сверен с выпуском на GitHub: контрольная сумма совпала.")))
+                    .when(found.origin == Origin::DownloadedUnverified, |card| card.child(div().text_size(px(12.)).text_color(rgb(DANGER))
+                        .child("Файл не удалось сверить с выпуском: GitHub недоступен. Устанавливайте его, только если сами скачали его со страницы Papka.")))
                     .child(notes(found))
                     .child(div().flex().gap_2().justify_end()
                         .child(button("update-skip", "Пропустить версию", false).on_click(cx.listener(|this, _, _, cx| this.skip_update(cx))))

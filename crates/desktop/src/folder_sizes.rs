@@ -46,7 +46,7 @@ impl Explorer {
             || filemanager_core::archive::split(folder).is_some() {
             return;
         }
-        let Some(listing) = self.directory_cache.get(folder) else { return };
+        let Some(listing) = self.dirs.cache.get(folder) else { return };
         let children: Vec<PathBuf> = listing.entries.iter().filter(|e| e.is_directory)
             .map(|e| e.path.clone()).filter(|p| !self.sizes.known.contains_key(p)).collect();
         self.sizes.scheduled.insert(folder.to_path_buf());

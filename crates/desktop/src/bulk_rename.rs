@@ -10,7 +10,7 @@ pub(crate) struct BulkRenameDialog {
 
 impl Explorer {
     pub(crate) fn begin_bulk_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.copy_in_progress || self.operation_busy {
+        if self.transfers.copying || self.transfers.busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
@@ -46,10 +46,7 @@ impl Explorer {
         self.bulk_rename_generation = self.bulk_rename_generation.wrapping_add(1);
         let generation = self.bulk_rename_generation;
         cx.spawn(async move |weak, cx| {
-            cx.background_spawn(async {
-                std::thread::sleep(Duration::from_millis(200));
-            })
-            .await;
+            cx.background_executor().timer(Duration::from_millis(200)).await;
             let request = weak
                 .update(cx, |this, cx| {
                     if this.bulk_rename_generation != generation {
@@ -92,7 +89,7 @@ impl Explorer {
     }
 
     pub(crate) fn apply_bulk_rename(&mut self, cx: &mut Context<Self>) {
-        if self.operation_busy || self.copy_in_progress {
+        if self.transfers.busy || self.transfers.copying {
             return;
         }
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
@@ -118,16 +115,16 @@ impl Explorer {
             }
         };
         self.bulk_rename_generation = self.bulk_rename_generation.wrapping_add(1);
-        self.operation_busy = true;
-        self.copy_in_progress = true;
+        self.transfers.busy = true;
+        self.transfers.copying = true;
         let control = Arc::new(CopyControl::default());
-        self.copy_control = Some(Arc::clone(&control));
+        self.transfers.control = Some(Arc::clone(&control));
         self.start_transfer_progress("Переименование", cx);
         let task = cx.background_spawn(async move { queue.run_all_audited(&control, &audit) });
         cx.spawn(async move |weak, cx| {
             let results = task.await;
             let _ = weak.update(cx, |this, cx| {
-                this.operation_busy = false; this.copy_in_progress = false; this.copy_control = None;
+                this.transfers.busy = false; this.transfers.copying = false; this.transfers.control = None; this.start_queued(cx);
                 for (plan, _) in &results {
                     this.refresh_parent_of(&plan.source, cx);
                 }

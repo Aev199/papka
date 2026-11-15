@@ -62,19 +62,20 @@ impl Explorer {
             cx.notify();
             return;
         };
-        if self.operation_busy || self.copy_in_progress {
+        if self.transfers.busy || self.transfers.copying {
             self.status = "Выполняется другая операция, дождитесь её завершения".into();
             cx.notify();
             return;
         }
-        self.operation_busy = true;
+        self.transfers.busy = true;
         self.status = format!("Извлечение из «{}»…", browser::display_name(&archive_path));
         let folder = target.clone();
         let task = cx.background_spawn(async move { archive::extract(&archive_path, &items, &folder) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.operation_busy = false;
+                this.transfers.busy = false;
+                this.start_queued(cx);
                 match result {
                     Ok(created) => {
                         this.status = format!("Извлечено в «{}»: {}", browser::display_name(&target), created.len());
@@ -97,12 +98,12 @@ impl Explorer {
     pub(crate) fn extract_archive_here(&mut self, archive_path: PathBuf, cx: &mut Context<Self>) {
         let Some(parent) = archive_path.parent().map(Path::to_path_buf) else { return };
         if self.refuse_in_archive(&parent, cx) { return; }
-        if self.operation_busy || self.copy_in_progress {
+        if self.transfers.busy || self.transfers.copying {
             self.status = "Выполняется другая операция, дождитесь её завершения".into();
             cx.notify();
             return;
         }
-        self.operation_busy = true;
+        self.transfers.busy = true;
         self.status = format!("Извлечение «{}»…", browser::display_name(&archive_path));
         let task = cx.background_spawn(async move {
             let stem = archive_path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| "Архив".into());
@@ -117,7 +118,8 @@ impl Explorer {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.operation_busy = false;
+                this.transfers.busy = false;
+                this.start_queued(cx);
                 match result {
                     Ok(folder) => {
                         this.status = format!("Извлечено в папку «{}»", browser::display_name(&folder));

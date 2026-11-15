@@ -90,7 +90,7 @@ impl Explorer {
             && !self.creating_folder
             && !self.saving_workspace
             && self.confirm_recycle.is_none()
-            && self.pending_transfer.is_none()
+            && self.transfers.pending.is_none()
             && self.bulk_rename.is_none()
             && self.bulk_rename_errors.is_empty()
     }
@@ -163,7 +163,7 @@ impl Explorer {
     fn command_enabled(&self, command: &CommandSpec) -> bool {
         if !command.enabled(
             self.selected.is_some() || !self.marked.is_empty(),
-            self.operation_busy,
+            self.transfers.busy,
         ) {
             return false;
         }
@@ -658,7 +658,7 @@ impl Explorer {
     ) {
         if self.interface_modal()
             || !self.can_open_interface()
-            || self.search_active
+            || self.search.active
             || self.renaming
             || self.pane_path(side) != folder
         {
@@ -751,13 +751,13 @@ impl Explorer {
         let valid = same_location
             && same_view
             && !self.interface_modal()
-            && !self.search_active
+            && !self.search.active
             && self.sort_for(m.side) == m.sort
             && self.show_hidden == m.hidden
             && self.miller(m.side) == m.miller
             && self.filter == m.filter
             && self
-                .directory_cache
+                .dirs.cache
                 .get(&m.folder)
                 .is_some_and(|l| std::sync::Arc::ptr_eq(l, &m.listing))
             && self.scroll_handles.get(&(m.side,m.folder.clone())).is_some_and(|h| {

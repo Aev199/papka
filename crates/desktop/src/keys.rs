@@ -128,7 +128,7 @@ impl Explorer {
     /// Visible entries of `folder` in display order. Sorting runs once per
     /// listing snapshot and sort change, never per frame.
     pub(crate) fn folder_view(&mut self, group: GroupId, folder: &Path) -> Option<(Arc<browser::Listing>, Arc<Vec<usize>>)> {
-        let listing = Arc::clone(self.directory_cache.get(folder)?);
+        let listing = Arc::clone(self.dirs.cache.get(folder)?);
         // The quick filter applies to the focused pane's folder only.
         let filter = if group == self.browser.active && folder == self.pane_path(group) { self.filter.clone() } else { String::new() };
         let spec = self.sort_for(group);
@@ -328,10 +328,10 @@ impl Explorer {
     /// in OneCommander: the folder narrows down as you type.
     pub(crate) fn type_to_filter(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         // Over the quick look or the search results letters do nothing.
-        if self.quick_look.is_some() || self.search_active { return; }
+        if self.quick_look.is_some() || self.search.active { return; }
         // A filter already open grows: a click into the list in between
         // must not throw away what was typed.
-        let query = if self.filter_open && !self.search_mode { format!("{}{text}", self.search_query) } else { text.to_owned() };
+        let query = if self.filter_open && !self.search_mode { format!("{}{text}", self.search.query) } else { text.to_owned() };
         self.search_mode = false;
         self.filter_open = true;
         self.search_input.update(cx, |input, cx| {
@@ -339,7 +339,7 @@ impl Explorer {
             input.set_value(query.clone(), window, cx);
         });
         self.filter = query.trim().to_lowercase();
-        self.search_query = query;
+        self.search.query = query;
         self.select_first_match(cx);
         let focus = self.search_input.focus_handle(cx);
         window.focus(&focus, cx);
@@ -612,7 +612,7 @@ impl Explorer {
         self.filter.clear();
         self.search_input.update(cx, |input, cx| {
             input.set_placeholder("Поиск во вложенных папках · Enter", window, cx);
-            let query = self.search_query.clone();
+            let query = self.search.query.clone();
             input.set_value(query, window, cx);
             input.select_all(window, cx);
         });
@@ -705,7 +705,7 @@ impl Explorer {
         if self.dismiss_interface(window,cx) { return; }
         let had_popup = self.renaming || self.creating_folder || self.address_editing.is_some() || self.saving_workspace
             || self.context_menu.is_some() || self.confirm_recycle.is_some() || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty();
-        if self.pending_transfer.is_some() {
+        if self.transfers.pending.is_some() {
             self.resolve_transfer(crate::ConflictChoice::Cancel, cx);
         }
         self.renaming = false;
@@ -719,10 +719,10 @@ impl Explorer {
         self.confirm_recycle = None;
         self.filter_open = false;
         self.search_mode = false;
-        if self.search_active || !self.filter.is_empty() || !self.search_query.is_empty() {
+        if self.search.active || !self.filter.is_empty() || !self.search.query.is_empty() {
             self.close_search();
             self.filter.clear();
-            self.search_query.clear();
+            self.search.query.clear();
             self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
             self.status.clear();
         } else if had_popup {
@@ -733,13 +733,13 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn key_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(1,cx); } else if self.settings.is_some() {self.settings_move(1,cx);} else if self.search_active { self.move_search_selection(1, cx); } else if !self.interface_modal() { self.move_rows(1, cx); } }
-    pub(crate) fn key_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(-1,cx); } else if self.settings.is_some() {self.settings_move(-1,cx);} else if self.search_active { self.move_search_selection(-1, cx); } else if !self.interface_modal() { self.move_rows(-1, cx); } }
+    pub(crate) fn key_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(1,cx); } else if self.settings.is_some() {self.settings_move(1,cx);} else if self.search.active { self.move_search_selection(1, cx); } else if !self.interface_modal() { self.move_rows(1, cx); } }
+    pub(crate) fn key_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(-1,cx); } else if self.settings.is_some() {self.settings_move(-1,cx);} else if self.search.active { self.move_search_selection(-1, cx); } else if !self.interface_modal() { self.move_rows(-1, cx); } }
 
     /// Enter in the quick filter: the selected match opens (a folder, a
     /// file); with nothing matching here, the subfolders are searched.
     pub(crate) fn key_filter_enter(&mut self, _: &FilterEnter, _: &mut Window, cx: &mut Context<Self>) {
-        if self.search_active {
+        if self.search.active {
             if let Some(index) = self.search.selected { self.open_search_hit(index, cx); }
             return;
         }
@@ -760,9 +760,9 @@ impl Explorer {
 
     /// Search the subfolders for the filter's words; results replace the panes.
     pub(crate) fn start_full_search(&mut self, cx: &mut Context<Self>) {
-        if self.search_query.trim().is_empty() { return; }
-        self.search_active = true;
-        self.search_root = None;
+        if self.search.query.trim().is_empty() { return; }
+        self.search.active = true;
+        self.search.root = None;
         // The panes are hidden behind the results: their selection
         // must not be cut, copied or deleted from there.
         self.selected = None;
@@ -811,7 +811,7 @@ impl Explorer {
             || self.bulk_rename.is_some() {
             return;
         }
-        if self.search_active {
+        if self.search.active {
             if let Some(index) = self.search.selected { self.open_search_hit(index, cx); }
             return;
         }
@@ -820,7 +820,7 @@ impl Explorer {
             self.recycle(cx);
             return;
         }
-        if self.pending_transfer.is_some() {
+        if self.transfers.pending.is_some() {
             return;
         }
         if let Some(entry) = self.selected_entry() {
@@ -849,7 +849,7 @@ impl Explorer {
     pub(crate) fn key_recycle(&mut self, _: &RecycleSelected, _: &mut Window, cx: &mut Context<Self>) {
         // Search results replace the panes: a selection made before the
         // search is out of sight and must not be deleted from here.
-        if self.search_active { return; }
+        if self.search.active { return; }
         if self.selected.is_some() || !self.marked.is_empty() { self.recycle(cx); }
     }
 

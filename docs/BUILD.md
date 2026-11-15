@@ -1,61 +1,39 @@
-# Build / test Filemanager on Windows
+# Сборка и проверка Papka
 
-## Recommended path: GitHub Actions, manual only
+## Выпуск: GitHub Actions, только вручную
 
-The workflow is `.github/workflows/windows-portable.yml`. It has only
-`workflow_dispatch`: commits and pull requests do **not** run the Windows
-build. This avoids burning limited free GitHub Actions minutes.
+Workflow — `.github/workflows/windows-portable.yml`, запускается только
+вручную (`workflow_dispatch`): коммиты и pull request сборку не вызывают.
 
-After this workflow exists on the repository's default branch:
+1. GitHub → Aev199/papka → Actions → «Windows portable EXE (manual)».
+2. Run workflow, ветка `feat/native-gpui-foundation`, поля — см.
+   [UPDATES.md](UPDATES.md).
+3. Сборка проверяет компиляцию, запускает тесты ядра, CLI и интерфейса,
+   собирает `Papka.exe`, пробует снять скриншот окна и публикует выпуск.
 
-1. Open **GitHub → Aev199/papka → Actions**.
-2. Pick **Windows portable EXE (manual)**.
-3. Click **Run workflow**, choose the branch, and confirm.
-4. When green, open the run, under **Artifacts** download
-   `Papka-Windows-x64`.
-5. Unzip the artifact ZIP, then unzip `Papka-win64.zip`.
-6. Run `Papka.exe`. Windows may show an unsigned-app warning.
+Красная сборка: открыть упавший шаг и прочитать лог. EXE не подписан,
+Windows при первом запуске показывает предупреждение SmartScreen.
 
-If the build is red, open its failed step logs. Do not test file operations
-against irreplaceable files. EXE remains an untested development build until
-a Windows test verifies navigation, safe copy and Recycle Bin behavior.
+## Локальные проверки (Linux или Windows)
 
-## Скриншот реального GPUI-окна
-
-Ручной workflow дополнительно пытается **запустить собранный EXE** в
-одноразовом Windows runner и сохранить снимок окна в отдельный
-`Papka-UI-Screenshot` artifact (`Papka-UI.png`).
-Это реальный снимок запущенного приложения, **не нарисованный макет**.
-
-На некоторых GitHub-hosted runner графический сеанс недоступен:
-тогда снимок не появится и в логе будет предупреждение, но сборка
-`Papka-Windows-x64` останется доступной. Успешный снимок
-не доказывает работоспособность файловых операций — нужен отдельный
-безопасный smoke-test из `SMOKE_TEST.md`.
-
-## Local development (optional)
-
-Needs Rust stable, Windows SDK/MSVC C++ Build Tools, and network access for
-Cargo dependencies. In PowerShell:
-
-```powershell
-rustup show
-cargo test -p filemanager-core
-cargo run -p filemanager-desktop --release
+```
+cargo test --workspace
+cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
+rustc --edition=2024 --test crates/desktop/src/layout.rs -o /tmp/lt && /tmp/lt
+rustc --edition=2024 --test crates/desktop/src/palette.rs -o /tmp/pt && /tmp/pt
 ```
 
-The current assistant sandbox is Linux without Rust and cannot install
-dependencies because network DNS is unavailable. Therefore the actual
-Windows binary can only be verified via the manual CI run above.
+На Linux для этого нужны пакеты `libxkbcommon-dev`, `libxkbcommon-x11-dev`
+(тесты интерфейса) и `mingw-w64` с целью `x86_64-pc-windows-gnu`
+(Windows-проверка). Для запуска окна в Xvfb (`tools/ui-smoke`) —
+`xvfb`, `openbox`, `xcompmgr`, `xdotool`, `x11-utils`, `imagemagick` и
+программный Vulkan `mesa-vulkan-drivers`.
 
-## Current boundaries
+На Windows: Rust stable и MSVC Build Tools, затем
+`cargo run -p filemanager-desktop --release`.
 
-- Main stack: **Rust + GPUI**, SQLite history store, Windows Recycle Bin.
-- History is metadata-only (no file revisions / restores).
-- The prototype limits folder rendering (200 entries per column), and does
-  not guarantee catching multiple rapid saves inside the same short interval.
-- The recorded account is the observing Windows user, not verified author.
-- Copy supports files only; cross-volume folder moves are not implemented.
-- Avoid copying data from locations that can change mid-operation until
-  the queue becomes crash-resilient.
-- No plugins, FTP/SFTP or cloud sync.
+## Что на Linux не проверить
+
+Перетаскивание с Проводником, контекстное меню и миниатюры Windows
+Shell, предпросмотр Office/PDF, Корзину, диски и обновление программы.
+Это проверяется только на собранном EXE по [SMOKE_TEST.md](SMOKE_TEST.md).

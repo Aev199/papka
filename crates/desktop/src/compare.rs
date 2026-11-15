@@ -2,7 +2,7 @@
 //! and copying what is missing or newer in one direction. Copies run one
 //! folder at a time through the usual safe, journalled transfer; a newer
 //! file replaces the older one, which goes to the Recycle Bin.
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -100,18 +100,9 @@ impl Explorer {
             let target = to.join(row.relative.parent().unwrap_or(std::path::Path::new("")));
             if groups.entry((target, replace)).or_default().add(&from.join(&row.relative)).is_err() { skipped += 1; }
         }
-        self.sync_queue = groups.into_iter().filter(|(_, zone)| !zone.items().is_empty())
-            .map(|((target, replace), zone)| Transfer { zone, target, copy: true, keep_both: false, replace, restore_failed: false })
-            .collect::<VecDeque<_>>();
+        self.transfers.queue.extend(groups.into_iter().filter(|(_, zone)| !zone.items().is_empty())
+            .map(|((target, replace), zone)| Transfer { zone, target, copy: true, keep_both: false, replace, restore_failed: false }));
         if skipped > 0 { self.status = format!("Пропущено недоступных: {skipped}"); }
-        self.continue_sync(cx);
-    }
-
-    /// Starts the next folder of a sync once the previous transfer ended.
-    pub(crate) fn continue_sync(&mut self, cx: &mut Context<Self>) {
-        if self.copy_in_progress || self.operation_busy { return; }
-        if let Some(next) = self.sync_queue.pop_front() {
-            self.request_transfer(next, cx);
-        }
+        self.start_queued(cx);
     }
 }

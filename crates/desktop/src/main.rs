@@ -25,6 +25,8 @@ mod archives;
 mod version_rules;
 mod thumbs;
 mod appearance;
+mod directories;
+mod transfers;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -48,8 +50,9 @@ use gpui_component::Root;
 use theme::rgb;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use transfers::Transfer;
 
 
 struct ColumnResize {
@@ -83,17 +86,6 @@ impl Render for FileDragPreview {
     }
 }
 
-/// A copy or move waiting to run (or for the conflict dialog).
-pub(crate) struct Transfer {
-    zone: DropZone,
-    target: PathBuf,
-    copy: bool,
-    /// Occupied names get "name (2).ext" instead of being refused.
-    keep_both: bool,
-    replace: bool,
-    /// Items came from the Drop Zone and go back there if not done.
-    restore_failed: bool,
-}
 
 #[derive(Clone, Copy)]
 enum ConflictChoice { Skip, KeepBoth, Replace, Cancel }
@@ -215,30 +207,13 @@ struct Explorer {
     browser: Workspace,
     selected: Option<PathBuf>,
     // Inspector data is loaded off the UI thread, never during Render.
-    inspector_path: Option<PathBuf>,
-    inspector_request: u64,
-    inspector_loading: bool,
-    inspector_dirty: bool,
-    inspector_preview: Option<(String, String)>,
-    /// Shell thumbnail (PNG in the cache) for the selected file, if any.
-    inspector_thumbnail: Option<PathBuf>,
-    inspector_details_busy: bool,
-    inspector_thumbnail_busy: bool,
+    inspector: inspector::InspectorState,
     document_preview: Option<filemanager_core::preview_host::PreviewProcess>,
     preview_launch_busy: bool,
     preview_launch_generation: u64,
-    inspector_history: Vec<Event>,
-    /// Other files that are versions of the selected document, newest first.
-    inspector_versions: Vec<filemanager_core::versions::Member>,
     zone: DropZone,
-    copy_in_progress: bool,
-    /// Share of the running copy or move done, 0..=1, for the progress bar.
-    transfer_fraction: Option<f64>,
-    operation_busy: bool,
-    copy_control: Option<Arc<CopyControl>>,
-    /// Items a transfer could not finish (e.g. the network dropped): their
-    /// target and whether it was a copy, for «Повторить сбойные».
-    retry: Option<(Vec<PathBuf>, PathBuf, bool)>,
+    /// The running copy or move, the one waiting for an answer, and those queued behind.
+    transfers: transfers::Transfers,
     context_menu: Option<ContextMenu>,
     /// Pressed right button on files: a plain click opens their menu, a
     /// drag ends in the «Копировать сюда / Переместить сюда» menu.
@@ -273,8 +248,6 @@ struct Explorer {
     sizes: folder_sizes::FolderSizes,
     quick_look: Option<quick_look::QuickLook>,
     comparison: Option<compare::Comparison>,
-    /// Folders of a running sync still to copy.
-    sync_queue: std::collections::VecDeque<Transfer>,
     drives: Vec<Place>,
     /// Free and total bytes per local drive, filled in the background.
     drive_space: HashMap<PathBuf, (u64, u64)>,
@@ -347,12 +320,7 @@ struct Explorer {
     thumb_columns: HashMap<GroupId, usize>,
     renaming: bool,
     undo_stack: Vec<Undo>,
-    directory_cache: HashMap<PathBuf, Arc<browser::Listing>>,
-    directory_loading: HashMap<PathBuf, u64>,
-    directory_dirty: HashSet<PathBuf>,
-    directory_errors: HashMap<PathBuf, String>,
-    directory_cache_order: VecDeque<PathBuf>,
-    directory_request: u64,
+    dirs: directories::DirectoryCache<browser::Listing>,
     workspaces: Option<WorkspaceStore>,
     favorites: Vec<PathBuf>,
     saved_layout: String,
@@ -387,19 +355,12 @@ struct Explorer {
     workspace_names: Vec<String>,
     workspace_input: Entity<InputState>,
     saving_workspace: bool,
-    /// Transfer paused on name conflicts, with the conflicting items.
-    pending_transfer: Option<(Transfer, Vec<PathBuf>)>,
     status: String,
     search_input: Entity<InputState>,
     address_input: Entity<InputState>,
     comment_input: Entity<InputState>,
     author_input: Entity<InputState>,
-    search_query: String,
     search: search_panel::SearchState,
-    search_root: Option<PathBuf>,
-    search_active: bool,
-    search_busy: bool,
-    search_generation: u64,
     selected_history_event: Option<i64>,
     _subscriptions: Vec<Subscription>,
 }
@@ -459,7 +420,7 @@ impl Explorer {
                     window.focus(&handle, cx);
                 }
                 // Clicking elsewhere ends in-place renaming without changes.
-                InputEvent::Blur if this.renaming && !this.operation_busy => {
+                InputEvent::Blur if this.renaming && !this.transfers.busy => {
                     this.renaming = false;
                     cx.notify();
                 }
@@ -478,12 +439,12 @@ impl Explorer {
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _, cx| {
             match event {
                 InputEvent::Change => {
-                    this.search_query = input.read(cx).value().to_string();
+                    this.search.query = input.read(cx).value().to_string();
                     // Ctrl+F's search leaves the folder behind unfiltered.
-                    this.filter = if this.search_mode { String::new() } else { this.search_query.trim().to_lowercase() };
-                    if this.search_query.trim().is_empty() && this.search_active {
+                    this.filter = if this.search_mode { String::new() } else { this.search.query.trim().to_lowercase() };
+                    if this.search.query.trim().is_empty() && this.search.active {
                         this.close_search();
-                    } else if this.search_active {
+                    } else if this.search.active {
                         this.schedule_search(cx);
                     } else if !this.search_mode {
                         this.select_first_match(cx);
@@ -535,25 +496,12 @@ impl Explorer {
             interface_focus_pending:false,marquee:None,palette:None,settings:None,
             browser,
             selected: None,
-            inspector_path: None,
-            inspector_request: 0,
-            inspector_loading: false,
-            inspector_dirty: false,
-            inspector_preview: None,
-            inspector_thumbnail: None,
-            inspector_details_busy: false,
-            inspector_thumbnail_busy: false,
+            inspector: Default::default(),
             document_preview: None,
             preview_launch_busy: false,
             preview_launch_generation: 0,
-            inspector_history: Vec::new(),
-            inspector_versions: Vec::new(),
             zone: DropZone::default(),
-            copy_in_progress: false,
-            transfer_fraction: None,
-            operation_busy: false,
-            copy_control: None,
-            retry: None,
+            transfers: Default::default(),
             context_menu: None,
             right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
@@ -566,7 +514,6 @@ impl Explorer {
                 .map(|text| text.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default(),
             quick_look: None,
             comparison: None,
-            sync_queue: Default::default(),
             recent: workspaces.as_ref().and_then(|store| store.value(projects::RECENT).ok().flatten())
                 .map(|text| text.lines().map(PathBuf::from).collect()).unwrap_or_default(),
             drives: places::drives(),
@@ -587,7 +534,6 @@ impl Explorer {
             workspace_names: Vec::new(),
             workspace_input,
             saving_workspace: false,
-            pending_transfer: None,
             pane_width: 800.,
             pane_measured_widths: HashMap::new(),
             column_scroll_handles: Default::default(),
@@ -624,12 +570,7 @@ impl Explorer {
             light_preference: false,
             thumb_columns: HashMap::new(),
             undo_stack: Vec::new(),
-            directory_cache: HashMap::new(),
-            directory_loading: HashMap::new(),
-            directory_dirty: HashSet::new(),
-            directory_errors: HashMap::new(),
-            directory_cache_order: VecDeque::new(),
-            directory_request: 0,
+            dirs: Default::default(),
             tour: workspaces.as_ref().and_then(|store| store.flag(TOUR_SEEN).ok()).is_some_and(|seen| !seen).then_some(0),
             workspaces, favorites, saved_layout: String::new(), versions_expanded: false, project_error: None, close_error: None, session_restore_error,
             journal: None,
@@ -640,13 +581,11 @@ impl Explorer {
             watcher: None, live_watch_started: false, live_watch_error: None,
             watched_root: None, history_paused: false, unwatched_folders: Default::default(), confirm_recycle: None,
             status: prefs_error.unwrap_or(operation_status),
-            search_input, address_input, comment_input, author_input, search_query: String::new(),
+            search_input, address_input, comment_input, author_input,
             search: search_panel::SearchState {
                 depth: search_depth,
                 ..Default::default()
             },
-            search_root: None,
-            search_active: false, search_busy: false, search_generation: 0,
             selected_history_event: None,
             _subscriptions: vec![
                 // Alt+Tab while dragging files: Explorer's drag goes on into
@@ -666,24 +605,24 @@ impl Explorer {
     /// A request number prevents a slow response for a previously selected
     /// file from overwriting the active inspector.
     fn load_selected_details(&mut self, cx: &mut Context<Self>) {
-        if self.inspector_path == self.selected && (!self.inspector_dirty || self.inspector_loading) {
+        if self.inspector.path == self.selected && (!self.inspector.dirty || self.inspector.loading) {
             return;
         }
-        self.inspector_dirty = false;
-        self.inspector_request = self.inspector_request.wrapping_add(1);
-        let request = self.inspector_request;
-        self.inspector_path = self.selected.clone();
-        self.inspector_preview = None;
-        self.inspector_thumbnail = None;
-        self.inspector_history.clear();
-        self.inspector_versions.clear();
+        self.inspector.dirty = false;
+        self.inspector.request = self.inspector.request.wrapping_add(1);
+        let request = self.inspector.request;
+        self.inspector.path = self.selected.clone();
+        self.inspector.preview = None;
+        self.inspector.thumbnail = None;
+        self.inspector.history.clear();
+        self.inspector.versions.clear();
         let Some(path) = self.selected.clone() else {
-            self.inspector_loading = false;
+            self.inspector.loading = false;
             return;
         };
-        self.inspector_loading = true;
-        if self.inspector_details_busy { return; }
-        self.inspector_details_busy = true;
+        self.inspector.loading = true;
+        if self.inspector.details_busy { return; }
+        self.inspector.details_busy = true;
         let history_journal = self.journal.clone();
         let observe_history = self.watched_root.is_some();
         let selected_path = path.clone();
@@ -712,22 +651,22 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let (preview, history, versions) = task.await;
             let _ = weak.update(cx, |this, cx| {
-                this.inspector_details_busy = false;
-                if this.inspector_request != request || this.selected.as_ref() != Some(&selected_path) {
-                    this.inspector_loading = false;
-                    this.inspector_dirty = true;
+                this.inspector.details_busy = false;
+                if this.inspector.request != request || this.selected.as_ref() != Some(&selected_path) {
+                    this.inspector.loading = false;
+                    this.inspector.dirty = true;
                     this.load_selected_details(cx);
                     return;
                 }
-                this.inspector_preview = preview;
-                this.inspector_versions = versions;
+                this.inspector.preview = preview;
+                this.inspector.versions = versions;
                 this.load_selected_thumbnail(cx);
                 match history {
-                    Ok(history) => this.inspector_history = history,
+                    Ok(history) => this.inspector.history = history,
                     // One unreadable file is not a lasting fault of the journal.
                     Err(error) => this.status = format!("История этого файла недоступна: {error}"),
                 }
-                this.inspector_loading = false;
+                this.inspector.loading = false;
                 cx.notify();
             });
         }).detach();
@@ -735,10 +674,10 @@ impl Explorer {
 
     fn close_search(&mut self) {
         self.stop_search();
-        self.search_generation = self.search_generation.wrapping_add(1);
-        self.search_active = false;
-        self.search_busy = false;
-        self.search_root = None;
+        self.search.generation = self.search.generation.wrapping_add(1);
+        self.search.active = false;
+        self.search.busy = false;
+        self.search.root = None;
         self.search.hits.clear();
         self.search.selected = None;
     }
@@ -877,12 +816,6 @@ impl Explorer {
         let target = self.browser.active().active().path.clone();
         if self.refuse_in_archive(&target, cx) { return; }
         let Some(zone) = self.zone_of(&files.paths, cx) else { return };
-        if self.copy_in_progress || self.operation_busy {
-            // Not consumed: the cut stays on the clipboard for a later paste.
-            self.status = "Выполняется другая операция, дождитесь её завершения".into();
-            cx.notify();
-            return;
-        }
         if files.cut {
             // A cut is consumed once, as in Explorer.
             let _ = clipboard::write_files(&[], false);
@@ -1090,9 +1023,10 @@ impl Explorer {
             self.return_to_staging(&transfer);
             return;
         }
-        if self.copy_in_progress || self.operation_busy {
-            self.status = "Выполняется другая операция, дождитесь её завершения".into();
-            self.return_to_staging(&transfer);
+        // One operation changes files at a time; the rest wait their turn.
+        if self.transfers.occupied() {
+            self.transfers.queue.push_back(transfer);
+            self.status = format!("Поставлено в очередь ({}): начнётся после текущей операции", self.transfers.queue.len());
             cx.notify();
             return;
         }
@@ -1119,14 +1053,14 @@ impl Explorer {
         if conflicts.is_empty() {
             self.execute_transfer(transfer, cx);
         } else {
-            self.pending_transfer = Some((transfer, conflicts));
+            self.transfers.pending = Some((transfer, conflicts));
             cx.notify();
         }
     }
 
     /// Answer from the name-conflict dialog.
     fn resolve_transfer(&mut self, choice: ConflictChoice, cx: &mut Context<Self>) {
-        let Some((mut transfer, conflicts)) = self.pending_transfer.take() else { return };
+        let Some((mut transfer, conflicts)) = self.transfers.pending.take() else { return };
         match choice {
             ConflictChoice::Cancel => {
                 self.return_to_staging(&transfer);
@@ -1154,7 +1088,20 @@ impl Explorer {
                 self.execute_transfer(transfer, cx);
             }
         }
+        // Nothing started (cancelled, all skipped): the queue moves on.
+        self.start_queued(cx);
         cx.notify();
+    }
+
+    /// Starts queued transfers once nothing else changes files. One that is
+    /// refused (its target is gone, say) does not hold up those behind it.
+    pub(crate) fn start_queued(&mut self, cx: &mut Context<Self>) {
+        while let Some(next) = self.transfers.next() {
+            let said = std::mem::take(&mut self.status);
+            self.request_transfer(next, cx);
+            // The result of what just ended stays readable beside the new start.
+            if !said.is_empty() && !self.transfers.occupied() { self.status = format!("{said} · {}", self.status); }
+        }
     }
 
     /// A cancelled Drop Zone transfer keeps its items staged.
@@ -1176,23 +1123,23 @@ impl Explorer {
     }
 
     fn start_transfer_progress(&mut self, action: &'static str, cx: &mut Context<Self>) {
-        let progress = self.copy_control.as_ref().unwrap().clone();
-        self.transfer_fraction = Some(0.0);
+        let progress = self.transfers.control.as_ref().unwrap().clone();
+        self.transfers.fraction = Some(0.0);
         cx.spawn(async move |weak, cx| {
             // Time spent copying, without pauses: the basis for "осталось".
             let mut active = Duration::ZERO;
             let mut last = std::time::Instant::now();
             loop {
-                cx.background_spawn(async { std::thread::sleep(Duration::from_millis(250)); }).await;
+                cx.background_executor().timer(Duration::from_millis(250)).await;
                 let now = std::time::Instant::now();
                 if !progress.is_paused() { active += now - last; }
                 last = now;
                 let keep_going = weak.update(cx, |this, cx| {
-                    if !this.copy_in_progress || !this.copy_control.as_ref()
+                    if !this.transfers.copying || !this.transfers.control.as_ref()
                         .is_some_and(|active| Arc::ptr_eq(active, &progress)) { return false; }
                     let detail = progress.progress();
                     let fraction = progress.fraction().unwrap_or(0.0);
-                    this.transfer_fraction = Some(fraction);
+                    this.transfers.fraction = Some(fraction);
                     let phase: String = if progress.is_paused() { "На паузе".into() } else { match progress.phase() {
                         TransferPhase::Verifying => "Проверка копии…".into(),
                         TransferPhase::Recycling => "Завершение переноса…".into(),
@@ -1204,7 +1151,7 @@ impl Explorer {
                         .map(|seconds| format!(" · осталось {}", remaining(seconds)))
                         .unwrap_or_default();
                     let path = detail.source.as_ref().map(|path| browser::display_name(path)).unwrap_or_default();
-                    this.status = format!("{phase} · {}/{}{left} · {path}", detail.processed, detail.total);
+                    this.status = format!("{phase} · {}/{}{left}{} · {path}", detail.processed, detail.total, this.transfers.queue_note());
                     cx.notify();
                     true
                 }).unwrap_or(false);
@@ -1219,9 +1166,9 @@ impl Explorer {
             cx.notify();
             return;
         };
-        self.copy_in_progress = true;
+        self.transfers.copying = true;
         let control = Arc::new(CopyControl::default());
-        self.copy_control = Some(Arc::clone(&control));
+        self.transfers.control = Some(Arc::clone(&control));
         self.status = "Копирование…".into();
         let task = cx.background_spawn(async move {
             let results = if replace {
@@ -1251,9 +1198,9 @@ impl Explorer {
                         this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
-                this.copy_in_progress = false;
-                this.copy_control = None;
-                this.retry = (errors > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), true));
+                this.transfers.copying = false;
+                this.transfers.control = None;
+                this.transfers.retry = (errors > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), true));
                 this.load_directory(target, true, cx);
                 this.status = match first_error {
                     Some(details) => format!("Скопировано: {ok}, ошибок: {errors}. Первая ошибка: {details}"),
@@ -1263,11 +1210,7 @@ impl Explorer {
                     let label = format!("копирование ({})", created.len());
                     this.push_undo(created, label);
                 }
-                if !this.sync_queue.is_empty() {
-                    let left = this.sync_queue.len();
-                    this.status = format!("{} · синхронизация: осталось папок {left}", this.status);
-                    this.continue_sync(cx);
-                }
+                this.start_queued(cx);
                 cx.notify();
             });
         }).detach();
@@ -1281,10 +1224,10 @@ impl Explorer {
             cx.notify();
             return;
         };
-        self.operation_busy = true;
-        self.copy_in_progress = true;
+        self.transfers.busy = true;
+        self.transfers.copying = true;
         let control = Arc::new(CopyControl::default());
-        self.copy_control = Some(Arc::clone(&control));
+        self.transfers.control = Some(Arc::clone(&control));
         self.start_transfer_progress("Перемещение", cx);
         self.status = "Перемещение…".into();
         let task = cx.background_spawn(async move {
@@ -1318,10 +1261,10 @@ impl Explorer {
                         this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
-                this.operation_busy = false;
-                this.copy_in_progress = false;
-                this.copy_control = None;
-                this.retry = (failed > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), false));
+                this.transfers.busy = false;
+                this.transfers.copying = false;
+                this.transfers.control = None;
+                this.transfers.retry = (failed > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), false));
                 this.load_directory(target, true, cx);
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
@@ -1339,13 +1282,14 @@ impl Explorer {
                     };
                     this.push_undo(receipts, label);
                 }
+                this.start_queued(cx);
                 cx.notify();
             });
         }).detach();
     }
 
     fn create_folder(&mut self, cx: &mut Context<Self>) {
-        if self.copy_in_progress || self.operation_busy {
+        if self.transfers.copying || self.transfers.busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
@@ -1369,9 +1313,10 @@ impl Explorer {
                 return;
             }
         };
-        self.operation_busy = true;
+        self.transfers.busy = true;
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.operation_busy = false;
+            self.transfers.busy = false;
+            self.start_queued(cx);
             self.status = "Операция отклонена: журнал SQLite недоступен".into();
             cx.notify();
             return;
@@ -1384,7 +1329,8 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let result = task.await;
             let _ = weak.update(cx, |this, cx| {
-                this.operation_busy = false;
+                this.transfers.busy = false;
+                this.start_queued(cx);
                 match result {
                     Ok(receipt) => {
                         this.creating_folder = false;
@@ -1420,7 +1366,7 @@ impl Explorer {
         };
         let current = browser::display_name(path);
         // As Explorer: a file's name is selected without its extension.
-        let is_file = self.directory_cache.get(path.parent().unwrap_or(path))
+        let is_file = self.dirs.cache.get(path.parent().unwrap_or(path))
             .and_then(|listing| listing.entries.iter().find(|e| &e.path == path).map(|e| !e.is_directory))
             .unwrap_or(false);
         let stem = current.rfind('.').filter(|dot| is_file && *dot > 0);
@@ -1438,7 +1384,7 @@ impl Explorer {
     }
 
     fn commit_rename(&mut self, cx: &mut Context<Self>) {
-        if self.copy_in_progress || self.operation_busy {
+        if self.transfers.copying || self.transfers.busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
@@ -1461,10 +1407,11 @@ impl Explorer {
                 return;
             }
         };
-        self.operation_busy = true;
+        self.transfers.busy = true;
         self.status = "Переименование…".into();
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.operation_busy = false;
+            self.transfers.busy = false;
+            self.start_queued(cx);
             self.status = "Операция отклонена: журнал SQLite недоступен".into();
             cx.notify();
             return;
@@ -1477,7 +1424,8 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let result = task.await;
             let _ = weak.update(cx, |this, cx| {
-                this.operation_busy = false;
+                this.transfers.busy = false;
+                this.start_queued(cx);
                 match result {
                     Ok(receipt) => {
                         this.refresh_parent_of(&receipt.source, cx);
@@ -1516,7 +1464,7 @@ impl Explorer {
     /// audited queue (refused if anything changed since), copies and new
     /// folders go to the Recycle Bin, deletions come back from it.
     fn undo_last(&mut self, cx: &mut Context<Self>) {
-        if self.copy_in_progress || self.operation_busy {
+        if self.transfers.copying || self.transfers.busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
@@ -1538,7 +1486,7 @@ impl Explorer {
             cx.notify();
             return;
         };
-        self.operation_busy = true;
+        self.transfers.busy = true;
         self.status = format!("Отмена: {}…", undo.label);
         let label = undo.label.clone();
         let task = cx.background_spawn(async move {
@@ -1571,7 +1519,8 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let (touched, errors, remaining, warnings, unavailable, undone) = task.await;
             let _ = weak.update(cx, |this, cx| {
-                this.operation_busy = false;
+                this.transfers.busy = false;
+                this.start_queued(cx);
                 this.follow_labels(&undone, true);
                 for path in &touched {
                     this.refresh_parent_of(path, cx);
@@ -1595,7 +1544,7 @@ impl Explorer {
     }
 
     pub(crate) fn toggle_copy_pause(&mut self, cx: &mut Context<Self>) {
-        if let Some(control) = &self.copy_control {
+        if let Some(control) = &self.transfers.control {
             let paused = !control.is_paused();
             control.set_paused(paused);
             self.status = if paused { "Передача на паузе".into() } else { "Передача продолжается…".into() };
@@ -1606,7 +1555,7 @@ impl Explorer {
     /// Runs the items that failed last time again, through the same safe
     /// copy or move; items that already arrived are not touched.
     pub(crate) fn retry_failed(&mut self, cx: &mut Context<Self>) {
-        let Some((items, target, copy)) = self.retry.take() else { return };
+        let Some((items, target, copy)) = self.transfers.retry.take() else { return };
         let mut zone = DropZone::default();
         let missing = items.iter().filter(|path| zone.add(path).is_err()).count();
         if zone.items().is_empty() {
@@ -1619,11 +1568,16 @@ impl Explorer {
     }
 
     fn cancel_copy(&mut self, cx: &mut Context<Self>) {
-        self.sync_queue.clear();
-        if let Some(control) = &self.copy_control {
+        // «Отмена» stops everything asked for, not only the running item.
+        let queued = self.transfers.drain();
+        for transfer in &queued { self.return_to_staging(transfer); }
+        if let Some(control) = &self.transfers.control {
             control.set_paused(false);
             control.cancel();
-            self.status = "Отмена запрошена. Уже завершённые действия сохраняются.".into();
+            self.status = if queued.is_empty() { "Отмена запрошена. Уже завершённые действия сохраняются.".into() }
+                else { format!("Отмена запрошена, из очереди снято: {}. Уже завершённые действия сохраняются.", queued.len()) };
+        } else if !queued.is_empty() {
+            self.status = format!("Из очереди снято: {}", queued.len());
         } else {
             self.status = "Копирование не выполняется".into();
         }
@@ -1636,7 +1590,7 @@ impl Explorer {
             cx.notify();
             return;
         }
-        if self.copy_in_progress || self.operation_busy {
+        if self.transfers.copying || self.transfers.busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
@@ -1683,7 +1637,7 @@ impl Explorer {
             cx.notify();
             return;
         };
-        self.operation_busy = true;
+        self.transfers.busy = true;
         self.status = "Удаление…".into();
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
@@ -1695,7 +1649,8 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let results = task.await;
             let _ = weak.update(cx, |this, cx| {
-                this.operation_busy = false;
+                this.transfers.busy = false;
+                this.start_queued(cx);
                 let mut done = 0;
                 let mut deleted = 0;
                 let mut first_error = None;
@@ -1739,7 +1694,7 @@ impl Explorer {
 
     fn configure_live_watch(&self) {
         if let Some(watcher) = &self.watcher {
-            let mut folders = if self.search_active { Vec::new() } else { self.visible_directories() };
+            let mut folders = if self.search.active { Vec::new() } else { self.visible_directories() };
             // Archives are not folders on disk: nothing to watch there.
             folders.retain(|folder| filemanager_core::archive::split(folder).is_none());
             let journal = self.watched_root.as_ref().and(self.journal.clone());
@@ -1761,7 +1716,7 @@ impl Explorer {
                 match result {
                     Ok(journal) => {
                         this.journal = Some(journal);
-                        this.inspector_dirty = true;
+                        this.inspector.dirty = true;
                         // History is recorded by default; «Остановить» pauses it.
                         if !this.history_paused && this.watched_root.is_none() {
                             this.watched_root = Some(this.browser.active().active().path.clone());
@@ -1788,7 +1743,7 @@ impl Explorer {
         }
         cx.spawn(async move |weak, cx| {
             loop {
-                cx.background_spawn(async { std::thread::sleep(Duration::from_millis(250)); }).await;
+                cx.background_executor().timer(Duration::from_millis(250)).await;
                 let running = weak.update(cx, |this, cx| {
                     let Some(watcher) = &this.watcher else { return false; };
                     let changes = watcher.drain();
@@ -1807,7 +1762,7 @@ impl Explorer {
                     if changes.refresh_all || this.selected.as_ref().is_some_and(|selected| {
                         changes.paths.iter().any(|path| selected == path || selected.starts_with(path))
                     }) {
-                        this.inspector_dirty = true;
+                        this.inspector.dirty = true;
                         cx.notify();
                     }
                     let visible = this.visible_directories();
@@ -1815,9 +1770,9 @@ impl Explorer {
                     // listing reappearing when the user navigates back.
                     let dirty = if changes.refresh_all { visible.clone() } else { changes.directories.into_iter().collect() };
                     for folder in dirty {
-                        this.directory_cache.remove(&folder);
+                        this.dirs.cache.remove(&folder);
                         this.folder_views.retain(|(_,path),_|path != &folder);
-                        if visible.contains(&folder) && !this.search_active {
+                        if visible.contains(&folder) && !this.search.active {
                             this.load_directory(folder, true, cx);
                         }
                     }
@@ -1842,24 +1797,7 @@ impl Explorer {
 
     fn load_directory(&mut self, folder: PathBuf, force: bool, cx: &mut Context<Self>) {
         if force { self.forget_thumbs(&folder); }
-        if !force && (self.directory_cache.contains_key(&folder)
-            || self.directory_loading.contains_key(&folder)
-            || self.directory_errors.contains_key(&folder)) {
-            return;
-        }
-        if force && self.directory_loading.contains_key(&folder) {
-            // Keep the event until the in-flight scan finishes. A scan can
-            // otherwise overwrite the invalidation with a stale snapshot.
-            self.directory_dirty.insert(folder);
-            return;
-        }
-        // A monotonically increasing request ID prevents a slower, outdated
-        // result from replacing a user-requested refresh.
-        self.directory_request = self.directory_request.wrapping_add(1);
-        let request = self.directory_request;
-        if force { self.directory_cache.remove(&folder); }
-        self.directory_errors.remove(&folder);
-        self.directory_loading.insert(folder.clone(), request);
+        let Some(request) = self.dirs.begin(&folder, force) else { return };
         let task_path = folder.clone();
         let task = cx.background_spawn(async move {
             // A zip or 7z archive, or a folder in one, reads as a folder.
@@ -1869,39 +1807,14 @@ impl Explorer {
             }
         });
         cx.spawn(async move |weak, cx| {
-            let result = task.await;
+            let result = task.await.map_err(|error| error.to_string());
             let _ = weak.update(cx, |this, cx| {
-                if this.directory_loading.get(&folder) != Some(&request) {
-                    return;
+                let visible: HashSet<PathBuf> = this.visible_directories().into_iter().collect();
+                match this.dirs.finish(&folder, request, result, &visible) {
+                    directories::Finished::Stale => {}
+                    directories::Finished::Reload => this.load_directory(folder, true, cx),
+                    directories::Finished::Stored => cx.notify(),
                 }
-                this.directory_loading.remove(&folder);
-                if this.directory_dirty.remove(&folder) {
-                    this.load_directory(folder, true, cx);
-                    return;
-                }
-                match result {
-                    Ok(listing) => {
-                        this.directory_cache_order.retain(|old| old != &folder);
-                        this.directory_cache_order.push_back(folder.clone());
-                        this.directory_cache.insert(folder.clone(), Arc::new(listing));
-                        // 16 slots bound the memory used by the file listing
-                        // cache even after navigating through many directories.
-                        // Folders on screen are never evicted: dropping one
-                        // would load it again at once, and so on forever.
-                        let visible: HashSet<PathBuf> = this.visible_directories().into_iter().collect();
-                        let mut kept = VecDeque::new();
-                        while this.directory_cache_order.len() + kept.len() > 16 {
-                            let Some(old) = this.directory_cache_order.pop_front() else { break };
-                            if visible.contains(&old) { kept.push_back(old); } else { this.directory_cache.remove(&old); }
-                        }
-                        kept.append(&mut this.directory_cache_order);
-                        this.directory_cache_order = kept;
-                    }
-                    Err(error) => {
-                        this.directory_errors.insert(folder.clone(), error.to_string());
-                    }
-                }
-                cx.notify();
             });
         }).detach();
     }
@@ -1925,7 +1838,7 @@ impl Explorer {
         for folder in self.visible_directories() {
             self.load_directory(folder, true, cx);
         }
-        self.inspector_path = None;
+        self.inspector.path = None;
         self.status = "Обновление…".into();
         cx.notify();
     }
@@ -1953,7 +1866,7 @@ impl Explorer {
                     cx.notify(); true
                 }).unwrap_or(false);
                 if !active { break; }
-                cx.background_spawn(async { std::thread::sleep(Duration::from_secs(1)); }).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
             }
         }).detach();
         cx.notify();

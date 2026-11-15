@@ -975,8 +975,8 @@ impl Explorer {
             zone = zone.child(
                 div().id(("zone-item", index)).flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT))
                     .cursor_grab().rounded_sm().hover(|style| style.bg(rgb(HOVER)))
-                    .child(small_icon(if path.is_dir() { "fm/folder-fill.svg" } else { "fm/file.svg" },
-                        if path.is_dir() { FOLDER } else { TEXT_MUTED }))
+                    .child(small_icon(if self.zone.is_folder(path) { "fm/folder-fill.svg" } else { "fm/file.svg" },
+                        if self.zone.is_folder(path) { FOLDER } else { TEXT_MUTED }))
                     .child(div().flex_1().min_w_0().truncate().child(browser::display_name(path)))
                     .on_drag(FileDragInfo { paths: vec![path.clone()] }, preview)
             );
@@ -1022,7 +1022,7 @@ impl Explorer {
         let preview = (side == self.active_side() && !marquee_here).then(|| self.selected.clone()).flatten()
             .filter(|selected| {
                 selected.parent() == Some(path.as_path())
-                    && self.directory_cache.get(&path).is_some_and(|listing| {
+                    && self.dirs.cache.get(&path).is_some_and(|listing| {
                         listing.entries.iter().any(|entry| &entry.path == selected && entry.is_directory)
                     })
             });
@@ -1369,7 +1369,7 @@ impl Explorer {
                         .child("Показаны не все элементы: нет доступа или превышен лимит")
                 );
             }
-        } else if let Some(error) = self.directory_errors.get(&folder) {
+        } else if let Some(error) = self.dirs.errors.get(&folder) {
             column = column.child(
                 div().p_4().flex().flex_col().gap_2().text_size(px(12.))
                     .child(div().flex().items_center().gap_2().text_color(rgb(DANGER))
@@ -1683,7 +1683,7 @@ impl Explorer {
     fn search_results(&mut self, cx: &mut Context<Self>) -> AnyElement {
         use filemanager_core::find::Kind;
         use crate::search_panel::{DEPTHS, PERIODS, SYNTAX_HINT};
-        let root = self.search_root.clone().unwrap_or_default();
+        let root = self.search.root.clone().unwrap_or_default();
         let chip = |id: &'static str, label: &'static str, active: bool| {
             div().id(id).h(px(24.)).px_2().flex().items_center().gap_1().rounded(px(4.)).cursor_pointer()
                 .text_size(px(12.)).border_1()
@@ -1693,11 +1693,11 @@ impl Explorer {
                 .child(label)
         };
         let kind = self.search.kind;
-        let busy = self.search_busy;
+        let busy = self.search.busy;
         let title = div().flex().items_center().gap_2()
             .child(icon("fm/search.svg", ACCENT))
             .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(format!("«{}» в папке «{}»", self.search_query.trim(), browser::display_name(&root))))
+                .child(format!("«{}» в папке «{}»", self.search.query.trim(), browser::display_name(&root))))
             .child(if busy {
                 text_button("search-stop", "Остановить", ButtonKind::Ghost)
                     .on_click(cx.listener(|this, _, _, cx| { this.stop_search(); cx.notify(); }))
@@ -1743,7 +1743,7 @@ impl Explorer {
             .child(div().w(px(20.)).flex_none());
         let count = self.search.hits.len();
         let list = uniform_list("search-hits", count, cx.processor(move |this, range: Range<usize>, _, cx| {
-            let root = this.search_root.clone().unwrap_or_default();
+            let root = this.search.root.clone().unwrap_or_default();
             range.map(|index| {
                 let hit = &this.search.hits[index];
                 let selected = this.search.selected == Some(index);
@@ -1829,7 +1829,7 @@ impl Explorer {
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_operation_review(cx)))))
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                     .child("Последние 30 операций"));
-            if let Some(control) = &self.copy_control {
+            if let Some(control) = &self.transfers.control {
                 let progress = control.progress();
                 panel = panel.child(div().child(format!("Обработано: {}/{}", progress.processed, progress.total)))
                     .child(text_button("queue-pause", if control.is_paused() { "Продолжить" } else { "Пауза" }, ButtonKind::Ghost)
@@ -1965,10 +1965,10 @@ impl Explorer {
             None if self.selected.is_some() => {
                 let selected = self.selected.as_ref().unwrap();
                 panel = panel.child(Self::property("Выбранный путь", selected.display().to_string()));
-                let message = if self.inspector_loading || selected.parent().is_some_and(|parent| self.directory_loading.contains_key(parent)) {
+                let message = if self.inspector.loading || selected.parent().is_some_and(|parent| self.dirs.is_loading(parent)) {
                     "Проверяем выбранный путь…".to_owned()
                 } else {
-                    self.inspector_preview.as_ref().filter(|(kind, _)| kind == "Файл недоступен")
+                    self.inspector.preview.as_ref().filter(|(kind, _)| kind == "Файл недоступен")
                         .map(|(_, reason)| reason.clone())
                         .unwrap_or_else(|| "Выбранного пути нет в списке. Файл мог быть удалён или перемещён.".into())
                 };
@@ -1989,16 +1989,16 @@ impl Explorer {
     /// Other files saved as versions of the selected document
     /// (`Отчёт_v_1_6.docx`), newest first; a click selects one.
     fn versions_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.inspector_versions.is_empty() {
+        if self.inspector.versions.is_empty() {
             return div().into_any_element();
         }
         let mut section = div().flex().flex_col().gap_0p5().pt_2().border_t_1().border_color(rgb(BORDER))
             .child(div().id("versions-toggle").h(px(28.)).flex().items_center().gap_1().cursor_pointer().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                 .child(small_icon(if self.versions_expanded {"fm/chevron-down.svg"} else {"fm/chevron-right.svg"},TEXT_MUTED))
-                .child(format!("Версии · {}", self.inspector_versions.len()))
+                .child(format!("Версии · {}", self.inspector.versions.len()))
                 .on_click(cx.listener(|this,_,_,cx| {this.versions_expanded=!this.versions_expanded;cx.notify();})));
         if !self.versions_expanded {return section.into_any_element();}
-        for (index, member) in self.inspector_versions.iter().enumerate() {
+        for (index, member) in self.inspector.versions.iter().enumerate() {
             let current = self.selected.as_ref() == Some(&member.path);
             let path = member.path.clone();
             section = section.child(
@@ -2022,19 +2022,19 @@ impl Explorer {
 
     fn preview_section(&self, entry: &Entry) -> AnyElement {
         // GPUI only decodes dimension-validated small PNGs from the helper.
-        if let Some(thumbnail) = self.inspector_thumbnail.clone().filter(|_| self.inspector_path.as_ref() == Some(&entry.path)) {
+        if let Some(thumbnail) = self.inspector.thumbnail.clone().filter(|_| self.inspector.path.as_ref() == Some(&entry.path)) {
             return div().flex().flex_col().gap_1()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Предпросмотр"))
                 .child(div().w_full().h(px(240.)).p_1().flex().items_center().justify_center()
                     .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)))
                 .into_any_element();
         }
-        if self.inspector_loading {
+        if self.inspector.loading {
             return div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Загрузка предпросмотра…").into_any_element();
         }
-        match &self.inspector_preview {
+        match &self.inspector.preview {
             // Other kinds only restate the type and size shown above.
-            Some((kind, description)) if self.inspector_path == self.selected
+            Some((kind, description)) if self.inspector.path == self.selected
                 && matches!(kind.as_str(), "text" | "Файл недоступен") => div().flex().flex_col().gap_1()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(match kind.as_str() {
                     "Файл недоступен" => "Файл недоступен",
@@ -2196,10 +2196,10 @@ impl Explorer {
                         .on_click(cx.listener(|this, _, _, cx| this.set_label_filter(None, cx))))))
             .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM))
                 .child(crate::messages::localize(&self.status)));
-        if self.copy_in_progress {
-            let paused = self.copy_control.as_ref().is_some_and(|control| control.is_paused());
+        if self.transfers.copying {
+            let paused = self.transfers.control.as_ref().is_some_and(|control| control.is_paused());
             // A capsule like Finder's: fills as the copy goes, dims on pause.
-            if let Some(fraction) = self.transfer_fraction {
+            if let Some(fraction) = self.transfers.fraction {
                 bar = bar.child(div().flex_none().flex().items_center().gap_2()
                     .child(div().w(px(140.)).h(px(6.)).rounded_full().bg(rgb(BORDER)).overflow_hidden()
                         .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT }))
@@ -2217,7 +2217,7 @@ impl Explorer {
                     .child("Отменить передачу")
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx)))
             );
-        } else if let Some((items, _, _)) = &self.retry {
+        } else if let Some((items, _, _)) = &self.transfers.retry {
             bar = bar.child(
                 div().id("retry-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
                     .hover(|style| style.bg(rgb(HOVER)))
@@ -2382,7 +2382,7 @@ impl Explorer {
                 }
             }
             MenuTarget::Entry(path) => {
-                let is_dir = self.directory_cache.get(path.parent().unwrap_or(path))
+                let is_dir = self.dirs.cache.get(path.parent().unwrap_or(path))
                     .and_then(|listing| listing.entries.iter().find(|e| &e.path == path).map(|e| e.is_directory))
                     .unwrap_or(false);
                 let open_path = path.clone();
@@ -2482,7 +2482,7 @@ impl Explorer {
                         .on_click(cx.listener({ let paths = copy_paths.clone(); move |this, _, _, cx| this.copy_paths(&paths, crate::CopyAs::Name, cx) })))
                     .when(is_dir || copy_paths.len() > 1, |list| {
                         // From the listing, not the disk: menus redraw every frame.
-                        let folders: Vec<PathBuf> = copy_paths.iter().filter(|p| self.directory_cache.get(p.parent().unwrap_or(p))
+                        let folders: Vec<PathBuf> = copy_paths.iter().filter(|p| self.dirs.cache.get(p.parent().unwrap_or(p))
                             .is_some_and(|listing| listing.entries.iter().any(|e| &e.path == *p && e.is_directory))).cloned().collect();
                         let n = folders.len();
                         list.child(Self::menu_item("m-measure", "fm/drive.svg",
@@ -2727,7 +2727,7 @@ impl Explorer {
                 rows = rows.child(row);
             }
         }
-        let can_apply = state.preview.as_ref().is_some_and(|preview| preview.can_apply()) && !self.operation_busy;
+        let can_apply = state.preview.as_ref().is_some_and(|preview| preview.can_apply()) && !self.transfers.busy;
         let mut buttons = div().flex().justify_end().gap_2()
             .child(text_button("bulk-cancel", "Отмена", ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _, window, cx| this.key_dismiss(&keys::DismissOverlay, window, cx))));
@@ -2754,7 +2754,7 @@ impl Explorer {
     }
 
     fn conflict_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (transfer, conflicts) = self.pending_transfer.as_ref()?;
+        let (transfer, conflicts) = self.transfers.pending.as_ref()?;
         let recycle = filemanager_core::path_utils::has_recycle_bin(&transfer.target);
         let names: Vec<String> = conflicts.iter().take(4).map(|p| browser::display_name(p)).collect();
         let more = conflicts.len().saturating_sub(names.len());
@@ -2885,12 +2885,12 @@ impl Render for Explorer {
         if self.clear_filter {
             self.clear_filter = false;
             self.filter.clear();
-            self.search_query.clear();
+            self.search.query.clear();
             self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
         }
         self.ensure_live_watch(cx);
         // Do not compete with the search walk for I/O while showing results.
-        if !self.search_active {
+        if !self.search.active {
             self.load_visible_directories(cx);
             self.request_icons(window.scale_factor(), cx);
         }
@@ -2914,9 +2914,9 @@ impl Render for Explorer {
         let pane_width=(window_width-sidebar_width-inspector_width).max(240.);
         self.pane_width=pane_width/self.browser.groups.len() as f32;
         let height=(window.viewport_size().height/px(1.)-64.).max(240.);
-        let group_id=format!("main-{}-{}-{}",self.browser.signature(),self.show_inspector,self.search_active);
+        let group_id=format!("main-{}-{}-{}",self.browser.signature(),self.show_inspector,self.search.active);
         let mut panels=h_resizable(SharedString::from(group_id));
-        let body=if self.search_active {self.search_results(cx).into_any_element()} else {
+        let body=if self.search.active {self.search_results(cx).into_any_element()} else {
             self.layout_view(&self.browser.root.clone(),Vec::new(),pane_width,height,cx)
         };
         panels=panels.child(resizable_panel().size(px(pane_width)).size_range(px(240.)..px(10000.)).child(body));
