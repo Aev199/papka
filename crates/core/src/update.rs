@@ -7,6 +7,7 @@
 //! previous EXE stays beside it as `<name>.old.exe` for one-click rollback.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -357,6 +358,20 @@ pub fn find_downloaded(folder: &Path, current: &str, version_of: &dyn Fn(&Path) 
     downloaded_candidates(folder, current, version_of).into_iter().next()
 }
 
+/// A file as it was when looked at: a refused download is not compared
+/// again (nor GitHub asked again) until it changes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FileStamp {
+    pub path: PathBuf,
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+pub fn stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(FileStamp { path: path.to_path_buf(), len: metadata.len(), modified: metadata.modified().ok() })
+}
+
 /// Every `Papka*.exe` in `folder` newer than `current`, newest first: a
 /// refused file must not hide a genuine one behind it.
 pub fn downloaded_candidates(folder: &Path, current: &str, version_of: &dyn Fn(&Path) -> Option<String>) -> Vec<(PathBuf, String)> {
@@ -375,19 +390,42 @@ pub fn downloaded_candidates(folder: &Path, current: &str, version_of: &dyn Fn(&
     found
 }
 
-/// The first of the files in Downloads (newest first) that passes
-/// `vet_downloaded`; otherwise why the newest one was refused.
+/// The files in Downloads still worth a look: newer than `current` and not
+/// refused before in their present state.
+pub fn fresh_candidates(folder: &Path, current: &str, version_of: &dyn Fn(&Path) -> Option<String>,
+    refused: &HashSet<FileStamp>) -> Vec<(PathBuf, String)> {
+    downloaded_candidates(folder, current, version_of).into_iter()
+        .filter(|(path, _)| stamp(path).is_none_or(|stamp| !refused.contains(&stamp)))
+        .collect()
+}
+
+/// What a look at Downloads found.
+#[derive(Debug, Default)]
+pub struct DownloadedOffer {
+    /// The first file (newest first) that passes `vet_downloaded`, or why
+    /// the newest one was refused.
+    pub offer: Option<io::Result<Update>>,
+    /// Files refused for good in their present state: another version than
+    /// published, or not Papka at all.
+    pub refused: Vec<FileStamp>,
+}
+
 pub fn downloaded_offer(folder: &Path, current: &str, version_of: &dyn Fn(&Path) -> Option<String>,
-    list: Option<&[u8]>, fetch: Fetch) -> Option<io::Result<Update>> {
+    list: Option<&[u8]>, fetch: Fetch, refused: &HashSet<FileStamp>) -> DownloadedOffer {
+    let mut result = DownloadedOffer::default();
     let mut refusal = None;
-    for (path, version) in downloaded_candidates(folder, current, version_of).into_iter().take(5) {
-        let Ok(found) = downloaded_update(&path, &version) else { continue };
-        match vet_downloaded(found, list, fetch) {
-            Ok(update) => return Some(Ok(update)),
-            Err(error) => { refusal.get_or_insert(error); }
+    for (path, version) in fresh_candidates(folder, current, version_of, refused).into_iter().take(5) {
+        let checked = downloaded_update(&path, &version).and_then(|found| vet_downloaded(found, list, fetch));
+        match checked {
+            Ok(update) => { result.offer = Some(Ok(update)); return result; }
+            Err(error) => {
+                if error.kind() == io::ErrorKind::InvalidData { result.refused.extend(stamp(&path)); }
+                refusal.get_or_insert(error);
+            }
         }
     }
-    refusal.map(Err)
+    result.offer = refusal.map(Err);
+    result
 }
 
 /// An update offered from a file the browser downloaded.
@@ -783,14 +821,26 @@ mod tests {
         let candidates = downloaded_candidates(dir.path(), "0.1.46", &version_of);
         assert_eq!(candidates.iter().map(|(_, version)| version.as_str()).collect::<Vec<_>>(), ["9.9.9", "0.1.48"]);
 
-        let offer = downloaded_offer(dir.path(), "0.1.46", &version_of, Some(LIST_48.as_bytes()), &published(b"MZ genuine"));
-        let offer = offer.unwrap().unwrap();
+        let none = HashSet::new();
+        let found = downloaded_offer(dir.path(), "0.1.46", &version_of, Some(LIST_48.as_bytes()), &published(b"MZ genuine"), &none);
+        let offer = found.offer.unwrap().unwrap();
         assert_eq!((offer.version.as_str(), offer.origin), ("0.1.48", Origin::DownloadedVerified));
+        assert_eq!(found.refused.len(), 1, "the invented version is remembered");
 
         fs::remove_file(dir.path().join("Papka.exe")).unwrap();
-        let refused = downloaded_offer(dir.path(), "0.1.46", &version_of, Some(LIST_48.as_bytes()), &published(b"MZ genuine"));
-        assert!(refused.unwrap().is_err(), "only the invented version is left");
-        assert!(downloaded_offer(dir.path(), "9.9.9", &version_of, None, &published(b"")).is_none());
+        let refused = downloaded_offer(dir.path(), "0.1.46", &version_of, Some(LIST_48.as_bytes()), &published(b"MZ genuine"), &none);
+        assert!(refused.offer.unwrap().is_err(), "only the invented version is left");
+        assert!(downloaded_offer(dir.path(), "9.9.9", &version_of, None, &published(b""), &none).offer.is_none());
+
+        // Once refused, the file is not looked at again until it changes.
+        let known: HashSet<FileStamp> = refused.refused.into_iter().collect();
+        assert!(fresh_candidates(dir.path(), "0.1.46", &version_of, &known).is_empty());
+        assert!(downloaded_offer(dir.path(), "0.1.46", &version_of, None, &published(b""), &known).offer.is_none());
+        fs::write(dir.path().join("Papka-fake.exe"), b"MZ fake, downloaded again").unwrap();
+        assert_eq!(fresh_candidates(dir.path(), "0.1.46", &version_of, &known).len(), 1);
+        // Offline the file cannot be refused: nothing is remembered.
+        let offline = downloaded_offer(dir.path(), "0.1.46", &version_of, None, &published(b""), &none);
+        assert!(offline.refused.is_empty());
     }
 
     #[test]

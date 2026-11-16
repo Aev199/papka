@@ -303,6 +303,9 @@ impl WorkspaceStore {
         Self::valid_name(name)?;
         let conn = self.connection()?;
         let removed = conn.execute("DELETE FROM workspaces WHERE name=?1", params![name]).map_err(db_error)?;
+        // The project's card goes with it: a new project of the same name
+        // starts with a clean one.
+        conn.execute("DELETE FROM app_values WHERE name=?1", params![crate::project_card::storage_key(name)]).map_err(db_error)?;
         Ok(removed > 0)
     }
 

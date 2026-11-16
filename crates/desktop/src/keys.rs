@@ -635,7 +635,13 @@ impl Explorer {
 
     /// The file panes have the keyboard (no field, dialog or overlay).
     pub(crate) fn list_focused(&self, window: &Window) -> bool {
-        !self.interface_modal() && self.focus_handle.is_focused(window)
+        !self.interface_modal() && !self.card_covers_list() && self.focus_handle.is_focused(window)
+    }
+
+    /// The active pane shows its project card: keys meant for the file
+    /// list must not act on the list hidden under it.
+    pub(crate) fn card_covers_list(&self) -> bool {
+        self.cards.shown_in(self.browser.active)
     }
 
     /// Alt+C / Alt+M: the selection goes to the folder of the other pane,

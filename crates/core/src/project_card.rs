@@ -132,6 +132,19 @@ pub fn read_lines(text: &str) -> Vec<Line> {
     text.lines().map(read_line).collect()
 }
 
+/// Every place the card's sections link to, once each.
+pub fn links(card: &Card) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    for line in card.sections.iter().flat_map(|section| read_lines(&section.text)) {
+        let path = match line {
+            Line::Link(path) | Line::Field { link: Some(path), .. } => path,
+            _ => continue,
+        };
+        if !found.contains(&path) { found.push(path); }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +185,15 @@ mod tests {
         assert_eq!(Card::load(Some(r#"{"sections":[]}"#)).sections, Vec::new());
         card.set_hidden("changes", false);
         assert!(!card.is_hidden("changes"));
+    }
+
+    #[test]
+    fn links_are_collected_once_from_every_section() {
+        let card = Card { sections: vec![
+            Section { title: "а".into(), text: "Z:\\A\nМодель: Z:\\A\nтекст".into() },
+            Section { title: "б".into(), text: "\\\\srv\\x".into() },
+        ], hidden: Vec::new() };
+        assert_eq!(links(&card), [PathBuf::from("Z:\\A"), PathBuf::from("\\\\srv\\x")]);
     }
 
     #[test]

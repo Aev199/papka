@@ -12,7 +12,7 @@ use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, ILFindLastID, ILFree, SHBindToParent,
     SHParseDisplayName, CMF_EXPLORE, CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
-    CMINVOKECOMMANDINFOEX, GCS_VERBW,
+    CMINVOKECOMMANDINFOEX, GCS_HELPTEXTW, GCS_VERBW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos, GetMenuItemCount,
@@ -103,6 +103,9 @@ struct Session {
     popup: HMENU,
     owner: HWND,
     directory: Option<PathBuf>,
+    /// Submenus not read yet, by the number `Item::submenu` carries:
+    /// their handle and position in their parent.
+    submenus: Vec<(HMENU, u32)>,
     _pidls: Pidls,
 }
 
@@ -129,8 +132,9 @@ fn fill_submenu(menu: &IContextMenu, submenu: HMENU, index: u32) {
     }
 }
 
-/// The lines of `popup` as data; submenus down to `depth` more levels.
-fn read_items(menu: &IContextMenu, popup: HMENU, depth: u8) -> Vec<Item> {
+/// The lines of `popup` as data. Submenus are not opened here: each gets
+/// a number in `submenus` and is read by `expand` when the user unfolds it.
+fn read_items(menu: &IContextMenu, popup: HMENU, submenus: &mut Vec<(HMENU, u32)>) -> Vec<Item> {
     let count = unsafe { GetMenuItemCount(Some(popup)) };
     let mut items = Vec::new();
     // A broken handler must not make the menu endless.
@@ -149,25 +153,26 @@ fn read_items(menu: &IContextMenu, popup: HMENU, depth: u8) -> Vec<Item> {
             continue;
         }
         let length = (info.cch as usize).min(text.len() - 1);
-        let label = shell_items::clean_label(&String::from_utf16_lossy(&text[..length]));
-        let mut children = Vec::new();
-        if !info.hSubMenu.is_invalid() {
-            if depth == 0 { continue; }
-            fill_submenu(menu, info.hSubMenu, index);
-            children = read_items(menu, info.hSubMenu, depth - 1);
-        }
-        let command = (children.is_empty() && (FIRST_COMMAND..=LAST_COMMAND).contains(&info.wID))
+        let mut label = shell_items::clean_label(&String::from_utf16_lossy(&text[..length]));
+        let command = (info.hSubMenu.is_invalid() && (FIRST_COMMAND..=LAST_COMMAND).contains(&info.wID))
             .then(|| info.wID - FIRST_COMMAND);
         if let Some(offset) = command {
             if verb(menu, offset as usize).is_some_and(|verb| shell_items::is_own_verb(&verb)) { continue; }
+            // A line its handler draws itself has no text of its own.
+            if label.is_empty() { label = shell_items::fallback_label(&help_text(menu, offset as usize).unwrap_or_default()); }
         }
+        let submenu = (!info.hSubMenu.is_invalid()).then(|| {
+            submenus.push((info.hSubMenu, index));
+            submenus.len() - 1
+        });
         items.push(Item {
             label,
             command,
             enabled: !info.fState.contains(MFS_DISABLED),
             checked: info.fState.contains(MFS_CHECKED),
             separator: false,
-            children,
+            children: Vec::new(),
+            submenu,
         });
     }
     items
@@ -187,13 +192,15 @@ pub fn load(owner: isize, paths: &[PathBuf], extended: bool) -> io::Result<(u64,
     let popup = unsafe { CreatePopupMenu() }.map_err(error)?;
     let token = NEXT_TOKEN.with(|next| { let token = next.get(); next.set(token.wrapping_add(1).max(1)); token });
     // From here the session owns the menu handle, also on an early return.
-    let session = Session { token, menu, popup, owner, directory: paths[0].parent().map(PathBuf::from), _pidls: pidls };
+    let mut session = Session { token, menu, popup, owner, directory: paths[0].parent().map(PathBuf::from), submenus: Vec::new(), _pidls: pidls };
     let flags = CMF_NORMAL | CMF_EXPLORE | if extended { CMF_EXTENDEDVERBS } else { 0 };
     let filled = unsafe { session.menu.QueryContextMenu(popup, 0, FIRST_COMMAND, LAST_COMMAND, flags) };
     if filled.is_err() {
         return Err(io::Error::other(windows::core::Error::from_hresult(filled).message()));
     }
-    let items = shell_items::tidy(read_items(&session.menu, popup, 2));
+    let mut submenus = Vec::new();
+    let items = shell_items::tidy(read_items(&session.menu, popup, &mut submenus));
+    session.submenus = submenus;
     SESSION.with(|slot| *slot.borrow_mut() = Some(session));
     Ok((token, items))
 }
@@ -209,6 +216,22 @@ pub fn invoke(token: u64, command: u32) -> io::Result<()> {
     let mut point = POINT::default();
     let _ = unsafe { GetCursorPos(&mut point) };
     invoke_offset(&session.menu, session.owner, command as usize, session.directory.as_deref(), point).map(|_| ())
+}
+
+/// Reads submenu `number` of the menu read by `load`, when the user
+/// unfolds it: the handler fills it as it does for a submenu on screen.
+pub fn expand(token: u64, number: usize) -> io::Result<Vec<Item>> {
+    SESSION.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let session = slot.as_mut().filter(|session| session.token == token)
+            .ok_or_else(|| io::Error::other("меню устарело — откройте его заново"))?;
+        let (submenu, index) = *session.submenus.get(number).ok_or_else(|| io::Error::other("нет такого подменю"))?;
+        fill_submenu(&session.menu, submenu, index);
+        let mut nested = std::mem::take(&mut session.submenus);
+        let items = read_items(&session.menu, submenu, &mut nested);
+        session.submenus = nested;
+        Ok(shell_items::tidy(items))
+    })
 }
 
 /// Forgets the menu read by `load`.
@@ -316,6 +339,14 @@ fn run(owner: HWND, menu: IContextMenu, extended: bool, directory: Option<&std::
         let _ = SetForegroundWindow(owner);
     }
     result
+}
+
+/// The help text of a menu command, for lines without a label.
+fn help_text(menu: &IContextMenu, offset: usize) -> Option<String> {
+    let mut buffer = [0u16; 256];
+    unsafe { menu.GetCommandString(offset, GCS_HELPTEXTW, None, PSTR(buffer.as_mut_ptr().cast()), buffer.len() as u32) }.ok()?;
+    let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..end])).filter(|text| !text.trim().is_empty())
 }
 
 /// The language-independent name of a menu command ("Powershell", "git_shell").

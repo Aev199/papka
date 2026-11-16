@@ -58,6 +58,13 @@ pub(crate) fn report_title(done: &str, ok: usize, failed: usize, cancelled: usiz
     title
 }
 
+/// An error a cancelled transfer gives for the items it stopped: the
+/// queue's `Interrupted`, or Windows' "request aborted" (1235) from a copy
+/// stopped half way.
+pub(crate) fn is_cancellation(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Interrupted || error.raw_os_error() == Some(1235)
+}
+
 /// The errors as plain text, to paste into a message.
 pub(crate) fn failures_text(title: &str, failures: &[Failure]) -> String {
     let mut text = String::from(title);
@@ -230,6 +237,15 @@ mod tests {
         transfers.finish(report_title("Перемещено", 1, 0, 0), "u".into(), Vec::new());
         transfers.begin("Копирование", "v".into());
         assert!(transfers.report.is_none());
+    }
+
+    #[test]
+    fn stopped_items_are_told_apart_from_failures() {
+        use std::io::{Error, ErrorKind};
+        assert!(is_cancellation(&Error::new(ErrorKind::Interrupted, "Copy cancelled")));
+        assert!(is_cancellation(&Error::from_raw_os_error(1235)));
+        assert!(!is_cancellation(&Error::new(ErrorKind::PermissionDenied, "Отказано в доступе")));
+        assert!(!is_cancellation(&Error::from_raw_os_error(112)), "a full disk is an error, cancelled or not");
     }
 
     #[test]

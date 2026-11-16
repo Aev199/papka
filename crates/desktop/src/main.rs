@@ -695,6 +695,8 @@ impl Explorer {
     }
 
     fn add_tab(&mut self, cx: &mut Context<Self>) {
+        // The new tab is shown: a project card over the pane gives way.
+        self.leave_project_card(self.browser.active, cx);
         let path = self.browser.active().active().path.clone();
         if let Err(e) = self.browser.new_tab(self.browser.active, path) {
             self.status = e.to_string();
@@ -1184,9 +1186,8 @@ impl Explorer {
 
     /// A copy or move ended: one short line below, and the panel with
     /// every error in full. A clean result leaves the screen by itself.
-    fn finish_transfer(&mut self, done: &'static str, ok: usize, not_done: usize, target: PathBuf,
+    fn finish_transfer(&mut self, done: &'static str, ok: usize, cancelled: usize, target: PathBuf,
         failures: Vec<transfers::Failure>, cx: &mut Context<Self>) {
-        let cancelled = not_done.saturating_sub(failures.len());
         let title = transfers::report_title(done, ok, failures.len(), cancelled);
         self.status = if !failures.is_empty() {
             format!("{title}. Ошибки — в окне переноса справа внизу.")
@@ -1224,15 +1225,15 @@ impl Explorer {
             };
             let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
             let errors = results.len() - ok;
-            let failures = transfer_failures(&results);
+            let (failures, cancelled) = transfer_failures(&results, control.is_cancelled());
             let created: Vec<Receipt> = results.iter()
                 .filter_map(|(_, result)| result.as_ref().ok().cloned())
                 .collect();
-            (zone, target, ok, errors, failures, created)
+            (zone, target, ok, errors, failures, cancelled, created)
         });
         self.start_transfer_progress("Копирование", target_shown, cx);
         cx.spawn(async move |weak, cx| {
-            let (zone, target, ok, errors, failures, created) = task.await;
+            let (zone, target, ok, errors, failures, cancelled, created) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 // Failed Drop Zone items stay staged; staging done meanwhile is kept.
                 for pending in zone.items().iter().filter(|_| restore_failed) {
@@ -1244,7 +1245,7 @@ impl Explorer {
                 this.transfers.control = None;
                 this.transfers.retry = (errors > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), true));
                 this.load_directory(target.clone(), true, cx);
-                this.finish_transfer("Скопировано", ok, errors, target, failures, cx);
+                this.finish_transfer("Скопировано", ok, cancelled, target, failures, cx);
                 if !created.is_empty() {
                     let label = format!("копирование ({})", created.len());
                     this.push_undo(created, label);
@@ -1279,7 +1280,7 @@ impl Explorer {
             };
             let moved = results.iter().filter(|(_, result)| result.is_ok()).count();
             let failed = results.len() - moved;
-            let failures = transfer_failures(&results);
+            let (failures, cancelled) = transfer_failures(&results, control.is_cancelled());
             let sources = results.iter()
                 .filter(|(_, result)| result.is_ok())
                 .map(|(path, _)| path.clone())
@@ -1288,10 +1289,10 @@ impl Explorer {
             let receipts: Vec<Receipt> = results.iter()
                 .filter_map(|(_, result)| result.as_ref().ok().cloned())
                 .collect();
-            (zone, target, moved, failed, failures, sources, receipts)
+            (zone, target, moved, failed, failures, cancelled, sources, receipts)
         });
         cx.spawn(async move |weak, cx| {
-            let (zone, target, moved, failed, failures, sources, receipts) = task.await;
+            let (zone, target, moved, failed, failures, cancelled, sources, receipts) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 for path in zone.items().iter().filter(|_| restore_failed) {
                     if let Err(error) = this.zone.add(path) {
@@ -1306,7 +1307,7 @@ impl Explorer {
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
                 }
-                this.finish_transfer("Перемещено", moved, failed, target, failures, cx);
+                this.finish_transfer("Перемещено", moved, cancelled, target, failures, cx);
                 if moved > 0 {
                     this.selected = normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));
                     let label = if moved == 1 {
@@ -2032,16 +2033,22 @@ fn main() {
 }
 
 /// "осталось" for a transfer: rounded the way people say it.
-/// Every item of a transfer that failed, with its whole error text. Items
-/// the user cancelled are not errors: they are counted, not listed.
-fn transfer_failures(results: &[(PathBuf, std::io::Result<Receipt>)]) -> Vec<transfers::Failure> {
-    results.iter().filter_map(|(path, result)| {
-        let error = result.as_ref().err()?;
-        (error.kind() != std::io::ErrorKind::Interrupted && !error.to_string().contains("cancelled")).then(|| transfers::Failure {
+/// Every item of a transfer that failed, with its whole error text, and
+/// how many were cancelled. Every planned item has a result (the queue
+/// answers the rest with `Interrupted` once cancelled), so the counts add
+/// up; cancelled items are counted, not listed as errors.
+fn transfer_failures(results: &[(PathBuf, std::io::Result<Receipt>)], cancelled: bool) -> (Vec<transfers::Failure>, usize) {
+    let mut failures = Vec::new();
+    let mut stopped = 0;
+    for (path, result) in results {
+        let Err(error) = result else { continue };
+        if cancelled && transfers::is_cancellation(error) { stopped += 1; continue; }
+        failures.push(transfers::Failure {
             path: filemanager_core::path_utils::normalize_extended_path(path),
             error: messages::localize(&error.to_string()),
-        })
-    }).collect()
+        });
+    }
+    (failures, stopped)
 }
 
 fn remaining(seconds: f64) -> String {

@@ -12,6 +12,10 @@ pub struct Item {
     pub checked: bool,
     pub separator: bool,
     pub children: Vec<Item>,
+    /// A submenu not read yet ("Open with", "Send to"): its number for
+    /// `shell_menu::expand`. Reading every submenu up front is what makes
+    /// a context menu slow.
+    pub submenu: Option<usize>,
 }
 
 impl Item {
@@ -60,11 +64,20 @@ pub fn tidy(items: Vec<Item>) -> Vec<Item> {
             continue;
         }
         item.children = tidy(item.children);
-        if item.label.is_empty() || (item.command.is_none() && item.children.is_empty()) { continue; }
+        if item.label.is_empty() || (item.command.is_none() && item.children.is_empty() && item.submenu.is_none()) { continue; }
         out.push(item);
     }
     if out.last().is_some_and(|last| last.separator) { out.pop(); }
     out
+}
+
+/// A label for a line its handler draws itself and gives no text: its
+/// help text, shortened, if it has one.
+pub fn fallback_label(help: &str) -> String {
+    let help = clean_label(help);
+    let help = help.trim_end_matches('.');
+    if help.chars().count() <= 48 { return help.to_string(); }
+    format!("{}…", help.chars().take(48).collect::<String>().trim_end())
 }
 
 /// How many commands the menu holds, submenus included.
@@ -86,6 +99,13 @@ mod tests {
     }
 
     #[test]
+    fn a_line_without_text_takes_its_help_text() {
+        assert_eq!(fallback_label("Открывает элемент в новом окне."), "Открывает элемент в новом окне");
+        assert_eq!(fallback_label(""), "");
+        assert!(fallback_label(&"я".repeat(100)).ends_with('…'));
+    }
+
+    #[test]
     fn commands_papka_has_itself_stay_out() {
         for verb in ["open", "Delete", "RENAME", "cut", "copy", "paste"] { assert!(is_own_verb(verb), "{verb}"); }
         for verb in ["properties", "openas", "sendto", "edit", "print", "link", ""] { assert!(!is_own_verb(verb), "{verb}"); }
@@ -101,13 +121,14 @@ mod tests {
             Item::command("", 4),
             Item::submenu("Отправить", vec![Item::separator(), Item::command("Рабочий стол", 9), Item::separator()]),
             Item::submenu("Пустое", vec![Item::command("", 12)]),
+            Item { submenu: Some(0), ..Item::submenu("Отправить позже", Vec::new()) },
             Item::separator(),
             Item::command("Свойства", 20),
             Item::separator(),
         ];
         let tidy = tidy(menu);
         let labels: Vec<&str> = tidy.iter().map(|item| if item.separator { "—" } else { item.label.as_str() }).collect();
-        assert_eq!(labels, ["Изменить", "—", "Отправить", "—", "Свойства"]);
+        assert_eq!(labels, ["Изменить", "—", "Отправить", "Отправить позже", "—", "Свойства"], "an unread submenu stays");
         assert_eq!(tidy[2].children, vec![Item::command("Рабочий стол", 9)]);
         assert_eq!(count(&tidy), 3);
     }

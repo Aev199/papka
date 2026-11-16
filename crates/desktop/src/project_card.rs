@@ -5,6 +5,7 @@
 //! are filled in by Papka — the project's folders, the object passport
 //! (`object.json`, read only) and the latest changes — and can be hidden.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use filemanager_core::browser;
@@ -51,6 +52,10 @@ pub(crate) struct OpenCard {
     passport: PassportState,
     /// `None` while they are being read.
     changes: Option<Vec<Event>>,
+    /// What each link of the card is on disk: a folder, a file, or (None)
+    /// not found. Read off the window's thread; a link not looked at yet
+    /// is drawn by its name.
+    kinds: HashMap<PathBuf, Option<bool>>,
     request: u64,
 }
 
@@ -101,9 +106,13 @@ impl Explorer {
         let saved = self.workspaces.as_ref().and_then(|store| store.value(&model::storage_key(&name)).ok().flatten());
         self.cards.requests = self.cards.requests.wrapping_add(1);
         self.cards.open = Some(OpenCard { group, name, card: Card::load(saved.as_deref()), editing: None, doomed: None,
-            passport: PassportState::Loading, changes: None, request: self.cards.requests });
+            passport: PassportState::Loading, changes: None, kinds: HashMap::new(), request: self.cards.requests });
         self.context_menu = None;
         self.focus_group(group, cx);
+        // Nothing stays chosen in the list hidden under the card.
+        self.selected = None; self.marked.clear(); self.anchor = None; self.marquee = None;
+        self.confirm_recycle = None; self.address_editing = None; self.filter_open = false;
+        self.close_search();
         self.reload_project_card(cx);
         cx.notify();
     }
@@ -120,6 +129,7 @@ impl Explorer {
         open.request = request;
         open.passport = PassportState::Loading;
         open.changes = None;
+        self.look_at_card_links(cx);
         let journal = self.journal.clone();
         let task = cx.background_spawn(async move {
             let passport = match passport::find(&paths) {
@@ -145,6 +155,28 @@ impl Explorer {
             });
         }).detach();
         cx.notify();
+    }
+
+    /// Finds out what the card's links are: folder, file or missing. A link
+    /// on a network drive may take seconds, so it is done in the background.
+    fn look_at_card_links(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.cards.open.as_ref() else { return };
+        let links = model::links(&open.card);
+        let name = open.name.clone();
+        let task = cx.background_spawn(async move {
+            links.into_iter().map(|path| {
+                let kind = std::fs::metadata(&path).ok().map(|metadata| metadata.is_dir());
+                (path, kind)
+            }).collect::<HashMap<_, _>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let kinds = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(open) = this.cards.open.as_mut().filter(|open| open.name == name) else { return };
+                open.kinds.extend(kinds);
+                cx.notify();
+            });
+        }).detach();
     }
 
     /// The project's tabs: title and folder.
@@ -217,6 +249,7 @@ impl Explorer {
         let Some(editing) = open.editing.take() else { return };
         open.card.set(editing.index, &title, &text);
         self.store_card();
+        self.look_at_card_links(cx);
         cx.notify();
     }
 
@@ -244,20 +277,31 @@ impl Explorer {
     }
 
     /// A link of the card: a folder opens in a new tab of the pane, a
-    /// file — its folder in a new tab, with the file selected.
+    /// file — its folder in a new tab, with the file selected. The disk is
+    /// asked off the window's thread: a link may point to a slow share.
     fn open_card_link(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(group) = self.cards.open.as_ref().map(|open| open.group) else { return };
-        let (folder, select) = if path.is_dir() { (path.clone(), None) }
-            else if path.is_file() { (path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone()), Some(path.clone())) }
-            else {
-                self.status = format!("«{}» не найдено: папка недоступна или переименована", path.display());
-                cx.notify();
-                return;
-            };
-        self.close_project_card(cx);
-        self.focus_group(group, cx);
-        self.open_in_new_tab(&folder, cx);
-        if let Some(file) = select { self.navigate_side(group, &folder, Some(file), cx); }
+        let probe = path.clone();
+        let task = cx.background_spawn(async move { std::fs::metadata(&probe).map(|metadata| metadata.is_dir()) });
+        cx.spawn(async move |this, cx| {
+            let kind = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let (folder, select) = match kind {
+                    Ok(true) => (path.clone(), None),
+                    Ok(false) => (path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone()), Some(path.clone())),
+                    Err(_) => {
+                        if let Some(open) = this.cards.open.as_mut() { open.kinds.insert(path.clone(), None); }
+                        this.status = format!("«{}» не найдено: папка недоступна или переименована", path.display());
+                        cx.notify();
+                        return;
+                    }
+                };
+                this.close_project_card(cx);
+                this.focus_group(group, cx);
+                this.open_in_new_tab(&folder, cx);
+                if let Some(file) = select { this.navigate_side(group, &folder, Some(file), cx); }
+            });
+        }).detach();
     }
 
     fn open_outside(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -268,13 +312,20 @@ impl Explorer {
     fn link_row(&self, id: impl Into<ElementId>, path: &Path, title: Option<String>, cx: &mut Context<Self>) -> Stateful<Div> {
         let full = path.display().to_string();
         let target = path.to_path_buf();
+        // What the background look found; by the name until it answers
+        // (the card is drawn every frame, the disk may be a slow share).
+        let kind = self.cards.open.as_ref().and_then(|open| open.kinds.get(path).copied());
+        let missing = kind == Some(None);
+        let folder = match kind { Some(Some(is_dir)) => is_dir, _ => path.extension().is_none() };
+        let tip = if missing { format!("Не найдено: {full}") } else { format!("Открыть в новой вкладке: {full}") };
         div().id(id).min_h(px(24.)).flex().items_center().gap_2().px_1().rounded(px(4.)).cursor_pointer()
             .hover(|style| style.bg(rgb(HOVER)))
-            // By the name, not the disk: the card is drawn every frame.
-            .child(if path.extension().is_some() { small_icon("fm/file.svg", TEXT_MUTED) } else { small_icon("fm/folder-fill.svg", FOLDER) })
-            .child(div().flex_none().max_w(px(260.)).truncate().text_color(rgb(ACCENT)).child(title.unwrap_or_else(|| browser::display_name(path))))
+            .child(if folder { small_icon("fm/folder-fill.svg", if missing { TEXT_DIM } else { FOLDER }) } else { small_icon("fm/file.svg", TEXT_MUTED) })
+            .child(div().flex_none().max_w(px(260.)).truncate().text_color(rgb(if missing { TEXT_DIM } else { ACCENT }))
+                .when(missing, |name| name.line_through())
+                .child(title.unwrap_or_else(|| browser::display_name(path))))
             .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(full.clone()))
-            .tooltip(move |window, cx| Tooltip::new(format!("Открыть в новой вкладке: {full}")).build(window, cx))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| this.open_card_link(target.clone(), cx)))
     }
 
