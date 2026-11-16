@@ -675,6 +675,7 @@ impl Explorer {
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
         if self.version_editing.is_some() { self.close_version_rules(window, cx); return; }
         if self.close_error.take().is_some() {cx.notify();return;}
+        if self.project_card.take().is_some() {cx.notify();return;}
         if std::mem::take(&mut self.about_open) {cx.notify();return;}
         if std::mem::take(&mut self.updates.dialog) {cx.notify();return;}
         if self.feed.editing.take().is_some() {

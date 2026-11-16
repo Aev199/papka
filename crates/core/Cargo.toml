@@ -14,7 +14,7 @@ chrono = "0.4"
 tempfile = "3"
 filetime = "0.2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
 zip = { version = "2", default-features = false, features = ["deflate", "deflate64"] }

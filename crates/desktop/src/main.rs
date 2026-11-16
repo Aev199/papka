@@ -29,6 +29,7 @@ mod directories;
 mod transfers;
 mod transfer_panel;
 mod shell_actions;
+mod project_card;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -219,6 +220,8 @@ struct Explorer {
     /// The running copy or move, the one waiting for an answer, and those queued behind.
     transfers: transfers::Transfers,
     context_menu: Option<ContextMenu>,
+    /// The card of a project, while it is open.
+    project_card: Option<project_card::ProjectCard>,
     /// The window's handle, for menus and dialogs Windows itself shows.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Option<isize>,
@@ -510,6 +513,7 @@ impl Explorer {
             zone: DropZone::default(),
             transfers: Default::default(),
             context_menu: None,
+            project_card: None,
             hwnd: None,
             right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,

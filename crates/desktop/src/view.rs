@@ -248,8 +248,9 @@ impl Explorer {
         div().h(px(34.)).w_full().flex_none().min_w_0().overflow_hidden().flex().items_center().bg(rgb(WINDOW))
             .when_some(project, |bar,name| bar.child(div().id(SharedString::from(format!("project-{}",group.0)))
                 .flex_none().max_w(px(180.)).h(px(24.)).ml_1().pl_2().pr_0p5().flex().items_center().gap_1p5()
-                .rounded(px(4.)).bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT))
-                .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(format!("Проект «{name}» открыт в этой панели")).build(window,cx)})
+                .rounded(px(4.)).bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT)).cursor_pointer()
+                .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(format!("Проект «{name}»: щелчок — карточка проекта")).build(window,cx)})
+                .on_click(cx.listener(move |this,_,_,cx|this.open_project_card(group,cx)))
                 .child(small_icon("fm/layers.svg",ACCENT))
                 .child(div().min_w_0().truncate().child(name))
                 .child(div().id(SharedString::from(format!("project-close-{}",group.0))).flex_none().size(px(20.)).rounded_sm()
@@ -3150,6 +3151,7 @@ impl Render for Explorer {
         if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
         if self.about_open { root=root.child(self.about_panel(cx)); }
         if let Some(panel)=self.transfer_panel(cx) { root=root.child(panel); }
+        if let Some(card)=self.project_card_view(window,cx) { root=root.child(card); }
         if let Some(dialog)=self.update_dialog(cx) { root=root.child(dialog); }
         if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
