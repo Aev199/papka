@@ -69,7 +69,7 @@ impl Explorer {
         self.scroll_handles.clear();self.folder_views.clear();self.column_resize=None;self.dock_hover=None;
         self.marquee=None;self.anchor=None;self.address_editing=None;self.select_first_when_loaded=false;
         self.selected=None;self.marked.clear();self.confirm_recycle=None;self.selected_history_event=None;
-        self.context_menu=None;self.clear_filter=true;self.close_search();self.close_document_preview(cx);self.inspector.path=None;
+        self.context_menu=None;self.cards.open=None;self.clear_filter=true;self.close_search();self.close_document_preview(cx);self.inspector.path=None;
     }
     /// Opens project `name` in the active pane; the other panes stay. A
     /// project already open in some pane is focused there instead.

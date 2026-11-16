@@ -220,8 +220,8 @@ struct Explorer {
     /// The running copy or move, the one waiting for an answer, and those queued behind.
     transfers: transfers::Transfers,
     context_menu: Option<ContextMenu>,
-    /// The card of a project, while it is open.
-    project_card: Option<project_card::ProjectCard>,
+    /// The project card shown in a pane in place of its folders.
+    cards: project_card::ProjectCards,
     /// The window's handle, for menus and dialogs Windows itself shows.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Option<isize>,
@@ -513,7 +513,7 @@ impl Explorer {
             zone: DropZone::default(),
             transfers: Default::default(),
             context_menu: None,
-            project_card: None,
+            cards: project_card::ProjectCards::new(window, cx),
             hwnd: None,
             right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
@@ -765,6 +765,7 @@ impl Explorer {
     }
 
     fn open_in_new_tab(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.leave_project_card(self.browser.active, cx);
         if let Err(error) = self.browser.new_tab(self.browser.active, path) {
             self.status = format!("Не удалось открыть вкладку: {error}");
         }

@@ -250,7 +250,7 @@ impl Explorer {
                 .flex_none().max_w(px(180.)).h(px(24.)).ml_1().pl_2().pr_0p5().flex().items_center().gap_1p5()
                 .rounded(px(4.)).bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT)).cursor_pointer()
                 .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(format!("Проект «{name}»: щелчок — карточка проекта")).build(window,cx)})
-                .on_click(cx.listener(move |this,_,_,cx|this.open_project_card(group,cx)))
+                .on_click(cx.listener(move |this,_,_,cx|this.toggle_project_card(group,cx)))
                 .child(small_icon("fm/layers.svg",ACCENT))
                 .child(div().min_w_0().truncate().child(name))
                 .child(div().id(SharedString::from(format!("project-close-{}",group.0))).flex_none().size(px(20.)).rounded_sm()
@@ -277,8 +277,10 @@ impl Explorer {
 
     fn group_view(&mut self, group: GroupId, cx: &mut Context<Self>) -> AnyElement {
         let tabs=self.tab_strip(group,cx);
-        let navigation=self.nav_row(group,cx).into_any_element();
-        let body=self.pane(group,cx);
+        // The project card takes the pane's place: no address row, no list.
+        let card=self.cards.shown_in(group);
+        let navigation=if card {div().into_any_element()} else {self.nav_row(group,cx).into_any_element()};
+        let body=if card {self.project_card_view(cx)} else {self.pane(group,cx)};
         div().id(SharedString::from(format!("group-{}",group.0))).size_full().min_w_0().min_h_0()
             .flex().flex_col().overflow_hidden().border_1()
             .border_color(rgb(if group==self.browser.active && self.browser.leaves().len()>1 {ACTIVE_PANE} else {BORDER}))
@@ -3151,7 +3153,6 @@ impl Render for Explorer {
         if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
         if self.about_open { root=root.child(self.about_panel(cx)); }
         if let Some(panel)=self.transfer_panel(cx) { root=root.child(panel); }
-        if let Some(card)=self.project_card_view(window,cx) { root=root.child(card); }
         if let Some(dialog)=self.update_dialog(cx) { root=root.child(dialog); }
         if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
