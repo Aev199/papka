@@ -15,6 +15,7 @@ pub mod search;
 pub mod find;
 pub mod file_icon;
 pub mod shell_verb;
+pub mod shell_items;
 pub mod update;
 
 pub mod workspace;

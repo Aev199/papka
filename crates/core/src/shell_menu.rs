@@ -15,10 +15,14 @@ use windows::Win32::UI::Shell::{
     CMINVOKECOMMANDINFOEX, GCS_VERBW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos, RegisterClassW,
-    SetForegroundWindow, TrackPopupMenuEx, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_DRAWITEM,
-    WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WNDCLASSW, WS_POPUP, WINDOW_EX_STYLE,
+    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos, GetMenuItemCount,
+    GetMenuItemInfoW, RegisterClassW, SetForegroundWindow, TrackPopupMenuEx, HMENU, MENUITEMINFOW, MFS_CHECKED,
+    MFS_DISABLED, MFT_SEPARATOR, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, SW_SHOWNORMAL,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WNDCLASSW, WS_POPUP,
+    WINDOW_EX_STYLE,
 };
+
+use crate::shell_items::{self, Item};
 
 const CMIC_MASK_UNICODE: u32 = 0x4000;
 const FIRST_COMMAND: u32 = 1;
@@ -54,19 +58,27 @@ unsafe extern "system" fn helper_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
 /// Must run on the window's thread outside any event handler: the menu has
 /// its own message loop. Returns whether a command was chosen.
 pub fn show(owner: isize, paths: &[PathBuf], extended: bool) -> io::Result<bool> {
-    let error = |e: windows::core::Error| io::Error::other(e.message());
-    struct Pidls(Vec<*mut ITEMIDLIST>);
-    impl Drop for Pidls {
-        fn drop(&mut self) {
-            for pidl in &self.0 {
-                unsafe { ILFree(Some(*pidl)) };
-            }
-        }
-    }
     if paths.is_empty() {
         return Ok(false);
     }
     let owner = HWND(owner as *mut _);
+    let (menu, _pidls) = menu_of(owner, paths)?;
+    run(owner, menu, extended, paths[0].parent(), false)
+}
+
+struct Pidls(Vec<*mut ITEMIDLIST>);
+impl Drop for Pidls {
+    fn drop(&mut self) {
+        for pidl in &self.0 {
+            unsafe { ILFree(Some(*pidl)) };
+        }
+    }
+}
+
+/// The context menu object of `paths` (all in one folder). The item lists
+/// are returned with it and must outlive its use.
+fn menu_of(owner: HWND, paths: &[PathBuf]) -> io::Result<(IContextMenu, Pidls)> {
+    let error = |e: windows::core::Error| io::Error::other(e.message());
     let mut absolute = Pidls(Vec::new());
     for path in paths {
         use std::os::windows::ffi::OsStrExt;
@@ -80,7 +92,155 @@ pub fn show(owner: isize, paths: &[PathBuf], extended: bool) -> io::Result<bool>
     let folder: IShellFolder = unsafe { SHBindToParent(absolute.0[0], None) }.map_err(error)?;
     let children: Vec<*const ITEMIDLIST> = absolute.0.iter().map(|pidl| unsafe { ILFindLastID(*pidl) } as *const _).collect();
     let menu: IContextMenu = unsafe { folder.GetUIObjectOf(owner, &children, None) }.map_err(error)?;
-    run(owner, menu, extended, paths[0].parent(), false)
+    Ok((menu, absolute))
+}
+
+/// An Explorer menu read for Papka's own menu and kept until a command of
+/// it is chosen or the next one is read. It lives on the window's thread.
+struct Session {
+    token: u64,
+    menu: IContextMenu,
+    popup: HMENU,
+    owner: HWND,
+    directory: Option<PathBuf>,
+    _pidls: Pidls,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        unsafe { let _ = DestroyMenu(self.popup); }
+    }
+}
+
+thread_local! {
+    static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
+    static NEXT_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Lets the handler fill a submenu ("Send to", "Open with") as it does
+/// when the submenu opens on screen.
+fn fill_submenu(menu: &IContextMenu, submenu: HMENU, index: u32) {
+    let (wparam, lparam) = (WPARAM(submenu.0 as usize), LPARAM(index as isize));
+    if let Ok(menu3) = menu.cast::<IContextMenu3>() {
+        let mut result = LRESULT(0);
+        let _ = unsafe { menu3.HandleMenuMsg2(WM_INITMENUPOPUP, wparam, lparam, Some(&mut result)) };
+    } else if let Ok(menu2) = menu.cast::<IContextMenu2>() {
+        let _ = unsafe { menu2.HandleMenuMsg(WM_INITMENUPOPUP, wparam, lparam) };
+    }
+}
+
+/// The lines of `popup` as data; submenus down to `depth` more levels.
+fn read_items(menu: &IContextMenu, popup: HMENU, depth: u8) -> Vec<Item> {
+    let count = unsafe { GetMenuItemCount(Some(popup)) };
+    let mut items = Vec::new();
+    // A broken handler must not make the menu endless.
+    for index in 0..count.clamp(0, 200) as u32 {
+        let mut text = [0u16; 512];
+        let mut info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_STRING,
+            dwTypeData: windows::core::PWSTR(text.as_mut_ptr()),
+            cch: text.len() as u32 - 1,
+            ..Default::default()
+        };
+        if unsafe { GetMenuItemInfoW(popup, index, true, &mut info) }.is_err() { continue; }
+        if info.fType.contains(MFT_SEPARATOR) {
+            items.push(Item::separator());
+            continue;
+        }
+        let length = (info.cch as usize).min(text.len() - 1);
+        let label = shell_items::clean_label(&String::from_utf16_lossy(&text[..length]));
+        let mut children = Vec::new();
+        if !info.hSubMenu.is_invalid() {
+            if depth == 0 { continue; }
+            fill_submenu(menu, info.hSubMenu, index);
+            children = read_items(menu, info.hSubMenu, depth - 1);
+        }
+        let command = (children.is_empty() && (FIRST_COMMAND..=LAST_COMMAND).contains(&info.wID))
+            .then(|| info.wID - FIRST_COMMAND);
+        if let Some(offset) = command {
+            if verb(menu, offset as usize).is_some_and(|verb| shell_items::is_own_verb(&verb)) { continue; }
+        }
+        items.push(Item {
+            label,
+            command,
+            enabled: !info.fState.contains(MFS_DISABLED),
+            checked: info.fState.contains(MFS_CHECKED),
+            separator: false,
+            children,
+        });
+    }
+    items
+}
+
+/// Reads the Explorer menu of `paths` (all in one folder) for Papka's own
+/// menu. Returns a token for `invoke` and the commands; those Papka has
+/// itself (open, cut, copy, delete, rename) are left out. The menu object
+/// is kept on this thread until the next `load` or `release`.
+/// Must run on the window's thread.
+pub fn load(owner: isize, paths: &[PathBuf], extended: bool) -> io::Result<(u64, Vec<Item>)> {
+    release();
+    if paths.is_empty() { return Ok((0, Vec::new())); }
+    let error = |e: windows::core::Error| io::Error::other(e.message());
+    let owner = HWND(owner as *mut _);
+    let (menu, pidls) = menu_of(owner, paths)?;
+    let popup = unsafe { CreatePopupMenu() }.map_err(error)?;
+    let token = NEXT_TOKEN.with(|next| { let token = next.get(); next.set(token.wrapping_add(1).max(1)); token });
+    // From here the session owns the menu handle, also on an early return.
+    let session = Session { token, menu, popup, owner, directory: paths[0].parent().map(PathBuf::from), _pidls: pidls };
+    let flags = CMF_NORMAL | CMF_EXPLORE | if extended { CMF_EXTENDEDVERBS } else { 0 };
+    let filled = unsafe { session.menu.QueryContextMenu(popup, 0, FIRST_COMMAND, LAST_COMMAND, flags) };
+    if filled.is_err() {
+        return Err(io::Error::other(windows::core::Error::from_hresult(filled).message()));
+    }
+    let items = shell_items::tidy(read_items(&session.menu, popup, 2));
+    SESSION.with(|slot| *slot.borrow_mut() = Some(session));
+    Ok((token, items))
+}
+
+/// Runs a command of the menu read by `load`. Must run on the window's
+/// thread outside any event handler: a command may open a dialog with its
+/// own message loop.
+pub fn invoke(token: u64, command: u32) -> io::Result<()> {
+    // Taken out for the call: a dialog's message loop may get here again.
+    let Some(session) = SESSION.with(|slot| slot.borrow_mut().take()).filter(|session| session.token == token) else {
+        return Err(io::Error::other("меню устарело — откройте его заново"));
+    };
+    let mut point = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut point) };
+    invoke_offset(&session.menu, session.owner, command as usize, session.directory.as_deref(), point).map(|_| ())
+}
+
+/// Forgets the menu read by `load`.
+pub fn release() {
+    SESSION.with(|slot| slot.borrow_mut().take());
+}
+
+fn invoke_offset(menu: &IContextMenu, owner: HWND, offset: usize, directory: Option<&std::path::Path>, point: POINT) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    let error = |e: windows::core::Error| io::Error::other(e.message());
+    let directory = directory.map(crate::path_utils::normalize_extended_path);
+    let directory_wide: Option<Vec<u16>> = directory.as_ref()
+        .map(|path| path.as_os_str().encode_wide().chain(Some(0)).collect());
+    // The ANSI copy only when it is exact; handlers that honour Unicode read the wide one.
+    let directory_ansi: Option<Vec<u8>> = directory.as_ref()
+        .and_then(|path| path.to_str()).filter(|text| text.is_ascii())
+        .map(|text| text.bytes().chain(Some(0)).collect());
+    let info = CMINVOKECOMMANDINFOEX {
+        cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+        fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
+        hwnd: owner,
+        // A command offset in place of a verb name, as MAKEINTRESOURCE does.
+        lpVerb: PCSTR(offset as *const u8),
+        lpVerbW: PCWSTR(offset as *const u16),
+        lpDirectory: directory_ansi.as_ref().map_or(PCSTR::null(), |text| PCSTR(text.as_ptr())),
+        lpDirectoryW: directory_wide.as_ref().map_or(PCWSTR::null(), |text| PCWSTR(text.as_ptr())),
+        nShow: SW_SHOWNORMAL.0,
+        ptInvoke: point,
+        ..Default::default()
+    };
+    unsafe { menu.InvokeCommand(&info as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO) }
+        .map(|_| true).map_err(error)
 }
 
 /// The menu Explorer shows on the empty space of `folder`: "New", "Paste",
@@ -109,15 +269,8 @@ pub fn show_background(owner: isize, folder: &std::path::Path, extended: bool) -
 /// "Open PowerShell here" or "Open with Code" take their `%V` from it, and
 /// without it Windows reports that no application is associated.
 fn run(owner: HWND, menu: IContextMenu, extended: bool, directory: Option<&std::path::Path>, background: bool) -> io::Result<bool> {
-    use std::os::windows::ffi::OsStrExt;
     let error = |e: windows::core::Error| io::Error::other(e.message());
     let directory = directory.map(crate::path_utils::normalize_extended_path);
-    let directory_wide: Option<Vec<u16>> = directory.as_ref()
-        .map(|path| path.as_os_str().encode_wide().chain(Some(0)).collect());
-    // The ANSI copy only when it is exact; handlers that honour Unicode read the wide one.
-    let directory_ansi: Option<Vec<u8>> = directory.as_ref()
-        .and_then(|path| path.to_str()).filter(|text| text.is_ascii())
-        .map(|text| text.bytes().chain(Some(0)).collect());
 
     let popup = unsafe { CreatePopupMenu() }.map_err(error)?;
     let flags = CMF_NORMAL | CMF_EXPLORE | if extended { CMF_EXTENDEDVERBS } else { 0 };
@@ -152,25 +305,7 @@ fn run(owner: HWND, menu: IContextMenu, extended: bool, directory: Option<&std::
             verb(&menu, offset).and_then(|verb| background_command(&verb))
                 .is_some_and(|template| launch(&template, folder))
         });
-        if ran_here {
-            Ok(true)
-        } else {
-        let info = CMINVOKECOMMANDINFOEX {
-            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-            fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
-            hwnd: owner,
-            // A command offset in place of a verb name, as MAKEINTRESOURCE does.
-            lpVerb: PCSTR(offset as *const u8),
-            lpVerbW: PCWSTR(offset as *const u16),
-            lpDirectory: directory_ansi.as_ref().map_or(PCSTR::null(), |text| PCSTR(text.as_ptr())),
-            lpDirectoryW: directory_wide.as_ref().map_or(PCWSTR::null(), |text| PCWSTR(text.as_ptr())),
-            nShow: SW_SHOWNORMAL.0,
-            ptInvoke: point,
-            ..Default::default()
-        };
-        unsafe { menu.InvokeCommand(&info as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO) }
-            .map(|_| true).map_err(error)
-        }
+        if ran_here { Ok(true) } else { invoke_offset(&menu, owner, offset, directory.as_deref(), point) }
     } else {
         Ok(false)
     };
@@ -227,4 +362,32 @@ fn launch(template: &str, folder: &std::path::Path) -> bool {
     let Some((program, arguments)) = crate::shell_verb::expand(template, &folder.to_string_lossy()) else { return false };
     std::process::Command::new(program).raw_arg(arguments).current_dir(&folder)
         .creation_flags(CREATE_NEW_CONSOLE).spawn().is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+    /// Reads the real menu of a file: nothing is chosen, nothing changes.
+    #[test]
+    fn the_menu_of_a_file_reads_as_data_and_is_tied_to_its_token() {
+        unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Estimate KR1.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let (token, items) = load(0, &[file.clone()], false).unwrap();
+        assert!(token != 0);
+        for item in &items {
+            assert!(item.separator || !item.label.is_empty(), "{item:?}");
+            assert!(!item.label.contains('&') || item.label.contains(" & "), "{item:?}");
+        }
+        // Another menu read meanwhile makes the first token stale.
+        let (second, _) = load(0, &[file], false).unwrap();
+        assert!(second != token);
+        assert!(invoke(token, 0).is_err());
+        release();
+        assert!(invoke(second, 0).is_err(), "released");
+        assert_eq!(load(0, &[], false).unwrap().1, Vec::new());
+    }
 }

@@ -95,7 +95,7 @@ fn icon(path: &'static str, color: u32) -> gpui::Svg {
     svg().path(path).flex_none().size(px(16.)).text_color(rgb(color))
 }
 
-fn small_icon(path: &'static str, color: u32) -> gpui::Svg {
+pub(crate) fn small_icon(path: &'static str, color: u32) -> gpui::Svg {
     svg().path(path).flex_none().size(px(14.)).text_color(rgb(color))
 }
 
@@ -108,7 +108,7 @@ pub(crate) fn focus_mark() -> Div {
 }
 
 /// Square ghost button with an icon and a tooltip.
-fn icon_button(
+pub(crate) fn icon_button(
     id: impl Into<ElementId>,
     icon_path: &'static str,
     tooltip: &'static str,
@@ -149,7 +149,9 @@ pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
     div().id(id).flex_none().h(px(28.)).px_3().rounded(px(4.)).flex().items_center()
         .justify_center().bg(rgb(bg)).border_1().border_color(rgb(frame)).text_color(rgb(fg)).cursor_pointer()
         .hover(move |style| style.bg(rgb(hover)))
-        .child(label.into())
+        // A label longer than its button ends in "…" instead of running
+        // out of both edges.
+        .child(div().min_w_0().truncate().child(label.into()))
 }
 
 #[derive(Clone, Copy)]
@@ -1950,8 +1952,11 @@ impl Explorer {
                     .child(icon_button("inspector-copy-path","fm/copy.svg","Копировать путь",false,true)
                         .on_click(cx.listener(move |this,_,_,cx|this.copy_path(&copy_target,cx)))));
                 if let Some(undo) = self.undo_stack.last() {
+                    let label = format!("Отменить: {}", undo.label);
+                    let tip = format!("{label} (Ctrl+Z)");
                     panel = panel.child(
-                        text_button("undo-last", format!("Отменить: {}", undo.label), ButtonKind::Ghost)
+                        text_button("undo-last", label, ButtonKind::Ghost).min_w_0()
+                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                             .on_click(cx.listener(|this, _, _, cx| this.undo_last(cx)))
                     );
                 }
@@ -2206,7 +2211,8 @@ impl Explorer {
                             .w(gpui::relative(fraction.clamp(0.0, 1.0) as f32))))
                     .child(div().w(px(32.)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.0).floor() as u32))));
             }
-            bar = bar.child(
+            // With the transfer panel open its own buttons do this.
+            if self.transfers.panel_hidden || self.transfers.live.is_none() { bar = bar.child(
                 div().id("pause-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(TEXT))
                     .hover(|style| style.bg(rgb(HOVER)))
                     .child(if paused { "Продолжить" } else { "Пауза" })
@@ -2216,8 +2222,8 @@ impl Explorer {
                     .hover(|style| style.bg(rgb(HOVER)))
                     .child("Отменить передачу")
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx)))
-            );
-        } else if let Some((items, _, _)) = &self.transfers.retry {
+            ); }
+        } else if let Some((items, _, _)) = self.transfers.retry.as_ref().filter(|_| !self.transfers.panel_visible()) {
             bar = bar.child(
                 div().id("retry-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
                     .hover(|style| style.bg(rgb(HOVER)))
@@ -2225,6 +2231,12 @@ impl Explorer {
                     .tooltip(|window, cx| Tooltip::new("Снова скопировать или перенести файлы, которые не прошли, например при обрыве сети").build(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.retry_failed(cx)))
             );
+        }
+        if self.transfers.panel_hidden && (self.transfers.live.is_some() || self.transfers.report.is_some()) {
+            bar = bar.child(div().id("transfer-unfold").px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
+                .hover(|style| style.bg(rgb(HOVER)))
+                .child("Окно переноса")
+                .on_click(cx.listener(|this, _, _, cx| { this.transfers.panel_hidden = false; cx.notify(); })));
         }
         if !self.zone.items().is_empty() {
             bar = bar.child(div().flex().items_center().gap_1()
@@ -2258,7 +2270,13 @@ impl Explorer {
 
     pub(crate) fn open_menu(&mut self, position: gpui::Point<gpui::Pixels>, target: MenuTarget, cx: &mut Context<Self>) {
         self.menu_serial = self.menu_serial.wrapping_add(1);
-        self.context_menu = Some(ContextMenu { position, target, serial: self.menu_serial });
+        let shell = match &target {
+            MenuTarget::Entry(path) => self.shell_actions_for(path),
+            _ => crate::shell_actions::ShellActions::None,
+        };
+        let load = matches!(shell, crate::shell_actions::ShellActions::Loading(_));
+        self.context_menu = Some(ContextMenu { position, target, serial: self.menu_serial, shell });
+        if load { self.load_shell_actions(self.menu_serial, cx); }
         cx.notify();
     }
 
@@ -2506,7 +2524,7 @@ impl Explorer {
                             this.stage_paths(&stage_target, cx);
                         })))
                     .child(Self::menu_item("m-explorer", "fm/command.svg",
-                        if count > 1 { format!("Меню Проводника ({count})") } else { "Меню Проводника".into() }, "Shift+ПКМ", false, true)
+                        if count > 1 { format!("Системное меню Проводника ({count})") } else { "Системное меню Проводника".into() }, "Shift+ПКМ", false, true)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let paths = if explorer_target.len() > 0 { explorer_target.clone() } else { Vec::new() };
                             this.explorer_menu(paths, true, window, cx);
@@ -2523,6 +2541,7 @@ impl Explorer {
                             this.context_menu = None;
                             this.recycle(cx);
                         })));
+                list = self.shell_section(list, &menu.shell, menu.serial, cx);
             }
             MenuTarget::Folder(folder) => {
                 let copy_target = folder.clone();
@@ -2880,6 +2899,8 @@ impl Explorer {
 
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(windows)]
+        if self.hwnd.is_none() { self.hwnd = crate::window_hwnd(window); }
         if self.interface_focus_pending {self.interface_focus_pending=false;window.focus(&self.focus_handle,cx);}
         self.validate_marquee(cx);
         if self.clear_filter {
@@ -3128,6 +3149,7 @@ impl Render for Explorer {
         if self.quick_look.is_some() { root=root.child(self.quick_look_view(cx)); }
         if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
         if self.about_open { root=root.child(self.about_panel(cx)); }
+        if let Some(panel)=self.transfer_panel(cx) { root=root.child(panel); }
         if let Some(dialog)=self.update_dialog(cx) { root=root.child(dialog); }
         if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }

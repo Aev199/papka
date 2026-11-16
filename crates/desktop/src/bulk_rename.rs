@@ -119,12 +119,15 @@ impl Explorer {
         self.transfers.copying = true;
         let control = Arc::new(CopyControl::default());
         self.transfers.control = Some(Arc::clone(&control));
-        self.start_transfer_progress("Переименование", cx);
+        let folder = self.browser.active().active().path.clone();
+        self.start_transfer_progress("Переименование", folder, cx);
         let task = cx.background_spawn(async move { queue.run_all_audited(&control, &audit) });
         cx.spawn(async move |weak, cx| {
             let results = task.await;
             let _ = weak.update(cx, |this, cx| {
-                this.transfers.busy = false; this.transfers.copying = false; this.transfers.control = None; this.start_queued(cx);
+                this.transfers.busy = false; this.transfers.copying = false; this.transfers.control = None;
+                this.transfers.live = None;
+                this.start_queued(cx);
                 for (plan, _) in &results {
                     this.refresh_parent_of(&plan.source, cx);
                 }
