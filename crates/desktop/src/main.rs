@@ -27,6 +27,8 @@ mod thumbs;
 mod appearance;
 mod directories;
 mod transfers;
+mod transfer_panel;
+mod shell_actions;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -178,6 +180,8 @@ struct ContextMenu {
     target: MenuTarget,
     /// Distinct id per opening, so the appear animation replays.
     serial: u64,
+    /// Explorer's own commands for the files, read after the menu opens.
+    shell: shell_actions::ShellActions,
 }
 
 /// Display order of one folder: the listing it was built from (by
@@ -215,6 +219,9 @@ struct Explorer {
     /// The running copy or move, the one waiting for an answer, and those queued behind.
     transfers: transfers::Transfers,
     context_menu: Option<ContextMenu>,
+    /// The window's handle, for menus and dialogs Windows itself shows.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    hwnd: Option<isize>,
     /// Pressed right button on files: a plain click opens their menu, a
     /// drag ends in the «Копировать сюда / Переместить сюда» menu.
     right_drag: Option<RightDrag>,
@@ -503,6 +510,7 @@ impl Explorer {
             zone: DropZone::default(),
             transfers: Default::default(),
             context_menu: None,
+            hwnd: None,
             right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
             focus_handle,
@@ -1122,9 +1130,10 @@ impl Explorer {
         }
     }
 
-    fn start_transfer_progress(&mut self, action: &'static str, cx: &mut Context<Self>) {
+    fn start_transfer_progress(&mut self, action: &'static str, target: PathBuf, cx: &mut Context<Self>) {
         let progress = self.transfers.control.as_ref().unwrap().clone();
         self.transfers.fraction = Some(0.0);
+        self.transfers.begin(action, target);
         cx.spawn(async move |weak, cx| {
             // Time spent copying, without pauses: the basis for "осталось".
             let mut active = Duration::ZERO;
@@ -1143,21 +1152,50 @@ impl Explorer {
                     let phase: String = if progress.is_paused() { "На паузе".into() } else { match progress.phase() {
                         TransferPhase::Verifying => "Проверка копии…".into(),
                         TransferPhase::Recycling => "Завершение переноса…".into(),
-                        TransferPhase::Copying => format!("{action}… {}", filemanager_core::format::format_size(progress.bytes_copied())),
+                        TransferPhase::Copying => String::new(),
                     } };
                     // An estimate only once there is something to go by.
                     let left = (fraction > 0.02 && active.as_secs() >= 3 && !progress.is_paused())
-                        .then(|| active.as_secs_f64() * (1.0 - fraction) / fraction)
-                        .map(|seconds| format!(" · осталось {}", remaining(seconds)))
-                        .unwrap_or_default();
-                    let path = detail.source.as_ref().map(|path| browser::display_name(path)).unwrap_or_default();
-                    this.status = format!("{phase} · {}/{}{left}{} · {path}", detail.processed, detail.total, this.transfers.queue_note());
+                        .then(|| remaining(active.as_secs_f64() * (1.0 - fraction) / fraction));
+                    // The line below stays short; the panel has the rest.
+                    this.status = format!("{}… {}/{}{}", if phase.is_empty() { action } else { phase.trim_end_matches('…') },
+                        detail.processed, detail.total, this.transfers.queue_note());
+                    if let Some(live) = &mut this.transfers.live {
+                        live.phase = phase;
+                        live.processed = detail.processed;
+                        live.total = detail.total;
+                        live.bytes = progress.bytes_copied();
+                        live.total_bytes = progress.total_bytes();
+                        live.left = left;
+                        live.current = detail.source.clone();
+                    }
                     cx.notify();
                     true
                 }).unwrap_or(false);
                 if !keep_going { break; }
             }
         }).detach();
+    }
+
+    /// A copy or move ended: one short line below, and the panel with
+    /// every error in full. A clean result leaves the screen by itself.
+    fn finish_transfer(&mut self, done: &'static str, ok: usize, not_done: usize, target: PathBuf,
+        failures: Vec<transfers::Failure>, cx: &mut Context<Self>) {
+        let cancelled = not_done.saturating_sub(failures.len());
+        let title = transfers::report_title(done, ok, failures.len(), cancelled);
+        self.status = if !failures.is_empty() {
+            format!("{title}. Ошибки — в окне переноса справа внизу.")
+        } else if ok > 0 {
+            format!("{title}. Ctrl+Z — отменить.")
+        } else {
+            format!("{title}.")
+        };
+        if let Some(id) = self.transfers.finish(title, target, failures) {
+            cx.spawn(async move |weak, cx| {
+                cx.background_executor().timer(Duration::from_secs(6)).await;
+                let _ = weak.update(cx, |this, cx| { this.transfers.dismiss(id); cx.notify(); });
+            }).detach();
+        }
     }
 
     fn run_copy(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, cx: &mut Context<Self>) {
@@ -1170,6 +1208,7 @@ impl Explorer {
         let control = Arc::new(CopyControl::default());
         self.transfers.control = Some(Arc::clone(&control));
         self.status = "Копирование…".into();
+        let target_shown = target.clone();
         let task = cx.background_spawn(async move {
             let results = if replace {
                 zone.transfer_to_audited_replace(Action::Copy, &target, &control, &audit)
@@ -1180,17 +1219,15 @@ impl Explorer {
             };
             let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
             let errors = results.len() - ok;
-            let first_error = results.iter().find_map(|(path, result)| {
-                result.as_ref().err().map(|error| format!("{}: {error}", path.display()))
-            });
+            let failures = transfer_failures(&results);
             let created: Vec<Receipt> = results.iter()
                 .filter_map(|(_, result)| result.as_ref().ok().cloned())
                 .collect();
-            (zone, target, ok, errors, first_error, created)
+            (zone, target, ok, errors, failures, created)
         });
-        self.start_transfer_progress("Копирование", cx);
+        self.start_transfer_progress("Копирование", target_shown, cx);
         cx.spawn(async move |weak, cx| {
-            let (zone, target, ok, errors, first_error, created) = task.await;
+            let (zone, target, ok, errors, failures, created) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 // Failed Drop Zone items stay staged; staging done meanwhile is kept.
                 for pending in zone.items().iter().filter(|_| restore_failed) {
@@ -1201,11 +1238,8 @@ impl Explorer {
                 this.transfers.copying = false;
                 this.transfers.control = None;
                 this.transfers.retry = (errors > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), true));
-                this.load_directory(target, true, cx);
-                this.status = match first_error {
-                    Some(details) => format!("Скопировано: {ok}, ошибок: {errors}. Первая ошибка: {details}"),
-                    None => format!("Скопировано: {ok}. Ctrl+Z — отменить."),
-                };
+                this.load_directory(target.clone(), true, cx);
+                this.finish_transfer("Скопировано", ok, errors, target, failures, cx);
                 if !created.is_empty() {
                     let label = format!("копирование ({})", created.len());
                     this.push_undo(created, label);
@@ -1228,7 +1262,7 @@ impl Explorer {
         self.transfers.copying = true;
         let control = Arc::new(CopyControl::default());
         self.transfers.control = Some(Arc::clone(&control));
-        self.start_transfer_progress("Перемещение", cx);
+        self.start_transfer_progress("Перемещение", target.clone(), cx);
         self.status = "Перемещение…".into();
         let task = cx.background_spawn(async move {
             let results = if replace {
@@ -1240,9 +1274,7 @@ impl Explorer {
             };
             let moved = results.iter().filter(|(_, result)| result.is_ok()).count();
             let failed = results.len() - moved;
-            let first_error = results.iter().find_map(|(path, result)| {
-                result.as_ref().err().map(|error| format!("{}: {error}", path.display()))
-            });
+            let failures = transfer_failures(&results);
             let sources = results.iter()
                 .filter(|(_, result)| result.is_ok())
                 .map(|(path, _)| path.clone())
@@ -1251,10 +1283,10 @@ impl Explorer {
             let receipts: Vec<Receipt> = results.iter()
                 .filter_map(|(_, result)| result.as_ref().ok().cloned())
                 .collect();
-            (zone, target, moved, failed, first_error, sources, receipts)
+            (zone, target, moved, failed, failures, sources, receipts)
         });
         cx.spawn(async move |weak, cx| {
-            let (zone, target, moved, failed, first_error, sources, receipts) = task.await;
+            let (zone, target, moved, failed, failures, sources, receipts) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 for path in zone.items().iter().filter(|_| restore_failed) {
                     if let Err(error) = this.zone.add(path) {
@@ -1265,14 +1297,11 @@ impl Explorer {
                 this.transfers.copying = false;
                 this.transfers.control = None;
                 this.transfers.retry = (failed > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), false));
-                this.load_directory(target, true, cx);
+                this.load_directory(target.clone(), true, cx);
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
                 }
-                this.status = match first_error {
-                    Some(details) => format!("Перемещено: {moved}, ошибок: {failed}. {details}"),
-                    None => format!("Перемещено: {moved}. Ctrl+Z — отменить."),
-                };
+                this.finish_transfer("Перемещено", moved, failed, target, failures, cx);
                 if moved > 0 {
                     this.selected = normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));
                     let label = if moved == 1 {
@@ -1998,6 +2027,18 @@ fn main() {
 }
 
 /// "осталось" for a transfer: rounded the way people say it.
+/// Every item of a transfer that failed, with its whole error text. Items
+/// the user cancelled are not errors: they are counted, not listed.
+fn transfer_failures(results: &[(PathBuf, std::io::Result<Receipt>)]) -> Vec<transfers::Failure> {
+    results.iter().filter_map(|(path, result)| {
+        let error = result.as_ref().err()?;
+        (error.kind() != std::io::ErrorKind::Interrupted && !error.to_string().contains("cancelled")).then(|| transfers::Failure {
+            path: filemanager_core::path_utils::normalize_extended_path(path),
+            error: messages::localize(&error.to_string()),
+        })
+    }).collect()
+}
+
 fn remaining(seconds: f64) -> String {
     let seconds = seconds.round() as u64;
     match seconds {

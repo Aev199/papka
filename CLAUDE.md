@@ -55,6 +55,11 @@ rustc --edition=2024 --test crates/desktop/src/palette.rs -o /tmp/pt && /tmp/pt
   (линковка тестов desktop), `mingw-w64` + `rustup target add
   x86_64-pc-windows-gnu`, для окна — `openbox xcompmgr xdotool x11-utils
   mesa-vulkan-drivers` (без программного Vulkan окно не создаётся).
+- Раздел «Проводник» контекстного меню на Linux пуст; образец для
+  снимка включает переменная `PAPKA_SAMPLE_SHELL_MENU=1` перед `run.sh`.
+  Чтение настоящего меню проверяет тест `shell_menu` под Wine: `wine64`,
+  `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine cargo test -p
+  filemanager-core --lib --target x86_64-pc-windows-gnu shell_menu`.
 - Windows-только вещи (перетаскивание, Shell, предпросмотр Office/PDF,
   обновления, диски) здесь не проверяются — так и говорить пользователю.
 

@@ -19,8 +19,63 @@ pub(crate) struct Transfer {
     pub(crate) restore_failed: bool,
 }
 
+/// The running copy or move as its panel shows it.
+pub(crate) struct Live {
+    /// «Копирование» or «Перемещение».
+    pub(crate) action: &'static str,
+    pub(crate) target: PathBuf,
+    /// «Проверка копии…» and the like; empty while plainly copying.
+    pub(crate) phase: String,
+    pub(crate) processed: usize,
+    pub(crate) total: usize,
+    pub(crate) bytes: u64,
+    pub(crate) total_bytes: u64,
+    /// «2 мин», once there is something to estimate from.
+    pub(crate) left: Option<String>,
+    pub(crate) current: Option<PathBuf>,
+}
+
+/// One item a transfer could not finish, with the whole error text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Failure {
+    pub(crate) path: PathBuf,
+    pub(crate) error: String,
+}
+
+/// How a copy or move ended; stays on screen while it lists errors.
+pub(crate) struct Report {
+    pub(crate) id: u64,
+    pub(crate) title: String,
+    pub(crate) target: PathBuf,
+    pub(crate) failures: Vec<Failure>,
+}
+
+/// «Скопировано: 5, ошибок: 2, отменено: 3» — only the parts that happened.
+pub(crate) fn report_title(done: &str, ok: usize, failed: usize, cancelled: usize) -> String {
+    let mut title = format!("{done}: {ok}");
+    if failed > 0 { title.push_str(&format!(", ошибок: {failed}")); }
+    if cancelled > 0 { title.push_str(&format!(", отменено: {cancelled}")); }
+    title
+}
+
+/// The errors as plain text, to paste into a message.
+pub(crate) fn failures_text(title: &str, failures: &[Failure]) -> String {
+    let mut text = String::from(title);
+    for failure in failures {
+        text.push_str(&format!("\n{}: {}", failure.path.display(), failure.error));
+    }
+    text
+}
+
 #[derive(Default)]
 pub(crate) struct Transfers {
+    /// What the transfer panel shows of the running copy or move.
+    pub(crate) live: Option<Live>,
+    /// The result of the last one, until dismissed.
+    pub(crate) report: Option<Report>,
+    /// The panel was folded away by the user; an error unfolds it.
+    pub(crate) panel_hidden: bool,
+    reports: u64,
     /// A copy or move is running (its progress is shown).
     pub(crate) copying: bool,
     /// Share of the running copy or move done, 0..=1, for the progress bar.
@@ -52,6 +107,48 @@ impl Transfers {
     /// Empties the queue («Отмена»), handing back what was in it.
     pub(crate) fn drain(&mut self) -> Vec<Transfer> {
         self.queue.drain(..).collect()
+    }
+
+    /// A transfer starts: its panel appears, and a result without errors
+    /// makes way (a list of errors stays until it is read).
+    pub(crate) fn begin(&mut self, action: &'static str, target: PathBuf) {
+        if self.report.as_ref().is_some_and(|report| report.failures.is_empty()) { self.report = None; }
+        self.panel_hidden = false;
+        self.live = Some(Live { action, target, phase: String::new(), processed: 0, total: 0, bytes: 0, total_bytes: 0,
+            left: None, current: None });
+    }
+
+    /// A transfer ended. Returns the report's id when it may fade by
+    /// itself: nothing failed, so there is nothing to read.
+    pub(crate) fn finish(&mut self, title: String, target: PathBuf, failures: Vec<Failure>) -> Option<u64> {
+        self.live = None;
+        self.reports = self.reports.wrapping_add(1);
+        // Errors nobody closed yet are not replaced by the next result
+        // (a queued transfer may end seconds later): they pile up.
+        let report = match self.report.take().filter(|unread| !unread.failures.is_empty()) {
+            Some(mut unread) => {
+                if !failures.is_empty() {
+                    unread.failures.extend(failures);
+                    unread.title = format!("Ошибок в переносах: {}", unread.failures.len());
+                }
+                Report { id: self.reports, ..unread }
+            }
+            None => Report { id: self.reports, title, target, failures },
+        };
+        let quiet = report.failures.is_empty();
+        // Errors are shown even if the panel was folded away.
+        if !quiet { self.panel_hidden = false; }
+        self.report = Some(report);
+        quiet.then_some(self.reports)
+    }
+
+    /// Removes report `id` if it is still the one shown.
+    pub(crate) fn dismiss(&mut self, id: u64) {
+        if self.report.as_ref().is_some_and(|report| report.id == id) { self.report = None; }
+    }
+
+    pub(crate) fn panel_visible(&self) -> bool {
+        !self.panel_hidden && (self.live.is_some() || self.report.is_some())
     }
 
     /// " · в очереди: 2" for the status line, or nothing.
@@ -97,6 +194,50 @@ mod tests {
         assert!(transfers.next().is_none());
         transfers.pending = None;
         assert!(transfers.next().is_some());
+    }
+
+    #[test]
+    fn a_clean_result_fades_and_errors_stay() {
+        let mut transfers = Transfers::default();
+        transfers.begin("Копирование", "t".into());
+        assert!(transfers.panel_visible());
+        transfers.panel_hidden = true;
+        assert!(!transfers.panel_visible());
+
+        let id = transfers.finish(report_title("Скопировано", 3, 0, 0), "t".into(), Vec::new()).unwrap();
+        assert!(transfers.live.is_none());
+        transfers.dismiss(id + 1);
+        assert!(transfers.report.is_some(), "another report's timer does not close this one");
+        transfers.dismiss(id);
+        assert!(transfers.report.is_none());
+
+        let failure = Failure { path: "a/x.dwg".into(), error: "Отказано в доступе".into() };
+        assert_eq!(transfers.finish(report_title("Скопировано", 3, 1, 0), "t".into(), vec![failure.clone()]), None);
+        assert!(transfers.panel_visible(), "errors unfold a hidden panel");
+        // The next transfer starts: the unread errors stay beside it.
+        transfers.begin("Перемещение", "u".into());
+        assert_eq!(transfers.report.as_ref().unwrap().failures, vec![failure.clone()]);
+        // Its clean result does not wipe them, and more errors join them.
+        assert_eq!(transfers.finish(report_title("Перемещено", 1, 0, 0), "u".into(), Vec::new()), None);
+        assert_eq!(transfers.report.as_ref().unwrap().title, "Скопировано: 3, ошибок: 1");
+        let second = Failure { path: "b/y.dwg".into(), error: "Диск переполнен".into() };
+        transfers.finish(report_title("Перемещено", 0, 1, 0), "u".into(), vec![second]);
+        let report = transfers.report.as_ref().unwrap();
+        assert_eq!((report.title.as_str(), report.failures.len()), ("Ошибок в переносах: 2", 2));
+        let id = report.id;
+        transfers.dismiss(id);
+        // A clean result is replaced by the next start.
+        transfers.finish(report_title("Перемещено", 1, 0, 0), "u".into(), Vec::new());
+        transfers.begin("Копирование", "v".into());
+        assert!(transfers.report.is_none());
+    }
+
+    #[test]
+    fn titles_and_error_text_name_only_what_happened() {
+        assert_eq!(report_title("Скопировано", 5, 0, 0), "Скопировано: 5");
+        assert_eq!(report_title("Перемещено", 5, 2, 3), "Перемещено: 5, ошибок: 2, отменено: 3");
+        let failures = [Failure { path: "a/x.dwg".into(), error: "Отказано в доступе".into() }];
+        assert_eq!(failures_text("Скопировано: 0, ошибок: 1", &failures), "Скопировано: 0, ошибок: 1\na/x.dwg: Отказано в доступе");
     }
 
     #[test]
