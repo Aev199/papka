@@ -16,6 +16,7 @@ mod quick_look;
 mod compare;
 mod spring;
 mod edge_scroll;
+mod smooth_scroll;
 mod search_panel;
 mod updates;
 mod icons;
@@ -239,6 +240,7 @@ struct Explorer {
     spring: Option<spring::Spring>,
     spring_generation: u64,
     edge_scroll: edge_scroll::EdgeScroll,
+    smooth: smooth_scroll::SmoothScroll,
     /// A system drag to another program is running.
     #[cfg_attr(not(windows), allow(dead_code))]
     dragging_out: bool,
@@ -521,7 +523,7 @@ impl Explorer {
             cards: project_card::ProjectCards::new(window, cx),
             registry: inbox::Registry { due: true, ..Default::default() },
             hwnd: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, edge_scroll: Default::default(), dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, edge_scroll: Default::default(), smooth: Default::default(), dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),

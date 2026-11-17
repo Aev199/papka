@@ -1344,13 +1344,14 @@ impl Explorer {
             // A folder's contents come in with a short fade, once per opening:
             // refreshes keep the same key and stay still.
             let appear_id = SharedString::from(format!("list-appear-{}-{}", side.0, folder.display()));
+            let wheel = Self::wheel_layer(format!("list-{}-{}", side.0, folder.display()).into(), edge_handle.clone(), cx);
             let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {
                 // Tiles: each list item is a row of them.
                 let per_row = crate::thumbs::columns(self.pane_width_for(side));
                 self.thumb_columns.insert(side, per_row);
                 let rows = count.div_ceil(per_row);
-                return column.child(div().flex_1().min_h_0().on_mouse_move(edge_listener).child(
+                return column.child(div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(
                     uniform_list(list_id, rows, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
                         range.map(|row| {
                             let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
@@ -1363,10 +1364,10 @@ impl Explorer {
                     .track_scroll(&handle)
                     .h_full()
                     .pt_2().pl_2().pr(px(12.))
-                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear)).into_any_element();
+                ).child(wheel).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear)).into_any_element();
             }
             column = column.child(
-                div().flex_1().min_h_0().on_mouse_move(edge_listener).child(
+                div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(
                     uniform_list(list_id, count, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
                         range.map(|position| {
                             let entry = &listing.entries[indices[position]];
@@ -1378,7 +1379,7 @@ impl Explorer {
                     .h_full()
                     .pl_1().pr(px(12.))
                     .on_mouse_down(MouseButton::Left,cx.listener({ let folder=background_marquee_folder.clone(); move |this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx) }))
-                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear)
+                ).child(wheel).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear)
             );
             if self.unwatched_folders.contains(&background_marquee_folder) {
                 column = column.child(
@@ -1765,6 +1766,7 @@ impl Explorer {
             .child(div().w(px(128.)).flex_none().child("Изменён"))
             .child(div().w(px(20.)).flex_none());
         let count = self.search.hits.len();
+        let search_wheel = Self::wheel_layer("search-hits".into(), self.search.scroll.0.borrow().base_handle.clone(), cx);
         let list = uniform_list("search-hits", count, cx.processor(move |this, range: Range<usize>, _, cx| {
             let root = this.search.root.clone().unwrap_or_default();
             range.map(|index| {
@@ -1820,7 +1822,7 @@ impl Explorer {
         })).track_scroll(&self.search.scroll).flex_1().min_h_0().px_1();
         div().id("search-results").size_full().min_h_0().flex().flex_col().bg(rgb(SURFACE))
             .child(header)
-            .when(count > 0, |panel| panel.child(columns).child(list))
+            .when(count > 0, |panel| panel.child(columns).child(div().flex_1().min_h_0().flex().flex_col().relative().child(list).child(search_wheel)))
             .when(count == 0 && !busy, |panel| panel.child(
                 div().flex_1().flex().flex_col().items_center().justify_center().gap_2().px_6()
                     .text_color(rgb(TEXT_DIM)).text_size(px(12.))
