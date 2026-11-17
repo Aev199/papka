@@ -858,10 +858,16 @@ impl DropZone {
             .collect()
     }
 
-    /// Occupied names in `target` with sizes and dates of both sides.
-    pub fn conflict_details(&self, target: &Path) -> Vec<Conflict> {
-        self.conflicts_in(target).iter()
-            .map(|source| Conflict::read(source, &target.join(source.file_name().unwrap_or_default())))
+    /// Occupied names in `target`; the first `detailed` with sizes and
+    /// dates of both sides (the dialog shows a few; on a network share each
+    /// costs two requests, made on the window's thread).
+    pub fn conflict_details(&self, target: &Path, detailed: usize) -> Vec<Conflict> {
+        self.conflicts_in(target).iter().enumerate()
+            .map(|(index, source)| if index < detailed {
+                Conflict::read(source, &target.join(source.file_name().unwrap_or_default()))
+            } else {
+                Conflict { source: source.clone(), source_size: None, existing_size: None, source_modified: None, existing_modified: None }
+            })
             .collect()
     }
 
@@ -973,7 +979,7 @@ mod tests {
         fs::File::options().write(true).open(target.join("new.txt")).unwrap().set_modified(old).unwrap();
         let mut zone = DropZone::default();
         zone.add(&source).unwrap();
-        let details = zone.conflict_details(&target);
+        let details = zone.conflict_details(&target, 4);
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].source_size, Some(10));
         assert_eq!(details[0].existing_size, Some(3));

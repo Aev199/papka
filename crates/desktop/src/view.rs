@@ -2995,7 +2995,8 @@ impl Render for Explorer {
         if self.interface_focus_pending {self.interface_focus_pending=false;window.focus(&self.focus_handle,cx);}
         self.validate_marquee(cx);
         self.motion.progress(self.transfers.fraction);
-        if self.motion.wants_frame(self.transfers.fraction) || self.spring_filling() { window.request_animation_frame(); }
+        let edge_moving = self.edge_scroll_frame(cx);
+        if self.motion.wants_frame(self.transfers.fraction) || self.spring_filling() || edge_moving { window.request_animation_frame(); }
         if self.clear_filter {
             self.clear_filter = false;
             self.filter.clear();

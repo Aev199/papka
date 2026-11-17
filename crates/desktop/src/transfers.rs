@@ -120,6 +120,9 @@ pub(crate) struct Transfers {
     /// Items a transfer could not finish (e.g. the network dropped): their
     /// target and whether it was a copy, for «Повторить сбойные».
     pub(crate) retry: Option<(Vec<PathBuf>, PathBuf, bool)>,
+    /// What the starting transfer left out («Пропущено — …»): said again
+    /// when it ends, since its progress replaces the status meanwhile.
+    pub(crate) skipped_note: Option<String>,
     /// Transfer paused on name conflicts, with the conflicting items.
     pub(crate) pending: Option<(Transfer, Vec<Conflict>)>,
     /// Asked for while another ran (or folders of a sync): started in turn.

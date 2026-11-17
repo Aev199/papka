@@ -1083,6 +1083,10 @@ impl Explorer {
             cx.notify();
             return;
         }
+        // Left-out items of the Drop Zone stay staged; the note is repeated
+        // when the transfer ends (its progress replaces the status).
+        if transfer.restore_failed { for path in pruned.in_place.iter() { let _ = self.zone.add(path); } }
+        self.transfers.skipped_note = (!skipped.is_empty()).then(|| skipped.clone());
         if !skipped.is_empty() { self.status = skipped; }
         let items = transfer.zone.items().to_vec();
         // Staged paths are canonical (\\?\C:\…), the pane's are not.
@@ -1096,7 +1100,7 @@ impl Explorer {
             transfer.keep_both = true;
         }
         // A replacing transfer was already decided on (conflict dialog, sync).
-        let conflicts = if transfer.keep_both || transfer.replace { Vec::new() } else { transfer.zone.conflict_details(&transfer.target) };
+        let conflicts = if transfer.keep_both || transfer.replace { Vec::new() } else { transfer.zone.conflict_details(&transfer.target, 4) };
         if conflicts.is_empty() {
             self.execute_transfer(transfer, cx);
         } else {
@@ -1110,6 +1114,7 @@ impl Explorer {
         let Some((mut transfer, conflicts)) = self.transfers.pending.take() else { return };
         match choice {
             ConflictChoice::Cancel => {
+                self.transfers.skipped_note = None;
                 self.return_to_staging(&transfer);
                 self.status = "Отменено, файлы не изменены".into();
             }
@@ -1122,6 +1127,7 @@ impl Explorer {
                     }
                 }
                 if transfer.zone.items().is_empty() {
+                    self.transfers.skipped_note = None;
                     self.status = "Все объекты пропущены".into();
                 } else {
                     self.execute_transfer(transfer, cx);
@@ -1229,6 +1235,7 @@ impl Explorer {
         } else {
             format!("{title}.")
         };
+        if let Some(note) = self.transfers.skipped_note.take() { self.status = format!("{} {note}.", self.status); }
         if let Some(id) = self.transfers.finish(title, target, failures) {
             cx.spawn(async move |weak, cx| {
                 cx.background_executor().timer(Duration::from_secs(6)).await;

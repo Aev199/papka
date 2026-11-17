@@ -54,10 +54,18 @@ pub(crate) fn direction(old: &Path, new: &Path) -> f32 {
     else { 0. }
 }
 
+/// How a new item is looked up: Windows names ignore letter case, and the
+/// pane's spelling of a folder may differ from the one a copy reports.
+fn flash_key(path: &Path) -> String {
+    let path = filemanager_core::path_utils::normalize_extended_path(path);
+    let text = path.to_string_lossy();
+    if cfg!(windows) { text.to_lowercase() } else { text.into_owned() }
+}
+
 #[derive(Default)]
 pub(crate) struct Motion {
     /// New items and when each came on screen (`None`: not drawn yet).
-    flashes: RefCell<HashMap<PathBuf, (Instant, Option<Instant>)>>,
+    flashes: RefCell<HashMap<String, (Instant, Option<Instant>)>>,
     opened_tab: Option<(GroupId, usize, Instant)>,
     /// A closed tab's place: its pane, position and width.
     closed_tab: Option<(GroupId, usize, f32, Instant)>,
@@ -75,8 +83,7 @@ impl Motion {
         let now = Instant::now();
         let mut flashes = self.flashes.borrow_mut();
         for path in paths {
-            let path = filemanager_core::path_utils::normalize_extended_path(&path);
-            flashes.insert(path, (now, None));
+            flashes.insert(flash_key(&path), (now, None));
         }
     }
 
@@ -84,7 +91,7 @@ impl Motion {
     pub(crate) fn flash_of(&self, path: &Path) -> Option<f32> {
         let mut flashes = self.flashes.borrow_mut();
         if flashes.is_empty() { return None; }
-        let (_, shown) = flashes.get_mut(path)?;
+        let (_, shown) = flashes.get_mut(&flash_key(path))?;
         let since = *shown.get_or_insert_with(Instant::now);
         flash_strength(since.elapsed())
     }
