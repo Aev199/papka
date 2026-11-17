@@ -78,9 +78,21 @@ struct FileDragPreview { name: String, position: Point<Pixels>, mode: Option<Dro
 
 /// The folder files would land in if released now, shared with the drag's
 /// picture so it can say «Копия» or «Перенос».
+/// What releasing dragged files over the thing under them does.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum DropAt {
+    /// Nothing takes files there (a tab, the path bar: they only open).
+    #[default]
+    Nothing,
+    /// Copied or moved into this folder (a folder row or tile, a list).
+    Folder(PathBuf),
+    /// Put aside in «Файлы для переноса» (a place in the sidebar, the zone).
+    Stage,
+}
+
 #[derive(Default)]
 struct DragTarget {
-    folder: Option<PathBuf>,
+    at: DropAt,
     /// A folder row or place claimed this move; the list's own folder
     /// stands in otherwise.
     claimed: bool,
@@ -93,13 +105,17 @@ type DragTargetCell = std::rc::Rc<std::cell::RefCell<DragTarget>>;
 /// What the picture of dragged files needs to name the action.
 struct DropMode {
     first: PathBuf,
+    /// The files come out of an archive (looked up once, when the drag starts).
+    from_archive: bool,
     target: DragTargetCell,
 }
 
-/// The word for a drop of files starting with `first` into `folder`, as
-/// `drop_files` decides it: Ctrl copies, Shift moves, otherwise a move on
-/// the same drive and a copy across. Out of an archive: extracted. Into the
-/// folder they are in: nothing.
+impl DropMode {
+    fn new(first: &std::path::Path, target: &DragTargetCell) -> Self {
+        Self { first: first.to_path_buf(), from_archive: filemanager_core::archive::is_inside(first), target: target.clone() }
+    }
+}
+
 #[cfg(test)]
 mod drop_word_tests {
     use super::drop_word;
@@ -108,17 +124,32 @@ mod drop_word_tests {
     #[test]
     fn says_what_a_release_does() {
         let file = Path::new("/w/a/report.docx");
-        assert_eq!(drop_word(file, Path::new("/w/a"), false, false), None);
-        assert_eq!(drop_word(file, Path::new("/w/a"), true, false), Some("Копия"));
-        assert_eq!(drop_word(file, Path::new("/w/b"), true, false), Some("Копия"));
-        assert_eq!(drop_word(file, Path::new("/w/b"), false, true), Some("Перенос"));
-        assert_eq!(drop_word(Path::new("/w/a"), Path::new("/w/a"), true, false), None);
+        assert_eq!(drop_word(file, false, Path::new("/w/a"), false, false), None);
+        assert_eq!(drop_word(file, false, Path::new("/w/a"), true, false), Some("Копия"));
+        assert_eq!(drop_word(file, false, Path::new("/w/b"), true, false), Some("Копия"));
+        assert_eq!(drop_word(file, false, Path::new("/w/b"), false, true), Some("Перенос"));
+        assert_eq!(drop_word(file, true, Path::new("/w/b"), false, false), Some("Извлечь"));
+        assert_eq!(drop_word(Path::new("/w/a"), false, Path::new("/w/a"), true, false), None);
+        // Into a folder inside an archive: refused, no word.
+        let dir = std::env::temp_dir().join(format!("papka-drop-word-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pack.zip"), b"").unwrap();
+        assert_eq!(drop_word(file, false, &dir.join("pack.zip").join("inner"), true, false), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
-fn drop_word(first: &std::path::Path, folder: &std::path::Path, control: bool, shift: bool) -> Option<&'static str> {
-    if first == folder || (!control && first.parent() == Some(folder)) { return None; }
-    if filemanager_core::archive::is_inside(first) { return Some("Извлечь"); }
+/// The word for a drop of files starting with `first` into `folder`, as
+/// `drop_files` decides it: Ctrl copies, Shift moves, otherwise a move on
+/// the same drive and a copy across. Out of an archive: extracted. Into the
+/// folder they are in, or into an archive: nothing.
+fn drop_word(first: &std::path::Path, from_archive: bool, folder: &std::path::Path, control: bool, shift: bool) -> Option<&'static str> {
+    use filemanager_core::path_utils::same_path;
+    // Staged items are spelled `\\?\C:\…`, the panes' folders are not.
+    if same_path(first, folder) || (!control && first.parent().is_some_and(|parent| same_path(parent, folder))) { return None; }
+    // A folder inside an archive takes nothing.
+    if filemanager_core::archive::is_inside(folder) { return None; }
+    if from_archive { return Some("Извлечь"); }
     let copy = if control { true } else if shift { false } else { !filemanager_core::path_utils::same_volume(first, folder) };
     Some(if copy { "Копия" } else { "Перенос" })
 }
@@ -130,9 +161,10 @@ struct TabDrag { group: GroupId, index: usize, title: String }
 impl Render for FileDragPreview {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let modifiers = window.modifiers();
-        let word = self.mode.as_ref().and_then(|mode| {
-            let folder = mode.target.borrow().folder.clone()?;
-            drop_word(&mode.first, &folder, modifiers.control, modifiers.shift)
+        let word = self.mode.as_ref().and_then(|mode| match &mode.target.borrow().at {
+            DropAt::Nothing => None,
+            DropAt::Stage => Some("Отложить"),
+            DropAt::Folder(folder) => drop_word(&mode.first, mode.from_archive, folder, modifiers.control, modifiers.shift),
         });
         div()
             .pl(self.position.x + px(12.))

@@ -57,7 +57,7 @@ impl Explorer {
     }
 
     /// Moves the list under the drag one frame further; true while it
-    /// moves (the window then draws the next frame). Steps follow the
+    /// moves (the window then draws the next frame), false at its end. Steps follow the
     /// frames: a timer of its own made the motion uneven on Windows.
     pub(crate) fn edge_scroll_frame(&mut self, cx: &gpui::App) -> bool {
         if !self.dragging_files(cx) { self.edge_scroll.target = None; }
@@ -68,7 +68,10 @@ impl Explorer {
         self.edge_scroll.last = Some(now);
         let mut offset = handle.offset();
         let lowest = -handle.max_offset().y;
-        offset.y = (offset.y - px(*speed * ticks)).clamp(lowest.min(px(0.)), px(0.));
+        let moved = (offset.y - px(*speed * ticks)).clamp(lowest.min(px(0.)), px(0.));
+        // At the end of the list there is nothing to draw until the pointer moves.
+        if moved == offset.y { return false; }
+        offset.y = moved;
         handle.set_offset(offset);
         true
     }

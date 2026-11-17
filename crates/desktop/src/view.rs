@@ -276,6 +276,8 @@ impl Explorer {
                     .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);}))))
                 .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.switch_group_tab(group,index,cx);} ))
                 .when(index!=active_index,|tab|tab.on_mouse_move(cx.listener(move |this,_,_,cx| this.spring_hover(crate::spring::SpringTarget::Tab(group,index),cx))))
+                // A tab only opens under dragged files; releasing there does nothing.
+                .on_mouse_move(cx.listener(|this,_,_,cx| this.drag_over(crate::DropAt::Nothing,cx)))
                 .on_drag(TabDrag {group,index,title:titles[index].clone()},|drag: &TabDrag,position,_,cx|
                     cx.new(|_|FileDragPreview {name:drag.title.clone(),position,mode:None}))
                 .drag_over::<TabDrag>(|style,_,_,_|style.border_l_2().border_color(rgb(ACCENT)))
@@ -767,6 +769,7 @@ impl Explorer {
                         this.navigate_side(side, &target, None, cx);
                     }}))
                     .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        this.drag_over(crate::DropAt::Nothing, cx);
                         this.spring_hover(crate::spring::SpringTarget::Folder(side, target.clone()), cx);
                     })))
             );
@@ -822,6 +825,8 @@ impl Explorer {
                 this.navigate_side(side, &path, None, cx);
             }))
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                // Released here, files are put aside in «Файлы для переноса».
+                this.drag_over(crate::DropAt::Stage, cx);
                 let side = this.active_side();
                 this.spring_hover(crate::spring::SpringTarget::Folder(side, spring.clone()), cx);
             }))
@@ -1005,7 +1010,8 @@ impl Explorer {
             .drag_over::<FileDragInfo>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
-            .on_drop(cx.listener(|this, data: &ExternalPaths, _, cx| this.stage_paths(data.paths(), cx)));
+            .on_drop(cx.listener(|this, data: &ExternalPaths, _, cx| this.stage_paths(data.paths(), cx)))
+            .on_mouse_move(cx.listener(|this, _, _, cx| this.drag_over(crate::DropAt::Stage, cx)));
         if items.is_empty() {
             zone = zone.child(
                 div().flex().items_center().gap_2().text_color(rgb(TEXT_MUTED))
@@ -1019,7 +1025,7 @@ impl Explorer {
         // a row carries one, into any folder, pane or program.
         let preview = |target: crate::DragTargetCell| move |info: &FileDragInfo, position, _: &mut Window, cx: &mut App| {
             let name = match info.paths.as_slice() { [single] => browser::display_name(single), many => format!("{} элементов", many.len()) };
-            cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode { first: first.clone(), target: target.clone() }) })
+            cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode::new(first, &target)) })
         };
         zone = zone.child(div().id("zone-all").flex().items_center().gap_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             .cursor_grab().rounded_sm().hover(|style| style.bg(rgb(HOVER)))
@@ -1519,6 +1525,7 @@ impl Explorer {
                         drag.target = Some(hover_target.clone());
                         drag.claimed = true;
                     }
+                    this.drag_over(crate::DropAt::Folder(hover_target.clone()), cx);
                     this.spring_hover(crate::spring::SpringTarget::Folder(side, hover_target.clone()), cx);
                 }));
         }
@@ -1530,7 +1537,7 @@ impl Explorer {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode { first: first.clone(), target: target.clone() }) })
+                cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode::new(first, &target)) })
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -1703,6 +1710,7 @@ impl Explorer {
                         drag.target = Some(target.clone());
                         drag.claimed = true;
                     }
+                    this.drag_over(crate::DropAt::Folder(target.clone()), cx);
                     this.spring_hover(crate::spring::SpringTarget::Folder(side, target.clone()), cx);
                 }}))
                 .on_drop(cx.listener(move |this, data: &ExternalPaths, _, cx| {
@@ -1727,7 +1735,7 @@ impl Explorer {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode { first: first.clone(), target: target.clone() }) })
+                cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode::new(first, &target)) })
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();

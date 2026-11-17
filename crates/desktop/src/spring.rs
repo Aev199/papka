@@ -39,28 +39,12 @@ impl Explorer {
     /// Called by a hovered element while the pointer moves over it.
     pub(crate) fn spring_hover(&mut self, target: SpringTarget, cx: &mut Context<Self>) {
         if !self.dragging_files(cx) { return; }
-        // The word on the dragged files' picture follows this target.
-        let folder = match &target {
-            SpringTarget::Folder(_, folder) => Some(folder.clone()),
-            SpringTarget::Tab(group, index) => self.browser.group(*group)
-                .and_then(|group| group.tabs.get(*index)).map(|tab| tab.pane.path.clone()),
-        };
-        {
-            let mut drop = self.drag_target.borrow_mut();
-            drop.folder = folder;
-            drop.claimed = true;
-            drop.touched = true;
-        }
         if let SpringTarget::Folder(_, folder) = &target {
             let dragged = match self.right_drag.as_ref().filter(|drag| drag.active) {
                 Some(drag) => &drag.paths,
                 None => &self.drag_paths,
             };
-            if dragged.iter().any(|path| folder.starts_with(path)) {
-                // Into itself: refused on release, so no word either.
-                self.drag_target.borrow_mut().folder = None;
-                return;
-            }
+            if dragged.iter().any(|path| folder.starts_with(path)) { return; }
         }
         if let Some(spring) = self.spring.as_mut().filter(|spring| spring.target == target) {
             spring.claimed = true;
@@ -99,18 +83,33 @@ impl Explorer {
         self.spring.as_ref().is_some_and(|spring| spring.generation != 0 && spring.started.elapsed() < DELAY)
     }
 
+    /// What a release over the hovered element does (a folder row or tile,
+    /// a place, a tab), for the word on the dragged files. A folder the
+    /// files come from or lie inside takes nothing.
+    pub(crate) fn drag_over(&mut self, at: crate::DropAt, cx: &gpui::App) {
+        if !self.dragging_files(cx) { return; }
+        let at = match at {
+            crate::DropAt::Folder(folder) if self.drag_paths.iter().any(|path| folder.starts_with(path)) => crate::DropAt::Nothing,
+            other => other,
+        };
+        let mut drop = self.drag_target.borrow_mut();
+        drop.at = at;
+        drop.claimed = true;
+        drop.touched = true;
+    }
+
     /// A list's own folder under dragged files, unless a folder in it (a
     /// row or tile, met first) took the move.
     pub(crate) fn drag_over_list(&mut self, folder: &std::path::Path) {
         let mut drop = self.drag_target.borrow_mut();
-        if !drop.claimed { drop.folder = Some(folder.to_path_buf()); }
+        if !drop.claimed { drop.at = crate::DropAt::Folder(folder.to_path_buf()); }
         drop.touched = true;
     }
 
     /// Root mouse move: nothing under the pointer takes files, no word.
     pub(crate) fn drag_target_settle(&mut self) {
         let mut drop = self.drag_target.borrow_mut();
-        if !drop.touched { drop.folder = None; }
+        if !drop.touched { drop.at = crate::DropAt::Nothing; }
         drop.touched = false;
         drop.claimed = false;
     }
