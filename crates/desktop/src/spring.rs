@@ -81,6 +81,8 @@ impl Explorer {
 
     /// Whether a target is filling now (the window draws its next frame).
     pub(crate) fn spring_filling(&self) -> bool {
+        // No fill drawn with animations off: no frames asked for it either.
+        if !crate::theme::animations() { return false; }
         self.spring.as_ref().is_some_and(|spring| spring.generation != 0 && spring.started.elapsed() < DELAY)
     }
 

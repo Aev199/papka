@@ -102,6 +102,8 @@ impl Motion {
     /// Lights up `paths` with `kind`. A change another program makes to an
     /// item lit here already (our own copy being written) keeps that light.
     pub(crate) fn flash_as(&self, kind: Flash, paths: impl IntoIterator<Item = PathBuf>) {
+        // Animations off: nothing is lit, so nothing is kept to draw frames for.
+        if !crate::theme::animations() { return; }
         let now = Instant::now();
         let mut flashes = self.flashes.borrow_mut();
         for path in paths {
@@ -121,11 +123,13 @@ impl Motion {
     }
 
     pub(crate) fn tab_opened(&mut self, group: GroupId, index: usize) {
+        if !crate::theme::animations() { return; }
         self.opened_tab = Some((group, index, Instant::now()));
         self.closed_tab = None;
     }
 
     pub(crate) fn tab_closed(&mut self, group: GroupId, index: usize) {
+        if !crate::theme::animations() { return; }
         let width = self.tab_widths.borrow().get(&group).and_then(|widths| widths.get(index).copied()).unwrap_or(120.);
         self.closed_tab = Some((group, index, width, Instant::now()));
         self.opened_tab = None;
