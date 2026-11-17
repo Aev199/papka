@@ -439,15 +439,37 @@ impl Explorer {
         let side = self.active_side();
         let current = self.pane_path(side);
         if let Some(parent) = current.parent().map(Path::to_path_buf) {
+            self.light_left_folder(side, &current);
             self.navigate_side(side, &parent, Some(current), cx);
         }
     }
 
+    /// The folder just left lights up in its parent, so the eye finds the
+    /// way back. Columns show the parent beside it already: no light there.
+    fn light_left_folder(&self, side: GroupId, left: &Path) {
+        if !self.miller(side) {
+            self.motion.flash_as(crate::motion::Flash::Left, [left.to_path_buf()]);
+        }
+    }
+
     pub(crate) fn go_back(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let side = self.active_side();
+        let before = self.pane_path(side);
         let pane = self.browser.active_mut().active_mut();
         let moved = if forward { pane.forward() } else { pane.back() };
         if moved {
             self.selected = None; self.marked.clear(); self.anchor = None;
+            // Back out to a parent: the subfolder it came from is selected
+            // and lit, as after «Наверх».
+            let now = self.pane_path(side);
+            let came_from = before.strip_prefix(&now).ok().filter(|_| before != now)
+                .and_then(|rest| rest.components().next()).map(|first| now.join(first));
+            if let Some(child) = came_from {
+                self.light_left_folder(side, &child);
+                self.anchor = Some(child.clone());
+                self.selected = Some(child);
+                self.reveal_selected();
+            }
             self.close_search();
             cx.notify();
         }

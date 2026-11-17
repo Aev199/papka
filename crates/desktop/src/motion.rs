@@ -54,6 +54,17 @@ pub(crate) fn direction(old: &Path, new: &Path) -> f32 {
     else { 0. }
 }
 
+/// What a light on an item says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flash {
+    /// Made here: copied, moved, created, renamed, extracted.
+    New,
+    /// Changed by another program or person while on screen.
+    Changed,
+    /// The folder the pane just came out of.
+    Left,
+}
+
 /// How a new item is looked up: Windows names ignore letter case, and the
 /// pane's spelling of a folder may differ from the one a copy reports.
 fn flash_key(path: &Path) -> String {
@@ -65,7 +76,7 @@ fn flash_key(path: &Path) -> String {
 #[derive(Default)]
 pub(crate) struct Motion {
     /// New items and when each came on screen (`None`: not drawn yet).
-    flashes: RefCell<HashMap<String, (Instant, Option<Instant>)>>,
+    flashes: RefCell<HashMap<String, (Flash, Instant, Option<Instant>)>>,
     opened_tab: Option<(GroupId, usize, Instant)>,
     /// A closed tab's place: its pane, position and width.
     closed_tab: Option<(GroupId, usize, f32, Instant)>,
@@ -80,20 +91,28 @@ pub(crate) struct Motion {
 impl Motion {
     /// Lights up `paths` as they appear in their folders.
     pub(crate) fn flash(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.flash_as(Flash::New, paths);
+    }
+
+    /// Lights up `paths` with `kind`. A change another program makes to an
+    /// item lit here already (our own copy being written) keeps that light.
+    pub(crate) fn flash_as(&self, kind: Flash, paths: impl IntoIterator<Item = PathBuf>) {
         let now = Instant::now();
         let mut flashes = self.flashes.borrow_mut();
         for path in paths {
-            flashes.insert(flash_key(&path), (now, None));
+            let key = flash_key(&path);
+            if kind == Flash::Changed && flashes.get(&key).is_some_and(|(old, _, _)| *old != Flash::Changed) { continue; }
+            flashes.insert(key, (kind, now, None));
         }
     }
 
     /// The light on a row or tile being drawn now; starts its clock.
-    pub(crate) fn flash_of(&self, path: &Path) -> Option<f32> {
+    pub(crate) fn flash_of(&self, path: &Path) -> Option<(Flash, f32)> {
         let mut flashes = self.flashes.borrow_mut();
         if flashes.is_empty() { return None; }
-        let (_, shown) = flashes.get_mut(&flash_key(path))?;
+        let (kind, _, shown) = flashes.get_mut(&flash_key(path))?;
         let since = *shown.get_or_insert_with(Instant::now);
-        flash_strength(since.elapsed())
+        flash_strength(since.elapsed()).map(|strength| (*kind, strength))
     }
 
     pub(crate) fn tab_opened(&mut self, group: GroupId, index: usize) {
@@ -158,11 +177,11 @@ impl Motion {
     /// drops what has finished.
     pub(crate) fn wants_frame(&mut self, fraction: Option<f64>) -> bool {
         let mut flashes = self.flashes.borrow_mut();
-        flashes.retain(|_, (added, shown)| match shown {
+        flashes.retain(|_, (_, added, shown)| match shown {
             Some(shown) => shown.elapsed() < FLASH,
             None => added.elapsed() < FLASH_WAIT,
         });
-        let flashing = flashes.values().any(|(_, shown)| shown.is_some());
+        let flashing = flashes.values().any(|(_, _, shown)| shown.is_some());
         drop(flashes);
         if self.opened_tab.is_some_and(|(_, _, start)| start.elapsed() >= TAB_OPEN) { self.opened_tab = None; }
         if self.closed_tab.is_some_and(|(_, _, _, start)| start.elapsed() >= TAB_CLOSE) { self.closed_tab = None; }
@@ -196,8 +215,12 @@ mod tests {
         let motion = Motion::default();
         motion.flash([PathBuf::from("/w/new.txt")]);
         assert_eq!(motion.flash_of(Path::new("/w/other.txt")), None);
-        let first = motion.flash_of(Path::new("/w/new.txt")).unwrap();
-        assert!(first > 0.9);
+        let (kind, first) = motion.flash_of(Path::new("/w/new.txt")).unwrap();
+        assert!(kind == Flash::New && first > 0.9);
+        // The watcher then reports the same file: it stays lit as new.
+        motion.flash_as(Flash::Changed, [PathBuf::from("/w/new.txt"), PathBuf::from("/w/theirs.txt")]);
+        assert_eq!(motion.flash_of(Path::new("/w/new.txt")).unwrap().0, Flash::New);
+        assert_eq!(motion.flash_of(Path::new("/w/theirs.txt")).unwrap().0, Flash::Changed);
     }
 
     #[test]

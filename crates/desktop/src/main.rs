@@ -74,14 +74,66 @@ struct ColumnResize {
 #[derive(Clone)]
 struct FileDragInfo { paths: Vec<PathBuf> }
 
-struct FileDragPreview { name: String, position: Point<Pixels> }
+struct FileDragPreview { name: String, position: Point<Pixels>, mode: Option<DropMode> }
+
+/// The folder files would land in if released now, shared with the drag's
+/// picture so it can say «Копия» or «Перенос».
+#[derive(Default)]
+struct DragTarget {
+    folder: Option<PathBuf>,
+    /// A folder row or place claimed this move; the list's own folder
+    /// stands in otherwise.
+    claimed: bool,
+    /// Something under the pointer named a folder this move.
+    touched: bool,
+}
+
+type DragTargetCell = std::rc::Rc<std::cell::RefCell<DragTarget>>;
+
+/// What the picture of dragged files needs to name the action.
+struct DropMode {
+    first: PathBuf,
+    target: DragTargetCell,
+}
+
+/// The word for a drop of files starting with `first` into `folder`, as
+/// `drop_files` decides it: Ctrl copies, Shift moves, otherwise a move on
+/// the same drive and a copy across. Out of an archive: extracted. Into the
+/// folder they are in: nothing.
+#[cfg(test)]
+mod drop_word_tests {
+    use super::drop_word;
+    use std::path::Path;
+
+    #[test]
+    fn says_what_a_release_does() {
+        let file = Path::new("/w/a/report.docx");
+        assert_eq!(drop_word(file, Path::new("/w/a"), false, false), None);
+        assert_eq!(drop_word(file, Path::new("/w/a"), true, false), Some("Копия"));
+        assert_eq!(drop_word(file, Path::new("/w/b"), true, false), Some("Копия"));
+        assert_eq!(drop_word(file, Path::new("/w/b"), false, true), Some("Перенос"));
+        assert_eq!(drop_word(Path::new("/w/a"), Path::new("/w/a"), true, false), None);
+    }
+}
+
+fn drop_word(first: &std::path::Path, folder: &std::path::Path, control: bool, shift: bool) -> Option<&'static str> {
+    if first == folder || (!control && first.parent() == Some(folder)) { return None; }
+    if filemanager_core::archive::is_inside(first) { return Some("Извлечь"); }
+    let copy = if control { true } else if shift { false } else { !filemanager_core::path_utils::same_volume(first, folder) };
+    Some(if copy { "Копия" } else { "Перенос" })
+}
 
 /// Dragging a tab to reorder it.
 #[derive(Clone)]
 struct TabDrag { group: GroupId, index: usize, title: String }
 
 impl Render for FileDragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let modifiers = window.modifiers();
+        let word = self.mode.as_ref().and_then(|mode| {
+            let folder = mode.target.borrow().folder.clone()?;
+            drop_word(&mode.first, &folder, modifiers.control, modifiers.shift)
+        });
         div()
             .pl(self.position.x + px(12.))
             .pt(self.position.y + px(8.))
@@ -89,7 +141,11 @@ impl Render for FileDragPreview {
                 div().px_3().py_1().rounded(px(4.)).bg(rgb(theme::SELECTED))
                     .border_1().border_color(rgb(theme::SELECTED_BORDER))
                     .text_color(rgb(theme::SELECTION_TEXT)).text_size(px(13.))
+                    .flex().items_center().gap_2()
                     .child(self.name.clone())
+                    // What a release here does; Ctrl and Shift change it at once.
+                    .when_some(word, |chip, word| chip.child(div().px_1p5().rounded_sm().text_size(px(11.))
+                        .bg(rgb(theme::SELECTED_BORDER)).child(word)))
             )
     }
 }
@@ -241,6 +297,8 @@ struct Explorer {
     drag_paths: Vec<PathBuf>,
     spring: Option<spring::Spring>,
     spring_generation: u64,
+    /// The folder dragged files are over, for the word on their picture.
+    drag_target: DragTargetCell,
     edge_scroll: edge_scroll::EdgeScroll,
     smooth: smooth_scroll::SmoothScroll,
     motion: motion::Motion,
@@ -526,7 +584,7 @@ impl Explorer {
             cards: project_card::ProjectCards::new(window, cx),
             registry: inbox::Registry { due: true, ..Default::default() },
             hwnd: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, edge_scroll: Default::default(), smooth: Default::default(), motion: Default::default(), dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, drag_target: Default::default(), edge_scroll: Default::default(), smooth: Default::default(), motion: Default::default(), dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),
@@ -1858,6 +1916,16 @@ impl Explorer {
                         cx.notify();
                     }
                     let visible = this.visible_directories();
+                    // Files another program or person changed light up softly where
+                    // they are on screen. A burst (a sync, an unpacked archive) and
+                    // the folder Papka itself is copying into stay unlit.
+                    let copying_into = this.transfers.live.as_ref().map(|live| live.target.clone());
+                    if changes.paths.len() <= 50 {
+                        this.motion.flash_as(motion::Flash::Changed, changes.paths.iter()
+                            .filter(|path| path.parent().is_some_and(|parent| visible.iter().any(|folder| folder == parent)
+                                && !copying_into.as_deref().is_some_and(|target| filemanager_core::path_utils::same_path(target, parent))))
+                            .cloned().collect::<Vec<_>>());
+                    }
                     // Invalidating non-visible cache entries prevents an old
                     // listing reappearing when the user navigates back.
                     let dirty = if changes.refresh_all { visible.clone() } else { changes.directories.into_iter().collect() };

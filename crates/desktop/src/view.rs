@@ -53,10 +53,18 @@ fn list_appear(way: f32) -> impl Fn(gpui::Div, f32) -> gpui::Div {
 
 /// What lies under a row or tile's content: the light of a new item and
 /// the fill of a folder about to open under dragged files.
-fn item_overlays(flash: Option<f32>, fill: Option<f32>) -> Vec<gpui::AnyElement> {
+fn item_overlays(flash: Option<(crate::motion::Flash, f32)>, fill: Option<f32>) -> Vec<gpui::AnyElement> {
+    use crate::motion::Flash;
     let mut layers = Vec::new();
-    if let Some(strength) = flash {
-        layers.push(div().absolute().top_0().left_0().size_full().bg(accent_alpha((strength * 110.) as u8)).into_any_element());
+    if let Some((kind, strength)) = flash {
+        // New: the accent; changed by others: half as strong; the folder
+        // just left: a pale light that shows on its selected row too.
+        let colour = match kind {
+            Flash::New => accent_alpha((strength * 110.) as u8),
+            Flash::Changed => accent_alpha((strength * 55.) as u8),
+            Flash::Left => text_alpha((strength * 70.) as u8),
+        };
+        layers.push(div().absolute().top_0().left_0().size_full().bg(colour).into_any_element());
     }
     if let Some(fill) = fill {
         layers.push(div().absolute().top_0().left_0().h_full().w(gpui::relative(fill)).bg(accent_alpha(70)).into_any_element());
@@ -269,7 +277,7 @@ impl Explorer {
                 .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.switch_group_tab(group,index,cx);} ))
                 .when(index!=active_index,|tab|tab.on_mouse_move(cx.listener(move |this,_,_,cx| this.spring_hover(crate::spring::SpringTarget::Tab(group,index),cx))))
                 .on_drag(TabDrag {group,index,title:titles[index].clone()},|drag: &TabDrag,position,_,cx|
-                    cx.new(|_|FileDragPreview {name:drag.title.clone(),position}))
+                    cx.new(|_|FileDragPreview {name:drag.title.clone(),position,mode:None}))
                 .drag_over::<TabDrag>(|style,_,_,_|style.border_l_2().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {cx.stop_propagation();this.move_tab_to(drag,group,index,cx);} ))
                 .on_mouse_down(MouseButton::Middle,cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);} ))
@@ -856,7 +864,7 @@ impl Explorer {
             let drag_name = place.label.clone();
             side = side.child(self.place_row(("place", index), place, active, true, cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(Some(index)),cx)))
-                .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position}))
+                .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position,mode:None}))
                 .drag_over::<PlaceDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &PlaceDrag,_,cx|this.move_place(data.index,index,cx))));
         }
@@ -873,7 +881,7 @@ impl Explorer {
                 .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
                 .on_click(cx.listener(move |this,_,_,cx|this.navigate_side(this.active_side(),&target,None,cx)))
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Favorite(index),cx)))
-                .on_drag(FavoriteDrag {index},move |_: &FavoriteDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position}))
+                .on_drag(FavoriteDrag {index},move |_: &FavoriteDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position,mode:None}))
                 .drag_over::<FavoriteDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &FavoriteDrag,_,cx|this.move_favorite(data.index,index,cx))));
         }
@@ -1009,16 +1017,16 @@ impl Explorer {
         }
         // Staged items are dragged out like files: the header carries all,
         // a row carries one, into any folder, pane or program.
-        let preview = |info: &FileDragInfo, position, _: &mut Window, cx: &mut App| {
+        let preview = |target: crate::DragTargetCell| move |info: &FileDragInfo, position, _: &mut Window, cx: &mut App| {
             let name = match info.paths.as_slice() { [single] => browser::display_name(single), many => format!("{} элементов", many.len()) };
-            cx.new(|_| FileDragPreview { name, position })
+            cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode { first: first.clone(), target: target.clone() }) })
         };
         zone = zone.child(div().id("zone-all").flex().items_center().gap_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             .cursor_grab().rounded_sm().hover(|style| style.bg(rgb(HOVER)))
             .child(div().flex_1().child(format!("Для переноса: {}", items.len())))
             .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("тяните"))
             .tooltip(|window, cx| Tooltip::new("Перетащите в папку или панель: тот же диск — перенос, другой — копия; Ctrl — копия, Shift — перенос").build(window, cx))
-            .on_drag(FileDragInfo { paths: items.to_vec() }, preview));
+            .on_drag(FileDragInfo { paths: items.to_vec() }, preview(self.drag_target.clone())));
         for (index, path) in items.iter().take(5).enumerate() {
             zone = zone.child(
                 div().id(("zone-item", index)).flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT))
@@ -1026,7 +1034,7 @@ impl Explorer {
                     .child(small_icon(if self.zone.is_folder(path) { "fm/folder-fill.svg" } else { "fm/file.svg" },
                         if self.zone.is_folder(path) { FOLDER } else { TEXT_MUTED }))
                     .child(div().flex_1().min_w_0().truncate().child(browser::display_name(path)))
-                    .on_drag(FileDragInfo { paths: vec![path.clone()] }, preview)
+                    .on_drag(FileDragInfo { paths: vec![path.clone()] }, preview(self.drag_target.clone()))
             );
         }
         if items.len() > 5 {
@@ -1343,11 +1351,12 @@ impl Explorer {
             .on_drop(cx.listener(move |this, data: &FileDragInfo, window, cx| {
                 this.drop_files(&data.paths, drop_folder.clone(), window.modifiers(), cx);
             }))
-            .on_mouse_move(cx.listener(move |this, _, _, _| {
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if let Some(drag) = this.right_drag.as_mut().filter(|drag| drag.active && !drag.claimed) {
                     drag.target = Some(hover_folder.clone());
                     drag.claimed = true;
                 }
+                if this.dragging_files(cx) { this.drag_over_list(&hover_folder); }
             }))
             .when(right_target, |column| column.bg(rgb(ACCENT_SOFT)));
 
@@ -1515,12 +1524,13 @@ impl Explorer {
         }
         let (menu_path, menu_folder, column_folder) = (path.clone(), folder.to_path_buf(), folder.to_path_buf());
         let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
-        tile.on_drag(FileDragInfo { paths: drag_paths }, |info: &FileDragInfo, position, _, cx| {
+        let target = self.drag_target.clone();
+        tile.on_drag(FileDragInfo { paths: drag_paths }, move |info: &FileDragInfo, position, _, cx| {
                 let name = match info.paths.as_slice() {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview { name, position })
+                cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode { first: first.clone(), target: target.clone() }) })
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -1711,12 +1721,13 @@ impl Explorer {
         }
         // Dragging a selected row carries the whole selection.
         let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
-        row.on_drag(FileDragInfo { paths: drag_paths }, |info: &FileDragInfo, position, _, cx| {
+        let target = self.drag_target.clone();
+        row.on_drag(FileDragInfo { paths: drag_paths }, move |info: &FileDragInfo, position, _, cx| {
                 let name = match info.paths.as_slice() {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview { name, position })
+                cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode { first: first.clone(), target: target.clone() }) })
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -3052,6 +3063,10 @@ impl Render for Explorer {
                 if !this.pane_bounds.values().any(|bounds|bounds.contains(&event.event.position)) && this.dock_hover.take().is_some() {cx.notify();}
             }))
             // Leaving the window hands the files to Windows for other programs.
+            // Ctrl or Shift pressed mid-drag: the word on the files changes at once.
+            .on_modifiers_changed(cx.listener(|this,_: &gpui::ModifiersChangedEvent,window,cx| {
+                if this.dragging_files(cx) { window.refresh(); }
+            }))
             .on_drag_move::<ExternalPaths>(cx.listener(|this,_: &gpui::DragMoveEvent<ExternalPaths>,_,_| {
                 this.file_drag = true;
                 this.drag_paths.clear();
@@ -3069,6 +3084,7 @@ impl Render for Explorer {
                 // Root runs after rows and columns: they have claimed the target.
                 this.spring_settle();
                 this.edge_scroll_settle();
+                this.drag_target_settle();
                 if let Some(drag) = this.right_drag.as_mut() {
                     if event.pressed_button == Some(MouseButton::Right) {
                         if drag.active && outside_window(event.position, window) {

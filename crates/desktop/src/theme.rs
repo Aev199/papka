@@ -72,6 +72,11 @@ pub fn themed(color: u32) -> u32 {
 pub fn rgb(color: u32) -> gpui::Rgba {
     gpui::rgb(themed(color))
 }
+/// The text colour with transparency: a light that shows on any row, the
+/// selected one included, in both themes.
+pub fn text_alpha(alpha: u8) -> gpui::Rgba {
+    gpui::rgba((themed(TEXT) << 8) | alpha as u32)
+}
 /// The accent with transparency, for selections and drop highlights.
 pub fn accent_alpha(alpha: u8) -> gpui::Rgba {
     gpui::rgba((themed(ACCENT) << 8) | alpha as u32)
