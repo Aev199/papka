@@ -180,12 +180,8 @@ impl Explorer {
         let active=self.pane_path(self.active_side());
         // A folder stayed in (active on two ticks running, 2 s and more)
         // counts once per stay; one passed through on the way does not.
-        let stayed=self.visit_seen.as_ref()==Some(&active);
-        self.visit_seen=Some(active.clone());
-        if stayed && self.visit_noted.as_ref()!=Some(&active) {
-            self.visit_noted=Some(active.clone());
-            self.visits.visit(&active,crate::now_ms());
-            if let Some(store)=&self.workspaces { let _=store.set_value(VISITS,&self.visits.to_text()); }
+        if self.stays.tick(&active,crate::now_ms()) {
+            if let Some(store)=&self.workspaces { let _=store.set_value(VISITS,&self.stays.visits.to_text()); }
         }
         current.retain(|p|p!=&active); current.insert(0,active);
         let mut next=current.clone();

@@ -286,7 +286,9 @@ impl Explorer {
     }
 
     pub(crate) fn is_selected(&self, path: &Path) -> bool {
-        self.selected.as_deref().is_some_and(|selected| selected.as_os_str() == path.as_os_str()) || self.marked.contains(path)
+        // Asked per visible row only: a full path comparison is cheap here and
+        // treats `C:/a` and `C:\\a` alike (a path typed in the address bar).
+        self.selected.as_deref() == Some(path) || self.marked.contains(path)
     }
 
     /// Paths of `folder` in display order.
