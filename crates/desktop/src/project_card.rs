@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 
 use filemanager_core::browser;
 use filemanager_core::history::{self, Event};
+use filemanager_core::inbox::{self, Entry, Kind};
 use filemanager_core::panes::GroupId;
 use filemanager_core::passport::{self, Passport};
 use filemanager_core::project_card::{self as model, Card, Line};
-use gpui::{AnyElement, AppContext, Context, Div, ElementId, Entity, Focusable, Stateful, Window, div, prelude::*, px};
+use gpui::{AnyElement, AppContext, Context, Div, ElementId, Entity, Focusable, ObjectFit, Stateful, Window, div, img, prelude::*, px};
 use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_component::tooltip::Tooltip;
 
@@ -56,6 +57,9 @@ pub(crate) struct OpenCard {
     /// not found. Read off the window's thread; a link not looked at yet
     /// is drawn by its name.
     kinds: HashMap<PathBuf, Option<bool>>,
+    /// What other programs sent: `None` while it is read, an error text
+    /// when the inbox cannot be read (a share offline).
+    inbox: Option<Result<Vec<Entry>, String>>,
     request: u64,
 }
 
@@ -106,7 +110,7 @@ impl Explorer {
         let saved = self.workspaces.as_ref().and_then(|store| store.value(&model::storage_key(&name)).ok().flatten());
         self.cards.requests = self.cards.requests.wrapping_add(1);
         self.cards.open = Some(OpenCard { group, name, card: Card::load(saved.as_deref()), editing: None, doomed: None,
-            passport: PassportState::Loading, changes: None, kinds: HashMap::new(), request: self.cards.requests });
+            passport: PassportState::Loading, changes: None, kinds: HashMap::new(), inbox: None, request: self.cards.requests });
         self.context_menu = None;
         self.focus_group(group, cx);
         // Nothing stays chosen in the list hidden under the card.
@@ -114,6 +118,78 @@ impl Explorer {
         self.confirm_recycle = None; self.address_editing = None; self.filter_open = false;
         self.close_search();
         self.reload_project_card(cx);
+        self.watch_project_inbox(cx);
+        cx.notify();
+    }
+
+    /// The project's inbox, as published for other programs.
+    fn card_inbox(&self) -> Option<PathBuf> {
+        let open = self.cards.open.as_ref()?;
+        self.registry.projects.get(&open.name).map(|published| published.project.inbox.clone())
+    }
+
+    /// Reads the inbox of the open card off the window's thread.
+    fn read_project_inbox(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.cards.open.as_ref().map(|open| open.name.clone()) else { return };
+        let Some(folder) = self.card_inbox() else { return };
+        let task = cx.background_spawn(async move {
+            match inbox::read(&folder) {
+                Ok(entries) => Ok(entries),
+                // Nothing sent yet: the folder appears with the first entry.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(error) => Err(error.to_string()),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let entries = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(open) = this.cards.open.as_mut().filter(|open| open.name == name) else { return };
+                if open.inbox.as_ref() != Some(&entries) { open.inbox = Some(entries); cx.notify(); }
+            });
+        }).detach();
+    }
+
+    /// While the card is open its inbox is looked at every few seconds:
+    /// a screenshot sent from Notch shows up by itself.
+    fn watch_project_inbox(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.cards.open.as_ref().map(|open| open.request) else { return };
+        let name = self.cards.open.as_ref().map(|open| open.name.clone()).unwrap_or_default();
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+            let alive = this.update(cx, |this, cx| {
+                if !this.cards.open.as_ref().is_some_and(|open| open.name == name) { return false; }
+                let _ = request;
+                this.read_project_inbox(cx);
+                true
+            }).unwrap_or(false);
+            if !alive { break; }
+        }).detach();
+    }
+
+    /// `projects.json` was written again: the inbox may have moved.
+    pub(crate) fn project_card_registry_changed(&mut self, cx: &mut Context<Self>) {
+        if self.cards.open.is_some() { self.read_project_inbox(cx); }
+    }
+
+    /// «В заметки»: the entry's caption, text or link goes to the end of
+    /// the first section of the card.
+    fn inbox_to_notes(&mut self, entry: Entry, cx: &mut Context<Self>) {
+        let Some(open) = self.cards.open.as_mut() else { return };
+        if open.editing.is_some() { return; }
+        let mut lines = vec![format!("{} — {}", entry.when(), entry.title())];
+        if let Some(text) = entry.sidecar.text.as_deref().filter(|_| entry.sidecar.kind == Kind::Text) {
+            lines.extend(text.lines().map(str::to_string).filter(|line| !line.trim().is_empty() && *line.trim() != entry.title()));
+        }
+        if let Some(image) = &entry.image { lines.push(image.display().to_string()); }
+        if let Some(file) = &entry.sidecar.file { lines.push(file.display().to_string()); }
+        if open.card.sections.is_empty() && open.card.add("Заметки").is_none() { return; }
+        let (title, text) = (open.card.sections[0].title.clone(), open.card.sections[0].text.clone());
+        let joined = if text.trim().is_empty() { lines.join("\n") } else { format!("{text}\n\n{}", lines.join("\n")) };
+        open.card.set(0, &title, &joined);
+        let section = open.card.sections[0].title.clone();
+        self.store_card();
+        self.look_at_card_links(cx);
+        self.status = format!("Добавлено в «{section}»");
         cx.notify();
     }
 
@@ -329,6 +405,40 @@ impl Explorer {
             .on_click(cx.listener(move |this, _, _, cx| this.open_card_link(target.clone(), cx)))
     }
 
+    /// One thing another program sent: picture, caption, when and from where.
+    fn inbox_row(&self, index: usize, entry: &Entry, busy: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let source = [entry.sidecar.source.app.as_str(), entry.sidecar.source.window.as_str()]
+            .into_iter().filter(|part| !part.trim().is_empty()).collect::<Vec<_>>().join(" · ");
+        let shown = entry.image.clone().unwrap_or_else(|| entry.sidecar_path.clone());
+        let mut text = div().flex_1().min_w_0().flex().flex_col().gap_0p5()
+            .child(div().text_size(px(13.)).child(entry.title()))
+            .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                .child(if source.is_empty() { entry.when() } else { format!("{} · {source}", entry.when()) }));
+        if entry.sidecar.kind == Kind::Text {
+            // Without the line already shown as the title.
+            let title = entry.title();
+            let preview: Vec<&str> = entry.sidecar.text.as_deref().unwrap_or_default().lines()
+                .filter(|line| !line.trim().is_empty() && line.trim() != title).take(4).collect();
+            text = text.child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(preview.join("\n")));
+        }
+        if let Some(file) = &entry.sidecar.file {
+            text = text.child(self.link_row(("card-inbox-file", index), file, None, cx));
+        }
+        let (notes, reveal) = (entry.clone(), shown.clone());
+        div().id(("card-inbox", index)).flex().items_start().gap_3().py_1()
+            .when_some(entry.image.clone(), |row, picture| row.child(div().id(("card-inbox-image", index)).flex_none().w(px(140.)).h(px(84.))
+                .rounded(px(4.)).overflow_hidden().border_1().border_color(rgb(BORDER)).cursor_pointer()
+                .child(img(picture.clone()).size_full().object_fit(ObjectFit::Contain))
+                .tooltip(|window, cx| Tooltip::new("Открыть снимок").build(window, cx))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_outside(&picture, cx)))))
+            .child(text)
+            .child(div().flex_none().flex().items_center().gap_1()
+                .child(icon_button(("card-inbox-notes", index), "fm/file-text.svg", "В заметки: добавить в первый раздел карточки", false, !busy)
+                    .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.inbox_to_notes(notes.clone(), cx)))))
+                .child(icon_button(("card-inbox-reveal", index), "fm/folder-fill.svg", "Показать в папке входящих (там можно переместить или удалить)", false, true)
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_card_link(reveal.clone(), cx)))))
+    }
+
     /// The card in place of the pane's address row and file list.
     pub(crate) fn project_card_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(open) = self.cards.open.as_ref() else { return div().into_any_element() };
@@ -392,10 +502,43 @@ impl Explorer {
             .child(heading(title.into()))
             .child(icon_button(gpui::SharedString::from(format!("card-hide-{key}")), "fm/eye-off.svg", "Скрыть раздел", false, !busy)
                 .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.change_card(|card| card.set_hidden(key, true), cx)))));
+        let published = self.registry.projects.get(&open.name).cloned();
+        if !open.card.is_hidden("inbox") {
+            let mut body = block().child(built_in("inbox", "Входящие", cx));
+            match (&published, &open.inbox) {
+                (None, _) | (_, None) => body = body.child(dim("Читаются…".into())),
+                (Some(_), Some(Err(error))) => body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(format!("Папка входящих недоступна: {error}"))),
+                (Some(published), Some(Ok(entries))) if entries.is_empty() => body = body.child(dim(format!(
+                    "Пока пусто. В Notch: снимок, текст или файл → «В проект…» → «{}». Записи попадут в {}.",
+                    open.name, published.project.inbox.display()))),
+                (Some(_), Some(Ok(entries))) => for (index, entry) in entries.iter().take(40).enumerate() {
+                    body = body.child(self.inbox_row(index, entry, busy, cx));
+                },
+            }
+            page = page.child(body);
+        }
         if !open.card.is_hidden("folders") {
             let mut body = block().child(built_in("folders", "Папки проекта", cx));
+            let name = open.name.clone();
+            if let Some(published) = &published {
+                let root_line = match &published.project.root {
+                    Some(root) => format!("Папка объекта: {} — {}", root.display(), published.source.label()),
+                    None => format!("Папка объекта {}", published.source.label()),
+                };
+                let chosen = published.source == crate::inbox::RootSource::Chosen;
+                body = body.child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                    .child(div().flex_1().min_w_0().child(root_line))
+                    .when(chosen, |row| row.child(div().id("card-root-reset").px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
+                        .hover(|style| style.bg(rgb(HOVER))).child("определять самой")
+                        .on_click(cx.listener({ let name = name.clone(); move |this, _, _, cx| this.set_project_root(&name, None, cx) })))));
+            }
             for (index, (title, path)) in self.project_folders(group).into_iter().enumerate() {
-                body = body.child(self.link_row(("card-folder", index), &path, Some(title), cx));
+                let is_root = published.as_ref().and_then(|published| published.project.root.as_ref()) == Some(&path);
+                let (name, root) = (name.clone(), path.clone());
+                body = body.child(div().flex().items_center().gap_1()
+                    .child(self.link_row(("card-folder", index), &path, Some(title), cx).flex_1().min_w_0())
+                    .when(!is_root, |row| row.child(icon_button(("card-root", index), "fm/home.svg", "Сделать папкой объекта: сюда будут приходить входящие", false, !busy)
+                        .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.set_project_root(&name, Some(root.clone()), cx)))))));
             }
             page = page.child(body);
         }

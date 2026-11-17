@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Sections Papka fills in itself; the user can only hide or show them.
-pub const BUILT_IN: [(&str, &str); 3] = [
+pub const BUILT_IN: [(&str, &str); 4] = [
+    ("inbox", "Входящие"),
     ("folders", "Папки проекта"),
     ("passport", "Паспорт объекта"),
     ("changes", "Последние изменения"),

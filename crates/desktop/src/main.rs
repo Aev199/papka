@@ -30,6 +30,7 @@ mod transfers;
 mod transfer_panel;
 mod shell_actions;
 mod project_card;
+mod inbox;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -222,6 +223,8 @@ struct Explorer {
     context_menu: Option<ContextMenu>,
     /// The project card shown in a pane in place of its folders.
     cards: project_card::ProjectCards,
+    /// Projects as published for other programs (`projects.json`).
+    registry: inbox::Registry,
     /// The window's handle, for menus and dialogs Windows itself shows.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Option<isize>,
@@ -514,6 +517,7 @@ impl Explorer {
             transfers: Default::default(),
             context_menu: None,
             cards: project_card::ProjectCards::new(window, cx),
+            registry: inbox::Registry { due: true, ..Default::default() },
             hwnd: None,
             right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,

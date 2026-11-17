@@ -18,6 +18,7 @@ pub mod shell_verb;
 pub mod shell_items;
 pub mod passport;
 pub mod project_card;
+pub mod inbox;
 pub mod update;
 
 pub mod workspace;

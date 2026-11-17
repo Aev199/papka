@@ -56,6 +56,7 @@ impl Explorer {
                 this.remember_recent(cx);
                 if this.session_restore_error.is_some() {return;}
                 let state=format!("{:?}",this.browser);
+                if this.registry.due {this.publish_projects(cx);}
                 if state!=this.saved_layout { match this.persist_workspace() {
                     Ok(())=>this.saved_layout=state,
                     Err(error)=>{this.status=format!("Сеанс не сохранён: {error}");cx.notify();}
@@ -118,6 +119,8 @@ impl Explorer {
         self.refresh_workspace_names();cx.notify();
     }
     pub(crate) fn refresh_workspace_names(&mut self) {
+        // Other programs see the list soon after it changes.
+        self.registry.due=true;
         self.workspace_names=self.workspaces.as_ref().and_then(|store|store.list().ok()).unwrap_or_default()
             .into_iter().filter(|name|filemanager_core::projects::valid_name(name)).collect();
     }
