@@ -15,6 +15,7 @@ mod folder_sizes;
 mod quick_look;
 mod compare;
 mod spring;
+mod edge_scroll;
 mod search_panel;
 mod updates;
 mod icons;
@@ -237,6 +238,7 @@ struct Explorer {
     drag_paths: Vec<PathBuf>,
     spring: Option<spring::Spring>,
     spring_generation: u64,
+    edge_scroll: edge_scroll::EdgeScroll,
     /// A system drag to another program is running.
     #[cfg_attr(not(windows), allow(dead_code))]
     dragging_out: bool,
@@ -519,7 +521,7 @@ impl Explorer {
             cards: project_card::ProjectCards::new(window, cx),
             registry: inbox::Registry { due: true, ..Default::default() },
             hwnd: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, edge_scroll: Default::default(), dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),
@@ -596,7 +598,14 @@ impl Explorer {
             operation_alerts: Vec::new(),
             watcher: None, live_watch_started: false, live_watch_error: None,
             watched_root: None, history_paused: false, unwatched_folders: Default::default(), confirm_recycle: None,
-            status: prefs_error.unwrap_or(operation_status),
+            status: prefs_error.unwrap_or_else(|| {
+                // The last run ended on an error: said once, with where the log is.
+                match filemanager_core::guard::take_pending(&filemanager_core::path_utils::app_data_dir()) {
+                    Some(crash) => format!("Прошлый сеанс закрылся из-за ошибки ({}). Подробности: crash.log в папке профиля",
+                        crash.split(" · ").nth(2).unwrap_or("без описания")),
+                    None => operation_status,
+                }
+            }),
             search_input, address_input, comment_input, author_input,
             search: search_panel::SearchState {
                 depth: search_depth,
@@ -1057,6 +1066,18 @@ impl Explorer {
             cx.notify();
             return;
         }
+        // A folder and something inside it: the folder brings it along.
+        // A move into the folder the item is in: nothing to do for it.
+        let pruned = transfer.zone.prune_for(&transfer.target, !transfer.copy);
+        let skipped = crate::transfers::pruned_note(&pruned);
+        if transfer.zone.items().is_empty() {
+            self.status = if pruned.nested.is_empty() { "Объекты уже находятся в этой папке".into() } else { skipped };
+            if transfer.restore_failed { for path in pruned.nested.iter().chain(&pruned.in_place) { let _ = self.zone.add(path); } }
+            cx.notify();
+            return;
+        }
+        if !skipped.is_empty() { self.status = skipped; }
+        let items = transfer.zone.items().to_vec();
         // Staged paths are canonical (\\?\C:\…), the pane's are not.
         if items.iter().all(|path| path.parent().is_some_and(|parent| filemanager_core::path_utils::same_path(parent, &transfer.target))) {
             if !transfer.copy {
@@ -1068,7 +1089,7 @@ impl Explorer {
             transfer.keep_both = true;
         }
         // A replacing transfer was already decided on (conflict dialog, sync).
-        let conflicts = if transfer.keep_both || transfer.replace { Vec::new() } else { transfer.zone.conflicts_in(&transfer.target) };
+        let conflicts = if transfer.keep_both || transfer.replace { Vec::new() } else { transfer.zone.conflict_details(&transfer.target) };
         if conflicts.is_empty() {
             self.execute_transfer(transfer, cx);
         } else {
@@ -1086,6 +1107,7 @@ impl Explorer {
                 self.status = "Отменено, файлы не изменены".into();
             }
             ConflictChoice::Skip => {
+                let conflicts: Vec<PathBuf> = conflicts.into_iter().map(|c| c.source).collect();
                 transfer.zone.remove(&conflicts);
                 if transfer.restore_failed {
                     for path in &conflicts {
@@ -1979,6 +2001,7 @@ fn main() {
     if let Some(code) = filemanager_core::preview_host::helper_main(&helper_args) {
         std::process::exit(code);
     }
+    filemanager_core::guard::install(filemanager_core::path_utils::app_data_dir());
     // Files rescued from archivers' drops (vendor/gpui_ce_windows): kept a
     // day in case a copy from them was still going, then removed.
     std::thread::spawn(|| {

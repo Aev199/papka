@@ -20,12 +20,14 @@ pub mod passport;
 pub mod project_card;
 pub mod inbox;
 pub mod update;
+pub mod guard;
 
 pub mod workspace;
 
 pub mod folder_copy;
 
 pub mod persistent_index;
+pub mod scan_policy;
 
 pub mod index_watch;
 

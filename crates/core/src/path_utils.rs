@@ -124,6 +124,15 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Whether `path` lies somewhere inside `folder` (not `folder` itself),
+/// with the same rules as [`same_path`].
+pub fn is_inside(path: &Path, folder: &Path) -> bool {
+    let (path, folder) = (normalize_extended_path(path), normalize_extended_path(folder));
+    let key = |p: &Path| if cfg!(windows) { PathBuf::from(p.to_string_lossy().to_lowercase()) } else { p.to_path_buf() };
+    let (path, folder) = (key(&path), key(&folder));
+    path != folder && path.starts_with(&folder)
+}
+
 /// Whether deleting here can go to the Windows Recycle Bin. Network shares
 /// and removable drives have none: Explorer deletes there permanently after
 /// asking, and so does the program.

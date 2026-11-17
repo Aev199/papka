@@ -56,8 +56,44 @@ fn word_score(word: &str, name: &str, text: &str) -> Option<i64> {
     if name.starts_with(word) { return Some(200 - name.chars().count() as i64 / 4); }
     if name.contains(word) { return Some(120 - name.chars().count() as i64 / 4); }
     if text.contains(word) { return Some(50); }
-    let mut letters = name.chars();
-    word.chars().all(|wanted| letters.any(|letter| letter == wanted)).then_some(20)
+    letters_score(word, name)
+}
+
+/// Letters of `word` found in order in `name`, scored by where they fall:
+/// on the starts of words ("жкс" in «ЖК Северный») and in runs score more
+/// than letters scattered through the middle. Between 1 and 110, below a
+/// name that contains the word whole.
+fn letters_score(word: &str, name: &str) -> Option<i64> {
+    const START: i64 = 16;
+    const RUN: i64 = 8;
+    const GAP: i64 = 3;
+    let wanted: Vec<char> = word.chars().collect();
+    let letters: Vec<char> = name.chars().collect();
+    if wanted.is_empty() || wanted.len() > letters.len() { return None; }
+    let starts: Vec<bool> = (0..letters.len()).map(|j| j == 0 || {
+        let before = letters[j - 1];
+        !before.is_alphanumeric() || (before.is_alphabetic() != letters[j].is_alphabetic())
+    }).collect();
+    // best[j]: the best score with the current letter of `word` at `name[j]`.
+    let none = i64::MIN / 2;
+    let mut best: Vec<i64> = (0..letters.len())
+        .map(|j| if letters[j] == wanted[0] { if starts[j] { START } else { 0 } } else { none })
+        .collect();
+    for &letter in &wanted[1..] {
+        let mut next = vec![none; letters.len()];
+        let mut earlier = none; // the best of best[k] for k < j - 1
+        for j in 1..letters.len() {
+            if j >= 2 { earlier = earlier.max(best[j - 2]); }
+            if letters[j] != letter { continue; }
+            let bonus = if starts[j] { START } else { 0 };
+            let run = if best[j - 1] > none { best[j - 1] + RUN } else { none };
+            let from = run.max(earlier - GAP);
+            if from > none { next[j] = from + bonus; }
+        }
+        best = next;
+    }
+    let top = *best.iter().max()?;
+    (top > none).then(|| (20 + top).clamp(1, 110))
 }
 
 /// Subfolders of `roots` down to `depth` levels, at most `limit` of them,
@@ -113,6 +149,22 @@ mod tests {
         assert_eq!(transliterate("proekt"), "проект");
         assert_eq!(transliterate("shchit"), "щит");
         assert_eq!(score("", project), Some(-(project.components().count() as i64)));
+    }
+
+    #[test]
+    fn letters_on_word_starts_beat_scattered_ones() {
+        // «ЖК Северный»: "жкс" takes the word starts, "жкй" ends inside a word.
+        let starts = letters_score("жкс", "жк северный").unwrap();
+        let scattered = letters_score("жкй", "жк северный").unwrap();
+        assert!(starts > scattered, "{starts} {scattered}");
+        // Initials of a long name rank it above a name the letters just occur in.
+        let initials = score("пзр", Path::new("/p/Пояснительная записка разделы")).unwrap();
+        let loose = score("пзр", Path::new("/p/Прозрачность")).unwrap();
+        assert!(initials > loose, "{initials} {loose}");
+        // Still below a name that holds the word whole.
+        assert!(letters_score("сев", "жк северный").unwrap() < 120);
+        assert_eq!(letters_score("яя", "я"), None);
+        assert_eq!(letters_score("ба", "аб"), None);
     }
 
     #[test]

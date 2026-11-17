@@ -16,8 +16,12 @@ fn read_u32(file: &mut File) -> io::Result<u32> {
     Ok(u32::from_le_bytes(bytes))
 }
 
-/// The drawing's preview picture.
+/// The drawing's preview picture. A damaged file is an error, never a crash.
 pub fn preview(path: &Path) -> io::Result<image::DynamicImage> {
+    crate::guard::catch("картинка чертежа", || read_preview(path))?
+}
+
+fn read_preview(path: &Path) -> io::Result<image::DynamicImage> {
     let mut file = File::open(path)?;
     let mut version = [0; 6];
     file.read_exact(&mut version)?;

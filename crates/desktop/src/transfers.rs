@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use filemanager_core::operations::{CopyControl, DropZone};
+use filemanager_core::operations::{Conflict, CopyControl, DropZone, Pruned};
 
 /// A copy or move waiting to run (or for the conflict dialog).
 pub(crate) struct Transfer {
@@ -65,6 +65,33 @@ pub(crate) fn is_cancellation(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::Interrupted || error.raw_os_error() == Some(1235)
 }
 
+/// What the conflict dialog says under a name: which side is newer and
+/// the two sizes, «переносимый новее · 10 Б, в папке 3 Б».
+pub(crate) fn conflict_note(conflict: &Conflict) -> String {
+    use filemanager_core::format::format_size;
+    let mut parts = Vec::new();
+    match conflict.incoming_newer() {
+        Some(true) => parts.push("переносимый новее".to_string()),
+        Some(false) => parts.push("в папке новее".to_string()),
+        None if conflict.source_modified.is_some() && conflict.existing_modified.is_some() => parts.push("даты совпадают".to_string()),
+        None => {}
+    }
+    match (conflict.source_size, conflict.existing_size) {
+        (Some(a), Some(b)) if a == b => parts.push(format!("оба {}", format_size(a))),
+        (Some(a), Some(b)) => parts.push(format!("{}, в папке {}", format_size(a), format_size(b))),
+        _ => {}
+    }
+    parts.join(" · ")
+}
+
+/// Status text for items a transfer left out, empty when none were.
+pub(crate) fn pruned_note(pruned: &Pruned) -> String {
+    let mut parts = Vec::new();
+    if !pruned.nested.is_empty() { parts.push(format!("вложенных в выбранные папки: {}", pruned.nested.len())); }
+    if !pruned.in_place.is_empty() { parts.push(format!("уже в этой папке: {}", pruned.in_place.len())); }
+    if parts.is_empty() { String::new() } else { format!("Пропущено — {}", parts.join(", ")) }
+}
+
 /// The errors as plain text, to paste into a message.
 pub(crate) fn failures_text(title: &str, failures: &[Failure]) -> String {
     let mut text = String::from(title);
@@ -94,7 +121,7 @@ pub(crate) struct Transfers {
     /// target and whether it was a copy, for «Повторить сбойные».
     pub(crate) retry: Option<(Vec<PathBuf>, PathBuf, bool)>,
     /// Transfer paused on name conflicts, with the conflicting items.
-    pub(crate) pending: Option<(Transfer, Vec<PathBuf>)>,
+    pub(crate) pending: Option<(Transfer, Vec<Conflict>)>,
     /// Asked for while another ran (or folders of a sync): started in turn.
     pub(crate) queue: VecDeque<Transfer>,
 }
@@ -192,11 +219,39 @@ mod tests {
         assert_eq!(transfers.queue_note(), "");
     }
 
+    fn conflict(source: Option<u64>, existing: Option<u64>) -> Conflict {
+        Conflict { source: PathBuf::from("a/x"), source_size: source, existing_size: existing,
+            source_modified: None, existing_modified: None }
+    }
+
+    #[test]
+    fn conflict_note_names_the_newer_side_and_sizes() {
+        let now = std::time::SystemTime::now();
+        let mut c = conflict(Some(10), Some(3));
+        c.source_modified = Some(now);
+        c.existing_modified = Some(now - std::time::Duration::from_secs(60));
+        assert_eq!(conflict_note(&c), "переносимый новее · 10 Б, в папке 3 Б");
+        c.existing_modified = Some(now + std::time::Duration::from_secs(60));
+        c.existing_size = Some(10);
+        assert_eq!(conflict_note(&c), "в папке новее · оба 10 Б");
+        assert_eq!(conflict_note(&conflict(None, None)), "");
+    }
+
+    #[test]
+    fn pruned_note_counts_both_kinds() {
+        let mut pruned = Pruned::default();
+        assert_eq!(pruned_note(&pruned), "");
+        pruned.nested.push("a".into());
+        pruned.in_place.push("b".into());
+        pruned.in_place.push("c".into());
+        assert_eq!(pruned_note(&pruned), "Пропущено — вложенных в выбранные папки: 1, уже в этой папке: 2");
+    }
+
     #[test]
     fn an_open_conflict_dialog_holds_the_queue() {
         let mut transfers = Transfers::default();
         transfers.queue.push_back(transfer("b"));
-        transfers.pending = Some((transfer("a"), vec![PathBuf::from("a/x")]));
+        transfers.pending = Some((transfer("a"), vec![conflict(None, None)]));
         assert!(transfers.occupied());
         assert!(transfers.next().is_none());
         transfers.pending = None;

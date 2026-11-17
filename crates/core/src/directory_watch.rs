@@ -109,7 +109,7 @@ impl DirectoryWatch {
                 "Too many visible directories to watch (maximum 32)".into(),
             );
         }
-        let mut config = self.state.configuration.lock().unwrap();
+        let mut config = crate::guard::lock(&self.state.configuration);
         let same_journal = match (&config.journal, &journal) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (None, None) => true,
@@ -124,13 +124,13 @@ impl DirectoryWatch {
 
     /// Visible folders without notifications, for a quiet note in the UI.
     pub fn unwatched(&self) -> HashSet<PathBuf> {
-        self.state.unwatched.lock().unwrap().clone()
+        crate::guard::lock(&self.state.unwatched).clone()
     }
 
     /// Takes pending dirty flags atomically; subsequent events accumulate in
     /// a new batch even while the caller is scanning the previous one.
     pub fn drain(&self) -> WatchChanges {
-        let mut changes = self.state.changes.lock().unwrap();
+        let mut changes = crate::guard::lock(&self.state.changes);
         let revision = changes.history_revision;
         let result = std::mem::take(&mut *changes);
         changes.history_revision = revision;
@@ -145,7 +145,7 @@ impl Drop for DirectoryWatch {
 }
 
 fn report_error(state: &State, error: String) {
-    let mut changes = state.changes.lock().unwrap();
+    let mut changes = crate::guard::lock(&state.changes);
     changes.error = Some(error.chars().take(300).collect());
     changes.refresh_all = true;
 }
@@ -185,7 +185,7 @@ fn run(state: Arc<State>) {
             poll(&state, &config, &mut polled);
             next_poll = Instant::now() + POLL_INTERVAL.max(started.elapsed() * 10);
         }
-        let desired = state.configuration.lock().unwrap().clone();
+        let desired = crate::guard::lock(&state.configuration).clone();
         if desired.generation != config.generation {
             let roots: HashSet<_> = desired.directories.iter().cloned().collect();
             for old in watched.difference(&roots) {
@@ -204,9 +204,9 @@ fn run(state: Arc<State>) {
             }
             watched.retain(|path| roots.contains(path));
             polled.retain(|path, _| roots.contains(path));
-            state.unwatched.lock().unwrap().retain(|path| roots.contains(path));
+            crate::guard::lock(&state.unwatched).retain(|path| roots.contains(path));
             {
-                let mut changes = state.changes.lock().unwrap();
+                let mut changes = crate::guard::lock(&state.changes);
                 changes.ready.retain(|path| roots.contains(path));
                 changes.directories.retain(|path| roots.contains(path));
                 changes.paths.retain(|path| {
@@ -219,7 +219,7 @@ fn run(state: Arc<State>) {
                         // The first read becomes the baseline on the next poll.
                         polled.insert(root.clone(), None);
                         next_poll = Instant::now();
-                        let mut changes = state.changes.lock().unwrap();
+                        let mut changes = crate::guard::lock(&state.changes);
                         changes.ready.insert(root.clone());
                         changes.directories.insert(root);
                     }
@@ -227,16 +227,16 @@ fn run(state: Arc<State>) {
                 }
                 match watcher.watch(&root, RecursiveMode::NonRecursive) {
                     Ok(()) => {
-                        state.unwatched.lock().unwrap().remove(&root);
+                        crate::guard::lock(&state.unwatched).remove(&root);
                         watched.insert(root.clone());
-                        let mut changes = state.changes.lock().unwrap();
+                        let mut changes = crate::guard::lock(&state.changes);
                         changes.ready.insert(root.clone());
                         changes.directories.insert(root);
                     }
                     // Retried only when the visible folders change, so a
                     // folder without access never causes a refresh loop.
                     Err(_) => {
-                        state.unwatched.lock().unwrap().insert(root);
+                        crate::guard::lock(&state.unwatched).insert(root);
                     }
                 }
             }
@@ -307,7 +307,7 @@ fn run(state: Arc<State>) {
         }
         // Publish only after all journal transactions above have completed,
         // so an inspector refresh cannot read the pre-save SQLite snapshot.
-        let mut changes = state.changes.lock().unwrap();
+        let mut changes = crate::guard::lock(&state.changes);
         changes.history_revision = changes.history_revision.wrapping_add(changed);
         for path in paths {
             if config
@@ -359,7 +359,7 @@ fn poll(state: &State, config: &Configuration, polled: &mut HashMap<PathBuf, Opt
                 }
             }
         }
-        let mut changes = state.changes.lock().unwrap();
+        let mut changes = crate::guard::lock(&state.changes);
         changes.history_revision = changes.history_revision.wrapping_add(observed);
         changes.directories.insert(root.clone());
         for path in paths {
@@ -565,7 +565,7 @@ mod tests {
         }
         let end = Instant::now() + Duration::from_secs(5);
         loop {
-            if watch.state.changes.lock().unwrap().error.is_some() {
+            if crate::guard::lock(&watch.state.changes).error.is_some() {
                 break;
             }
             assert!(Instant::now() < end, "overflow was silently discarded");

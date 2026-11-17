@@ -1332,12 +1332,15 @@ impl Explorer {
             let count = indices.len();
             let list_id = SharedString::from(format!("list-{}-{}", side.0, folder.display()));
             let background_marquee_folder=folder.clone();
+            // Dragging near the top or bottom edge scrolls the list.
+            let edge_handle = handle.0.borrow().base_handle.clone();
+            let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {
                 // Tiles: each list item is a row of them.
                 let per_row = crate::thumbs::columns(self.pane_width_for(side));
                 self.thumb_columns.insert(side, per_row);
                 let rows = count.div_ceil(per_row);
-                return column.child(div().flex_1().min_h_0().child(
+                return column.child(div().flex_1().min_h_0().on_mouse_move(edge_listener).child(
                     uniform_list(list_id, rows, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
                         range.map(|row| {
                             let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
@@ -1353,7 +1356,7 @@ impl Explorer {
                 )).into_any_element();
             }
             column = column.child(
-                div().flex_1().min_h_0().child(
+                div().flex_1().min_h_0().on_mouse_move(edge_listener).child(
                     uniform_list(list_id, count, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
                         range.map(|position| {
                             let entry = &listing.entries[indices[position]];
@@ -2809,13 +2812,18 @@ impl Explorer {
     fn conflict_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (transfer, conflicts) = self.transfers.pending.as_ref()?;
         let recycle = filemanager_core::path_utils::has_recycle_bin(&transfer.target);
-        let names: Vec<String> = conflicts.iter().take(4).map(|p| browser::display_name(p)).collect();
-        let more = conflicts.len().saturating_sub(names.len());
+        let shown = conflicts.len().min(4);
+        let more = conflicts.len() - shown;
         let mut list = div().flex().flex_col().gap_1().p_2().rounded(px(4.)).bg(rgb(SURFACE))
             .border_1().border_color(rgb(BORDER)).text_size(px(12.));
-        for name in names {
+        for conflict in &conflicts[..shown] {
+            let note = crate::transfers::conflict_note(conflict);
+            let folder = conflict.source_size.is_none() && conflict.existing_size.is_none();
             list = list.child(div().flex().items_center().gap_2()
-                .child(small_icon("fm/file.svg", TEXT_MUTED)).child(div().truncate().child(name)));
+                .child(small_icon(if folder { "fm/folder-fill.svg" } else { "fm/file.svg" }, TEXT_MUTED))
+                .child(div().flex().flex_col().min_w_0()
+                    .child(div().truncate().child(browser::display_name(&conflict.source)))
+                    .when(!note.is_empty(), |d| d.child(div().truncate().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(note)))));
         }
         if more > 0 {
             list = list.child(div().text_color(rgb(TEXT_DIM)).child(format!("и ещё {more}")));
@@ -3008,6 +3016,7 @@ impl Render for Explorer {
             .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,window,cx| {
                 // Root runs after rows and columns: they have claimed the target.
                 this.spring_settle();
+                this.edge_scroll_settle();
                 if let Some(drag) = this.right_drag.as_mut() {
                     if event.pressed_button == Some(MouseButton::Right) {
                         if drag.active && outside_window(event.position, window) {

@@ -23,10 +23,12 @@ impl SearchIndex {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Choose an existing directory and a nonzero limit"));
         }
         let mut result = Self { root: root.to_owned(), ..Default::default() };
+        let policy = crate::scan_policy::ScanPolicy::for_root(root);
         for entry in WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
             !e.file_name().to_str().is_some_and(|s| {
                 [".git", ".svn", "node_modules", "target"].contains(&s)
-            })
+            }) && !(e.depth() > 0 && e.file_type().is_dir()
+                && (crate::scan_policy::ScanPolicy::skips_name(&e.file_name().to_string_lossy()) || policy.skips(e.path())))
         }) {
             // A permission-denied subfolder must not discard every result
             // found so far. Keep the rest of the index usable.

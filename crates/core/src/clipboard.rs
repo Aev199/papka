@@ -174,12 +174,12 @@ mod platform {
     static FILES: Mutex<Option<ClipboardFiles>> = Mutex::new(None);
 
     pub fn write(files: &ClipboardFiles) -> io::Result<()> {
-        *FILES.lock().unwrap() = Some(files.clone());
+        *crate::guard::lock(&FILES) = Some(files.clone());
         Ok(())
     }
 
     pub fn read() -> io::Result<Option<ClipboardFiles>> {
-        Ok(FILES.lock().unwrap().clone())
+        Ok(crate::guard::lock(&FILES).clone())
     }
 }
 

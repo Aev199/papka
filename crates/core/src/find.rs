@@ -290,7 +290,6 @@ pub struct Progress {
     pub truncated: bool,
 }
 
-const SKIPPED: &[&str] = &["$recycle.bin", "system volume information", ".git", ".svn", ".hg"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
@@ -319,9 +318,9 @@ impl Options {
 }
 
 /// Folder to descend into: not a link, junction or system folder.
-fn descend(entry: &fs::DirEntry, file_type: fs::FileType) -> bool {
+fn descend(entry: &fs::DirEntry, file_type: fs::FileType, policy: &crate::scan_policy::ScanPolicy) -> bool {
     if !file_type.is_dir() || file_type.is_symlink() { return false; }
-    if SKIPPED.contains(&entry.file_name().to_string_lossy().to_lowercase().as_str()) { return false; }
+    if crate::scan_policy::ScanPolicy::skips_name(&entry.file_name().to_string_lossy()) || policy.skips(&entry.path()) { return false; }
     // Junctions loop back into the tree; Explorer's search skips them too.
     // The attributes come with the directory listing, no extra request.
     #[cfg(windows)]
@@ -344,6 +343,7 @@ struct Walk<'a> {
     by_text: Query,
     phrase: Option<String>,
     depth: Option<usize>,
+    policy: crate::scan_policy::ScanPolicy,
     queue: Mutex<Queue>,
     wake: Condvar,
     stop: AtomicBool,
@@ -388,7 +388,7 @@ impl Walk<'_> {
                     if self.stopped() { break; }
                     let Ok(entry) = entry else { self.denied.fetch_add(1, Ordering::Relaxed); continue };
                     let Ok(file_type) = entry.file_type() else { continue };
-                    if descend(&entry, file_type) && self.depth.is_none_or(|depth| level < depth) {
+                    if descend(&entry, file_type, &self.policy) && self.depth.is_none_or(|depth| level < depth) {
                         subfolders.push((entry.path(), level + 1));
                     }
                     if let Some(hit) = self.check(&entry, file_type) {
@@ -469,6 +469,7 @@ pub fn search(
     let walk = Walk {
         query, by_name, by_text, phrase,
         depth: query.depth.or(options.depth),
+        policy: crate::scan_policy::ScanPolicy::for_root(root),
         queue: Mutex::new(Queue { folders: vec![(root.to_path_buf(), 0)], busy: 0 }),
         wake: Condvar::new(),
         stop: AtomicBool::new(false),
