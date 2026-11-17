@@ -7,6 +7,7 @@
 //! previous EXE stays beside it as `<name>.old.exe` for one-click rollback.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,12 @@ use sha2::{Digest, Sha256};
 pub const REPOSITORY: &str = "Aev199/papka";
 pub const EXE_ASSET: &str = "Papka.exe";
 pub const MANIFEST_ASSET: &str = "latest.json";
+/// No Papka EXE comes near this; a longer answer is not one.
+pub const MAX_DOWNLOAD: u64 = 512 << 20;
+
+fn too_large() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "файл слишком велик для обновления Papka")
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Channel {
@@ -109,6 +116,21 @@ pub struct Update {
     pub exe_url: String,
     pub page: String,
     pub prerelease: bool,
+    pub origin: Origin,
+}
+
+/// Where an offered EXE comes from, and how far it can be trusted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// Downloaded by Papka from the release; checked against its SHA-256.
+    #[default]
+    Release,
+    /// A file from Downloads whose SHA-256 is the one published with the
+    /// release of its version.
+    DownloadedVerified,
+    /// A file from Downloads that could not be compared: GitHub is out of
+    /// reach. Only its name and version say it is Papka.
+    DownloadedUnverified,
 }
 
 /// Fetches a URL; the app passes WinHTTP, tests pass a stub.
@@ -121,7 +143,12 @@ pub fn releases_url() -> String {
 /// A newer version than `current` on `channel`, if there is one.
 pub fn check(current: &str, channel: Channel, fetch: Fetch) -> io::Result<Option<Update>> {
     let list = fetch(&releases_url(), &mut |_, _| {})?;
-    let Some(candidate) = pick_release(&list, channel)? else { return Ok(None) };
+    check_in(&list, current, channel, fetch)
+}
+
+/// `check` over a release list that is already fetched.
+pub fn check_in(list: &[u8], current: &str, channel: Channel, fetch: Fetch) -> io::Result<Option<Update>> {
+    let Some(candidate) = pick_release(list, channel)? else { return Ok(None) };
     if compare_versions(&candidate.version, current) != Ordering::Greater { return Ok(None); }
     let manifest: Manifest = serde_json::from_slice(&fetch(&candidate.manifest_url, &mut |_, _| {})?).map_err(io::Error::other)?;
     if compare_versions(&manifest.version, &candidate.version) != Ordering::Equal || manifest.sha256.len() != 64 {
@@ -135,7 +162,55 @@ pub fn check(current: &str, channel: Channel, fetch: Fetch) -> io::Result<Option
         exe_url: candidate.exe_url,
         page: candidate.page,
         prerelease: candidate.prerelease,
+        origin: Origin::Release,
     }))
+}
+
+/// The published release of exactly `version`, on any channel.
+fn release_of(list: &[u8], version: &str) -> io::Result<Option<Candidate>> {
+    let releases: Vec<GithubRelease> = serde_json::from_slice(list).map_err(io::Error::other)?;
+    Ok(releases.into_iter()
+        .filter(|release| !release.draft && release.tag_name != NEWEST_TAG
+            && compare_versions(&release.tag_name, version) == Ordering::Equal)
+        .find_map(|release| {
+            let url = |name: &str| release.assets.iter().find(|asset| asset.name == name).map(|asset| asset.browser_download_url.clone());
+            Some(Candidate {
+                exe_url: url(EXE_ASSET)?,
+                manifest_url: url(MANIFEST_ASSET)?,
+                version: release.tag_name.trim_start_matches(['v', 'V']).to_string(),
+                page: release.html_url,
+                prerelease: release.prerelease,
+            })
+        }))
+}
+
+/// Compares a file found in Downloads with the release of its version.
+/// `list` is GitHub's release list, or `None` when it could not be fetched.
+///
+/// The file is refused (`InvalidData`) when the releases can be read and
+/// either have no such version or publish another SHA-256 for it: a file
+/// that merely calls itself "Papka 9.9" is not an update. Without the
+/// network the file is offered as `DownloadedUnverified`, and the interface
+/// says so.
+pub fn vet_downloaded(mut found: Update, list: Option<&[u8]>, fetch: Fetch) -> io::Result<Update> {
+    found.origin = Origin::DownloadedUnverified;
+    let Some(list) = list else { return Ok(found) };
+    let Ok(release) = release_of(list, &found.version) else { return Ok(found) };
+    let Some(release) = release else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+            format!("версии {} нет среди выпусков Papka — файл не установлен", found.version)));
+    };
+    let Ok(manifest) = fetch(&release.manifest_url, &mut |_, _| {})
+        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).map_err(io::Error::other)) else { return Ok(found) };
+    if !manifest.sha256.trim().eq_ignore_ascii_case(&found.sha256) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+            format!("файл версии {} отличается от опубликованного выпуска — он не установлен", found.version)));
+    }
+    found.origin = Origin::DownloadedVerified;
+    found.commit = manifest.commit;
+    found.notes = manifest.notes;
+    found.prerelease = release.prerelease;
+    Ok(found)
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -280,7 +355,28 @@ pub fn downloads_dir() -> Option<PathBuf> {
 /// The newest `Papka*.exe` in `folder` (browsers add " (1)" to repeated
 /// downloads) that is newer than `current`, with its version.
 pub fn find_downloaded(folder: &Path, current: &str, version_of: &dyn Fn(&Path) -> Option<String>) -> Option<(PathBuf, String)> {
-    fs::read_dir(folder).ok()?
+    downloaded_candidates(folder, current, version_of).into_iter().next()
+}
+
+/// A file as it was when looked at: a refused download is not compared
+/// again (nor GitHub asked again) until it changes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FileStamp {
+    pub path: PathBuf,
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+pub fn stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(FileStamp { path: path.to_path_buf(), len: metadata.len(), modified: metadata.modified().ok() })
+}
+
+/// Every `Papka*.exe` in `folder` newer than `current`, newest first: a
+/// refused file must not hide a genuine one behind it.
+pub fn downloaded_candidates(folder: &Path, current: &str, version_of: &dyn Fn(&Path) -> Option<String>) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
+    let mut found: Vec<(PathBuf, String)> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -289,11 +385,52 @@ pub fn find_downloaded(folder: &Path, current: &str, version_of: &dyn Fn(&Path) 
         })
         .filter_map(|path| version_of(&path).map(|version| (path, version)))
         .filter(|(_, version)| compare_versions(version, current) == Ordering::Greater)
-        .max_by(|a, b| compare_versions(&a.1, &b.1))
+        .collect();
+    found.sort_by(|a, b| compare_versions(&b.1, &a.1).then_with(|| a.0.cmp(&b.0)));
+    found
+}
+
+/// The files in Downloads still worth a look: newer than `current` and not
+/// refused before in their present state.
+pub fn fresh_candidates(folder: &Path, current: &str, version_of: &dyn Fn(&Path) -> Option<String>,
+    refused: &HashSet<FileStamp>) -> Vec<(PathBuf, String)> {
+    downloaded_candidates(folder, current, version_of).into_iter()
+        .filter(|(path, _)| stamp(path).is_none_or(|stamp| !refused.contains(&stamp)))
+        .collect()
+}
+
+/// What a look at Downloads found.
+#[derive(Debug, Default)]
+pub struct DownloadedOffer {
+    /// The first file (newest first) that passes `vet_downloaded`, or why
+    /// the newest one was refused.
+    pub offer: Option<io::Result<Update>>,
+    /// Files refused for good in their present state: another version than
+    /// published, or not Papka at all.
+    pub refused: Vec<FileStamp>,
+}
+
+pub fn downloaded_offer(folder: &Path, current: &str, version_of: &dyn Fn(&Path) -> Option<String>,
+    list: Option<&[u8]>, fetch: Fetch, refused: &HashSet<FileStamp>) -> DownloadedOffer {
+    let mut result = DownloadedOffer::default();
+    let mut refusal = None;
+    for (path, version) in fresh_candidates(folder, current, version_of, refused).into_iter().take(5) {
+        let checked = downloaded_update(&path, &version).and_then(|found| vet_downloaded(found, list, fetch));
+        match checked {
+            Ok(update) => { result.offer = Some(Ok(update)); return result; }
+            Err(error) => {
+                if error.kind() == io::ErrorKind::InvalidData { result.refused.extend(stamp(&path)); }
+                refusal.get_or_insert(error);
+            }
+        }
+    }
+    result.offer = refusal.map(Err);
+    result
 }
 
 /// An update offered from a file the browser downloaded.
 pub fn downloaded_update(path: &Path, version: &str) -> io::Result<Update> {
+    if fs::metadata(path)?.len() > MAX_DOWNLOAD { return Err(too_large()); }
     let bytes = fs::read(path)?;
     Ok(Update {
         version: version.to_string(),
@@ -303,6 +440,7 @@ pub fn downloaded_update(path: &Path, version: &str) -> io::Result<Update> {
         exe_url: path.to_string_lossy().into_owned(),
         page: path.parent().map(|parent| parent.to_string_lossy().into_owned()).unwrap_or_default(),
         prerelease: false,
+        origin: Origin::DownloadedUnverified,
     })
 }
 
@@ -311,12 +449,14 @@ pub fn get(location: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Re
     if location.starts_with("https://") { return fetch(location, progress); }
     let mut file = fs::File::open(location)?;
     let total = file.metadata().ok().map(|metadata| metadata.len());
+    if total.is_some_and(|total| total > MAX_DOWNLOAD) { return Err(too_large()); }
     let mut body = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
     let mut buffer = vec![0u8; 256 * 1024];
     loop {
         let read = io::Read::read(&mut file, &mut buffer)?;
         if read == 0 { break; }
         body.extend_from_slice(&buffer[..read]);
+        if body.len() as u64 > MAX_DOWNLOAD { return Err(too_large()); }
         progress(body.len() as u64, total);
     }
     Ok(body)
@@ -443,6 +583,7 @@ fn winhttp_get(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Res
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("сервер ответил {status}"))),
         }
         let total = number(WINHTTP_QUERY_CONTENT_LENGTH).map(u64::from);
+        if total.is_some_and(|total| total > MAX_DOWNLOAD) { return Err(too_large()); }
         let mut body = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
         let mut buffer = vec![0u8; 64 * 1024];
         loop {
@@ -452,6 +593,7 @@ fn winhttp_get(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Res
             }
             if read == 0 { break; }
             body.extend_from_slice(&buffer[..read as usize]);
+            if body.len() as u64 > MAX_DOWNLOAD { return Err(too_large()); }
             progress(body.len() as u64, total);
         }
         Ok(body)
@@ -504,7 +646,10 @@ fn powershell_get(url: &str) -> io::Result<Vec<u8>> {
         .creation_flags(CREATE_NO_WINDOW)
         .output();
     let result = match output {
-        Ok(output) if output.status.success() => fs::read(&target),
+        Ok(output) if output.status.success() => match fs::metadata(&target) {
+            Ok(metadata) if metadata.len() > MAX_DOWNLOAD => Err(too_large()),
+            _ => fs::read(&target),
+        },
         Ok(output) => {
             let error_file = PathBuf::from(format!("{}.err", target.to_string_lossy()));
             let text = fs::read_to_string(&error_file).map(|text| text.trim_start_matches('\u{feff}').trim().to_string())
@@ -525,6 +670,7 @@ pub fn fetch(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Resul
     if !output.status.success() {
         return Err(io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_string()));
     }
+    if output.stdout.len() as u64 > MAX_DOWNLOAD { return Err(too_large()); }
     progress(output.stdout.len() as u64, Some(output.stdout.len() as u64));
     Ok(output.stdout)
 }
@@ -631,6 +777,70 @@ mod tests {
         assert_eq!((found.version.as_str(), found.notes.as_slice(), found.exe_url.as_str()), ("0.1.45", &["Поиск".to_string()][..], "e45"));
         assert!(check("0.1.45", Channel::Beta, &stub(manifest)).unwrap().is_none());
         assert!(check("0.1.43", Channel::Stable, &stub(manifest)).is_err(), "manifest of another version is refused");
+    }
+
+    /// A release list and manifest for the file `bytes` published as 0.1.48.
+    fn published(bytes: &[u8]) -> impl Fn(&str, &mut dyn FnMut(u64, Option<u64>)) -> io::Result<Vec<u8>> {
+        let manifest = format!(r#"{{"version":"0.1.48","commit":"abc","sha256":"{}","notes":["Очередь"]}}"#, sha256_hex(bytes));
+        move |url, _| if url == "m48" { Ok(manifest.clone().into_bytes()) } else { Err(io::Error::other("нет сети")) }
+    }
+    const LIST_48: &str = r#"[{"tag_name":"v0.1.48","html_url":"h48","draft":false,"prerelease":true,
+        "assets":[{"name":"Papka.exe","browser_download_url":"e48"},{"name":"latest.json","browser_download_url":"m48"}]}]"#;
+
+    #[test]
+    fn a_downloaded_file_is_compared_with_its_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Papka.exe");
+        fs::write(&path, b"MZ genuine").unwrap();
+        let found = downloaded_update(&path, "0.1.48").unwrap();
+        assert_eq!(found.origin, Origin::DownloadedUnverified);
+
+        let verified = vet_downloaded(found.clone(), Some(LIST_48.as_bytes()), &published(b"MZ genuine")).unwrap();
+        assert_eq!((verified.origin, verified.notes.as_slice(), verified.prerelease),
+            (Origin::DownloadedVerified, &["Очередь".to_string()][..], true));
+
+        let other = vet_downloaded(found.clone(), Some(LIST_48.as_bytes()), &published(b"MZ another build"));
+        assert_eq!(other.unwrap_err().kind(), io::ErrorKind::InvalidData, "another file under the same version");
+
+        let mut invented = found.clone();
+        invented.version = "9.9.9".into();
+        assert!(vet_downloaded(invented, Some(LIST_48.as_bytes()), &published(b"MZ genuine")).is_err(), "no such release");
+
+        // No network at all, or the manifest cannot be read: offered, but marked.
+        assert_eq!(vet_downloaded(found.clone(), None, &published(b"MZ genuine")).unwrap().origin, Origin::DownloadedUnverified);
+        let offline = |_: &str, _: &mut dyn FnMut(u64, Option<u64>)| -> io::Result<Vec<u8>> { Err(io::Error::other("нет сети")) };
+        assert_eq!(vet_downloaded(found, Some(LIST_48.as_bytes()), &offline).unwrap().origin, Origin::DownloadedUnverified);
+    }
+
+    #[test]
+    fn a_refused_file_does_not_hide_a_genuine_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Papka-fake.exe"), b"MZ fake").unwrap();
+        fs::write(dir.path().join("Papka.exe"), b"MZ genuine").unwrap();
+        let version_of = |path: &Path| Some(if path.ends_with("Papka-fake.exe") { "9.9.9" } else { "0.1.48" }.to_string());
+        let candidates = downloaded_candidates(dir.path(), "0.1.46", &version_of);
+        assert_eq!(candidates.iter().map(|(_, version)| version.as_str()).collect::<Vec<_>>(), ["9.9.9", "0.1.48"]);
+
+        let none = HashSet::new();
+        let found = downloaded_offer(dir.path(), "0.1.46", &version_of, Some(LIST_48.as_bytes()), &published(b"MZ genuine"), &none);
+        let offer = found.offer.unwrap().unwrap();
+        assert_eq!((offer.version.as_str(), offer.origin), ("0.1.48", Origin::DownloadedVerified));
+        assert_eq!(found.refused.len(), 1, "the invented version is remembered");
+
+        fs::remove_file(dir.path().join("Papka.exe")).unwrap();
+        let refused = downloaded_offer(dir.path(), "0.1.46", &version_of, Some(LIST_48.as_bytes()), &published(b"MZ genuine"), &none);
+        assert!(refused.offer.unwrap().is_err(), "only the invented version is left");
+        assert!(downloaded_offer(dir.path(), "9.9.9", &version_of, None, &published(b""), &none).offer.is_none());
+
+        // Once refused, the file is not looked at again until it changes.
+        let known: HashSet<FileStamp> = refused.refused.into_iter().collect();
+        assert!(fresh_candidates(dir.path(), "0.1.46", &version_of, &known).is_empty());
+        assert!(downloaded_offer(dir.path(), "0.1.46", &version_of, None, &published(b""), &known).offer.is_none());
+        fs::write(dir.path().join("Papka-fake.exe"), b"MZ fake, downloaded again").unwrap();
+        assert_eq!(fresh_candidates(dir.path(), "0.1.46", &version_of, &known).len(), 1);
+        // Offline the file cannot be refused: nothing is remembered.
+        let offline = downloaded_offer(dir.path(), "0.1.46", &version_of, None, &published(b""), &none);
+        assert!(offline.refused.is_empty());
     }
 
     #[test]

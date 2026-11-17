@@ -52,7 +52,7 @@ impl Explorer {
         for group in &self.browser.groups {
             for tab in &group.tabs { folders.add(tab.active().path.clone(), "Вкладка"); }
         }
-        if let Some(listing) = self.directory_cache.get(&current) {
+        if let Some(listing) = self.dirs.cache.get(&current) {
             for entry in listing.entries.iter().filter(|entry| entry.is_directory && !entry.hidden) {
                 folders.add(entry.path.clone(), "Здесь");
             }

@@ -689,6 +689,9 @@ impl Receipt {
 #[derive(Debug, Default)]
 pub struct DropZone {
     sources: Vec<PathBuf>,
+    /// Staged items that were folders when added: the interface draws
+    /// their icon without asking the disk again on every frame.
+    folders: std::collections::HashSet<PathBuf>,
 }
 
 impl DropZone {
@@ -702,11 +705,17 @@ impl DropZone {
         if canonical.parent().is_none() {
             return Err(invalid("Cannot stage a filesystem root"));
         }
-        if !self.sources.contains(&canonical) { self.sources.push(canonical); }
+        if !self.sources.contains(&canonical) {
+            if canonical.is_dir() { self.folders.insert(canonical.clone()); } else { self.folders.remove(&canonical); }
+            self.sources.push(canonical);
+        }
         Ok(())
     }
 
-    pub fn clear(&mut self) { self.sources.clear(); }
+    /// Whether a staged item was a folder when it was added.
+    pub fn is_folder(&self, path: &Path) -> bool { self.folders.contains(path) }
+
+    pub fn clear(&mut self) { self.sources.clear(); self.folders.clear(); }
 
     pub fn transfer_to_audited_replace(&mut self, action: Action, target: &Path,
         control: &CopyControl, journal: &crate::operation_journal::OperationJournal,
@@ -1002,6 +1011,21 @@ mod tests {
         fs::remove_file(&src).unwrap();
         newer.undo().unwrap();
         assert_eq!(fs::read(&src).unwrap(), b"new report");
+    }
+
+    #[test]
+    fn zone_remembers_which_items_are_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let (folder, file) = (dir.path().join("d"), dir.path().join("f.txt"));
+        fs::create_dir(&folder).unwrap();
+        fs::write(&file, b"x").unwrap();
+        let mut zone = DropZone::default();
+        zone.add(&folder).unwrap();
+        zone.add(&file).unwrap();
+        assert!(zone.is_folder(&zone.items()[0]));
+        assert!(!zone.is_folder(&zone.items()[1]));
+        zone.clear();
+        assert!(!zone.is_folder(&crate::path_utils::canonical(&folder).unwrap()));
     }
 
     #[test]

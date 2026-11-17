@@ -38,6 +38,13 @@ pub(crate) const SYNTAX_HINT: &str = "Слова ищутся в имени, в�
 
 #[derive(Default)]
 pub(crate) struct SearchState {
+    /// The text of the bottom field as last typed.
+    pub(crate) query: String,
+    /// The folder the results belong to.
+    pub(crate) root: Option<PathBuf>,
+    pub(crate) active: bool,
+    pub(crate) busy: bool,
+    pub(crate) generation: u64,
     pub(crate) hits: Vec<Hit>,
     pub(crate) progress: Progress,
     pub(crate) cancel: Option<Arc<AtomicBool>>,
@@ -62,7 +69,7 @@ struct Feed {
 
 impl Explorer {
     fn search_query_with_filters(&self) -> Query {
-        let mut query = Query::parse(&self.search_query);
+        let mut query = Query::parse(&self.search.query);
         if self.search.kind != Kind::Any { query.kind = self.search.kind; }
         if query.modified_after.is_none()
             && let Some(word) = PERIODS[self.search.period.min(PERIODS.len() - 1)].1 {
@@ -78,16 +85,16 @@ impl Explorer {
     /// Start (or restart) the walk from the active pane's folder.
     pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
         self.stop_search();
-        self.search_generation = self.search_generation.wrapping_add(1);
-        let generation = self.search_generation;
-        let root = self.search_root.clone().unwrap_or_else(|| self.pane_path(self.active_side()));
-        self.search_root = Some(root.clone());
+        self.search.generation = self.search.generation.wrapping_add(1);
+        let generation = self.search.generation;
+        let root = self.search.root.clone().unwrap_or_else(|| self.pane_path(self.active_side()));
+        self.search.root = Some(root.clone());
         self.search.hits.clear();
         self.search.selected = None;
         self.search.progress = Progress::default();
         let query = self.search_query_with_filters();
         if query.is_empty() {
-            self.search_busy = false;
+            self.search.busy = false;
             self.status = "Введите, что искать".into();
             cx.notify();
             return;
@@ -95,7 +102,7 @@ impl Explorer {
         let cancel = Arc::new(AtomicBool::new(false));
         self.search.cancel = Some(cancel.clone());
         self.search.started = Some(Instant::now());
-        self.search_busy = true;
+        self.search.busy = true;
         self.status.clear();
         let feed = Arc::new(Mutex::new(Feed::default()));
         let worker = feed.clone();
@@ -126,11 +133,11 @@ impl Explorer {
                 Err(_) => (Vec::new(), Progress::default(), true),
             };
             let running = this.update(cx, |this, cx| {
-                if this.search_generation != generation || !this.search_active { return false; }
+                if this.search.generation != generation || !this.search.active { return false; }
                 this.search.hits.extend(hits);
                 this.search.progress = progress;
                 if done {
-                    this.search_busy = false;
+                    this.search.busy = false;
                     this.search.cancel = None;
                     this.search.elapsed = this.search.started.map_or(Duration::ZERO, |start| start.elapsed());
                 }
@@ -144,13 +151,13 @@ impl Explorer {
 
     /// Typing in an open search restarts it once the text settles.
     pub(crate) fn schedule_search(&mut self, cx: &mut Context<Self>) {
-        self.search_generation = self.search_generation.wrapping_add(1);
-        let generation = self.search_generation;
+        self.search.generation = self.search.generation.wrapping_add(1);
+        let generation = self.search.generation;
         self.stop_search();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(350)).await;
             let _ = this.update(cx, |this, cx| {
-                if this.search_generation == generation && this.search_active { this.run_search(cx); }
+                if this.search.generation == generation && this.search.active { this.run_search(cx); }
             });
         }).detach();
     }
@@ -196,7 +203,7 @@ impl Explorer {
         self.filter_open = false;
         self.search_mode = false;
         self.filter.clear();
-        self.search_query.clear();
+        self.search.query.clear();
         self.clear_filter = true;
         if enter {
             self.navigate_side(side, &path, None, cx);
@@ -209,13 +216,13 @@ impl Explorer {
     pub(crate) fn search_summary(&self) -> String {
         let progress = self.search.progress;
         let found = match progress.found {
-            0 if self.search_busy => "Ищем…".to_string(),
+            0 if self.search.busy => "Ищем…".to_string(),
             0 => "Ничего не найдено".to_string(),
             n => format!("Найдено: {n}{}", if progress.truncated { " (показаны первые)" } else { "" }),
         };
         let scanned = format!("просмотрено папок: {}, файлов: {}", progress.folders, progress.files);
         let denied = if progress.denied > 0 { format!(", без доступа: {}", progress.denied) } else { String::new() };
-        let time = if self.search_busy { String::new() } else { format!(" · {:.1} с", self.search.elapsed.as_secs_f32()) };
+        let time = if self.search.busy { String::new() } else { format!(" · {:.1} с", self.search.elapsed.as_secs_f32()) };
         format!("{found} · {scanned}{denied}{time}")
     }
 }

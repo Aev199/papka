@@ -152,3 +152,34 @@ fn legacy_reserved_bookmark_is_migrated_without_losing_tabs() {
     assert!(store.load_project("__other").unwrap().is_some());
     assert!(!store.list().unwrap().iter().any(|name|name=="__project_return__"));
 }
+#[test]
+fn deleting_a_project_deletes_its_card() {
+    use filemanager_core::project_card::{storage_key, Card};
+    let dir=tempfile::tempdir().unwrap(); let store=WorkspaceStore::open(dir.path().join("db")).unwrap();
+    store.save("Сити 2",&Workspace::new(dir.path()).unwrap()).unwrap();
+    store.save("Остров",&Workspace::new(dir.path()).unwrap()).unwrap();
+    let mut card=Card::starter(); card.set(0,"Заметки","ГИП: Иванов");
+    store.set_value(&storage_key("Сити 2"),&card.to_json()).unwrap();
+    store.set_value(&storage_key("Остров"),&card.to_json()).unwrap();
+    assert!(store.delete("Сити 2").unwrap());
+    assert_eq!(store.value(&storage_key("Сити 2")).unwrap(),None);
+    assert_eq!(Card::load(store.value(&storage_key("Сити 2")).unwrap().as_deref()),Card::starter());
+    assert!(store.value(&storage_key("Остров")).unwrap().is_some(),"another project's card stays");
+}
+#[test]
+fn a_project_keeps_its_number_and_folder_until_deleted() {
+    let dir=tempfile::tempdir().unwrap(); let store=WorkspaceStore::open(dir.path().join("db")).unwrap();
+    store.save("Корпус 2",&Workspace::new(dir.path()).unwrap()).unwrap();
+    store.save("Корпус 3",&Workspace::new(dir.path()).unwrap()).unwrap();
+    let (id,root)=store.project_identity("Корпус 2").unwrap();
+    assert!(id.starts_with("p-") && id.len()==18 && root.is_none());
+    assert_eq!(store.project_identity("Корпус 2").unwrap().0,id,"the number does not change");
+    assert_ne!(store.project_identity("Корпус 3").unwrap().0,id);
+    store.set_project_root("Корпус 2",Some(Path::new("/srv/044"))).unwrap();
+    assert_eq!(store.project_identity("Корпус 2").unwrap(),(id.clone(),Some(PathBuf::from("/srv/044"))));
+    store.set_project_root("Корпус 2",None).unwrap();
+    assert_eq!(store.project_identity("Корпус 2").unwrap().1,None);
+    store.delete("Корпус 2").unwrap();
+    store.save("Корпус 2",&Workspace::new(dir.path()).unwrap()).unwrap();
+    assert_ne!(store.project_identity("Корпус 2").unwrap().0,id,"a new project of the same name is another project");
+}

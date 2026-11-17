@@ -48,9 +48,18 @@ rustc --edition=2024 --test crates/desktop/src/palette.rs -o /tmp/pt && /tmp/pt
 - `tools/ui-smoke/run.sh 97` запускает приложение (окно появляется через
   15–25 с), `tools/ui-smoke/ui.sh 97 <папка> click X Y | key K | type T | wait S | shot NAME`.
   `type` — только латиница; переход по папкам — Ctrl+P или мышью.
-- Остановить: `kill $(pgrep -f "^/home/user/filemanager/target/debug/filemanager-desktop")`
+- Остановить: `kill $(pgrep -f "/target/debug/filemanager-desktop")`
   (не `pkill -f filemanager-desktop` — он убивает и собственную оболочку).
 - Видимые изменения проверять скриншотом до выпуска.
+- Пакеты контейнера, если их нет: `libxkbcommon-dev libxkbcommon-x11-dev`
+  (линковка тестов desktop), `mingw-w64` + `rustup target add
+  x86_64-pc-windows-gnu`, для окна — `openbox xcompmgr xdotool x11-utils
+  mesa-vulkan-drivers` (без программного Vulkan окно не создаётся).
+- Раздел «Проводник» контекстного меню на Linux пуст; образец для
+  снимка включает переменная `PAPKA_SAMPLE_SHELL_MENU=1` перед `run.sh`.
+  Чтение настоящего меню проверяет тест `shell_menu` под Wine: `wine64`,
+  `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine cargo test -p
+  filemanager-core --lib --target x86_64-pc-windows-gnu shell_menu`.
 - Windows-только вещи (перетаскивание, Shell, предпросмотр Office/PDF,
   обновления, диски) здесь не проверяются — так и говорить пользователю.
 
@@ -58,6 +67,13 @@ rustc --edition=2024 --test crates/desktop/src/palette.rs -o /tmp/pt && /tmp/pt
 
 - Крейты: `crates/core` (логика, тесты), `crates/desktop` (GPUI),
   `crates/cli`; `vendor/gpui_ce_windows` — пропатченный крейт (см. его PAPKA.md).
+- Состояние окна (`Explorer` в `main.rs`) выносить в отдельные структуры
+  с тестами, как `transfers.rs` (очередь переносов), `directories.rs`
+  (кэш списков), `InspectorState`, `SearchState`; новые поля-флаги в
+  `Explorer` не добавлять, если им есть место в такой структуре.
+- Обмен с Notch — только через файлы из `docs/INBOX.md` (`projects.json`
+  и записи во `_Входящие`); формат менять в обоих проектах вместе.
+  Notch: репозиторий `Aev199/notch`, модуль `crates/core/src/papka.rs`.
 - Никогда не хранить содержимое файлов: история и лента — только метаданные.
 - Не удалять данные пользователя и профиль (`%LOCALAPPDATA%\Papka`).
 - В GPUI нельзя дважды вызывать `.hover()` на одном элементе — паника.

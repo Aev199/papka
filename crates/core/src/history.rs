@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 
 pub struct Journal { database: PathBuf }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     pub id: i64,
     pub path: PathBuf,
@@ -112,7 +112,7 @@ fn ignored(path: &Path) -> bool {
     }
     let Some(name) = path.file_name().map(|x| x.to_string_lossy().to_lowercase()) else { return true; };
     // Lock files of AutoCAD, Access and others come and go with every open.
-    name.starts_with("~$") || name.starts_with(".~lock.") || name.starts_with(".papka-replacing-")
+    name.starts_with("~$") || name.starts_with(".~lock.") || name.starts_with(".papka-replacing-") || name.starts_with(".tmp")
         || [".tmp", ".part", ".swp", ".fm-partial", ".dwl", ".dwl2", ".lck", ".ldb", ".laccdb"].iter().any(|ext| name.ends_with(ext))
 }
 
@@ -338,7 +338,8 @@ impl Journal {
                 author: row.get(5)?, comment: row.get(6)?,
             }),
         ).map_err(sqlite_error)?;
-        mapped.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)
+        // Temporary files recorded before they were passed over stay out.
+        Ok(mapped.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?.into_iter().filter(|event| !ignored(&event.path)).collect())
     }
 
     /// Optional initial snapshot of metadata, limited to avoid a full-disk scan.

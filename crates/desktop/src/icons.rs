@@ -55,7 +55,7 @@ impl Explorer {
             self.icons.scanned.clear();
         }
         for folder in self.visible_directories() {
-            let Some(listing) = self.directory_cache.get(&folder) else { continue };
+            let Some(listing) = self.dirs.cache.get(&folder) else { continue };
             let id = Arc::as_ptr(listing) as usize;
             if self.icons.scanned.get(&folder) == Some(&id) { continue; }
             self.icons.scanned.insert(folder, id);

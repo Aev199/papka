@@ -1,5 +1,5 @@
 use std::{io, path::{Path, PathBuf}, time::Duration};
-use gpui::{AppContext, Context, Focusable, Window};
+use gpui::{Context, Focusable, Window};
 use filemanager_core::panes::{GroupId, Workspace};
 use crate::Explorer;
 #[derive(Clone)]
@@ -51,11 +51,12 @@ impl Explorer {
     }
     pub(crate) fn start_project_autosave(&mut self,cx: &mut Context<Self>) {
         cx.spawn(async move |weak,cx| {loop {
-            cx.background_spawn(async {std::thread::sleep(Duration::from_secs(2));}).await;
+            cx.background_executor().timer(Duration::from_secs(2)).await;
             if weak.update(cx,|this,cx| {
                 this.remember_recent(cx);
                 if this.session_restore_error.is_some() {return;}
                 let state=format!("{:?}",this.browser);
+                if this.registry.due {this.publish_projects(cx);}
                 if state!=this.saved_layout { match this.persist_workspace() {
                     Ok(())=>this.saved_layout=state,
                     Err(error)=>{this.status=format!("Сеанс не сохранён: {error}");cx.notify();}
@@ -69,7 +70,7 @@ impl Explorer {
         self.scroll_handles.clear();self.folder_views.clear();self.column_resize=None;self.dock_hover=None;
         self.marquee=None;self.anchor=None;self.address_editing=None;self.select_first_when_loaded=false;
         self.selected=None;self.marked.clear();self.confirm_recycle=None;self.selected_history_event=None;
-        self.context_menu=None;self.clear_filter=true;self.close_search();self.close_document_preview(cx);self.inspector_path=None;
+        self.context_menu=None;self.close_project_card(cx);self.clear_filter=true;self.close_search();self.close_document_preview(cx);self.inspector.path=None;
     }
     /// Opens project `name` in the active pane; the other panes stay. A
     /// project already open in some pane is focused there instead.
@@ -118,6 +119,8 @@ impl Explorer {
         self.refresh_workspace_names();cx.notify();
     }
     pub(crate) fn refresh_workspace_names(&mut self) {
+        // Other programs see the list soon after it changes.
+        self.registry.due=true;
         self.workspace_names=self.workspaces.as_ref().and_then(|store|store.list().ok()).unwrap_or_default()
             .into_iter().filter(|name|filemanager_core::projects::valid_name(name)).collect();
     }
