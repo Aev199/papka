@@ -2095,38 +2095,24 @@ impl Explorer {
         if let Some(reason) = &self.live_watch_error {
             section = section.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(reason.clone()));
         }
-        let events: Vec<&filemanager_core::history::Event> = if self.feed.folder.as_ref() == Some(&current) { self.feed.events.iter().collect() } else { Vec::new() };
-        if events.is_empty() {
+        let rows: &[crate::feed::FeedRow] = if self.feed.folder.as_ref() == Some(&current) { &self.feed.rows } else { &[] };
+        if rows.is_empty() {
             return section.child(div().pt_1().text_size(px(12.)).text_color(rgb(TEXT_DIM))
                 .child("Изменений нет. Папка замечает изменения в папках, пока они открыты в ней; содержимое файлов не сохраняется."))
                 .into_any_element();
         }
-        // Saving a file again and again makes a run of the same entry:
-        // one row per run, with the count.
-        let mut rows: Vec<(&filemanager_core::history::Event, usize)> = Vec::new();
-        for event in events {
-            let plain = event.comment.trim().is_empty() && event.author.as_deref().is_none_or(str::is_empty);
-            if let Some((last, count)) = rows.last_mut() {
-                if plain && last.path == event.path && last.kind == event.kind && last.day_label() == event.day_label() {
-                    *count += 1;
-                    continue;
-                }
-            }
-            rows.push((event, 1));
-        }
         let mut day = String::new();
         let mut list = div().id("feed-list").max_h(px(420.)).overflow_y_scrollbar().flex().flex_col();
-        for (event, repeats) in rows {
-            let heading = event.day_label();
-            if heading != day {
+        for row in rows.iter().take(self.feed.shown) {
+            let event = &self.feed.events[row.index];
+            let repeats = row.repeats;
+            if row.day != day {
                 list = list.child(div().pt_2().pb_0p5().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT_MUTED)).child(heading.clone()));
-                day = heading;
+                    .text_color(rgb(TEXT_MUTED)).child(row.day.clone()));
+                day = row.day.clone();
             }
-            let name = browser::display_name(&event.path);
-            // Where in the folder, when not directly in it.
-            let place = event.path.parent().and_then(|parent| parent.strip_prefix(&current).ok())
-                .map(|relative| relative.display().to_string()).filter(|relative| !relative.is_empty());
+            let name = row.name.clone();
+            let place = row.place.clone();
             let tint = match event.kind.as_str() { "missing" => DANGER, "observed" | "version" => ACCENT, _ => TEXT_MUTED };
             let path = event.path.clone();
             let gone = event.kind == "missing";
@@ -2155,7 +2141,7 @@ impl Explorer {
                             this.edit_feed_comment(event_id, window, cx);
                         }))))
                 .child(div().flex().gap_1().min_w_0().text_size(px(11.))
-                    .child(div().flex_none().text_color(rgb(TEXT_DIM)).child(event.clock_label()))
+                    .child(div().flex_none().text_color(rgb(TEXT_DIM)).child(row.clock.clone()))
                     .child(div().flex_none().text_color(rgb(tint)).child(event.feed_label().to_owned()))
                     .when(repeats > 1, |row| row.child(div().flex_none().text_color(rgb(TEXT_DIM)).child(format!("×{repeats}"))))
                     .when_some(place, |row, place| row.child(div().min_w_0().truncate().text_color(rgb(TEXT_DIM)).child(format!("· {place}")))))
@@ -2171,6 +2157,11 @@ impl Explorer {
                         .child(text_button("feed-comment-save", "Сохранить", ButtonKind::Primary)
                             .on_click(cx.listener(|this, _, _, cx| this.save_feed_comment(cx))))));
             }
+        }
+        let more = rows.len().saturating_sub(self.feed.shown);
+        if more > 0 {
+            list = list.child(div().pt_1().child(text_button("feed-more", format!("Показать ещё ({})", more.min(crate::feed::PAGE)), ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _, _, cx| this.show_more_feed(cx)))));
         }
         section.child(list).into_any_element()
     }
