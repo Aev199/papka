@@ -1343,6 +1343,8 @@ impl Explorer {
     fn finish_transfer(&mut self, done: &'static str, ok: usize, cancelled: usize, target: PathBuf,
         failures: Vec<transfers::Failure>, cx: &mut Context<Self>) {
         let title = transfers::report_title(done, ok, failures.len(), cancelled);
+        // Items that did not get through flash red where they still are.
+        self.motion.flash_as(motion::Flash::Failed, failures.iter().map(|failure| failure.path.clone()).collect::<Vec<_>>());
         self.status = if !failures.is_empty() {
             format!("{title}. Ошибки — в окне переноса справа внизу.")
         } else if ok > 0 {
@@ -1596,6 +1598,7 @@ impl Explorer {
             Ok(plan) => plan,
             Err(error) => {
                 self.status = format!("Переименование невозможно: {error}");
+                self.motion.flash_as(motion::Flash::Failed, [source.clone()]);
                 cx.notify();
                 return;
             }
@@ -1632,7 +1635,10 @@ impl Explorer {
                         this.push_undo(vec![receipt], label);
                         this.renaming = false;
                     }
-                    Err(error) => this.status = format!("Переименование отклонено: {error}"),
+                    Err(error) => {
+                        this.status = format!("Переименование отклонено: {error}");
+                        this.motion.flash_as(motion::Flash::Failed, this.selected.clone());
+                    }
                 }
                 cx.notify();
             });
@@ -1716,6 +1722,11 @@ impl Explorer {
                 this.transfers.busy = false;
                 this.start_queued(cx);
                 this.follow_labels(&undone, true);
+                // What came back (a move or rename undone, a deletion
+                // restored) lights up where it is again.
+                this.motion.flash(undone.iter()
+                    .filter(|receipt| matches!(receipt.action, Action::Move | Action::Rename | Action::Recycle | Action::Delete))
+                    .map(|receipt| receipt.source.clone()));
                 for path in &touched {
                     this.refresh_parent_of(path, cx);
                 }

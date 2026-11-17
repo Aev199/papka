@@ -107,7 +107,7 @@ pub(crate) fn layer(state: SmoothScroll, key: SharedString, handle: ScrollHandle
         move |_, hitbox, window, _| {
             let view = window.current_view();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) { return; }
+                if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) || !crate::theme::animations() { return; }
                 let ScrollDelta::Lines(lines) = event.delta else { return };
                 if lines.y == 0. || event.modifiers.control || event.modifiers.shift { return; }
                 let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);

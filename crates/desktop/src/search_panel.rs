@@ -208,6 +208,8 @@ impl Explorer {
         if enter {
             self.navigate_side(side, &path, None, cx);
         } else if let Some(parent) = path.parent() {
+            // The hit lights up in its folder, so the eye finds it.
+            self.motion.flash_as(crate::motion::Flash::Found, [path.clone()]);
             self.navigate_side(side, parent, Some(path.clone()), cx);
         }
         cx.notify();

@@ -195,6 +195,7 @@ impl Explorer {
         }
         let select = path.exists().then(|| path.clone());
         if select.is_none() { self.status = format!("Файла «{}» больше нет", path.display()); }
+        self.motion.flash_as(crate::motion::Flash::Found, select.clone());
         self.navigate_side(side, &parent, select, cx);
     }
 }

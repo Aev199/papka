@@ -77,6 +77,8 @@ pub(crate) struct Settings {
     pub density: usize,
     pub folder_color: usize,
     pub tile_size: usize,
+    /// «Анимации»: index into `appearance::ANIMATION_CHOICES` (0: on).
+    pub animations: usize,
     pub saving: bool,
     pub error: Option<String>,
 }
@@ -277,6 +279,7 @@ impl Explorer {
             density: crate::appearance::density(),
             folder_color: theme::folder_color(),
             tile_size: crate::thumbs::size(),
+            animations: if theme::animations() { 0 } else { 1 },
             saving: false,
             error: None,
         });
@@ -330,7 +333,7 @@ impl Explorer {
         let stack_versions = settings.stack_versions;
         let favorite_stars = settings.favorite_stars;
         let look = crate::appearance::Look { system_theme: settings.system_theme, density: settings.density,
-            folder_color: settings.folder_color, tile_size: settings.tile_size };
+            folder_color: settings.folder_color, tile_size: settings.tile_size, animations: settings.animations == 0 };
         cx.spawn(async move |weak, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -518,6 +521,7 @@ impl Explorer {
                     }))
             };
             look = look.child(choices("density", "Плотность строк", &crate::appearance::DENSITIES, settings.density, |s, i| s.density = i, cx));
+            look = look.child(choices("animations", "Анимации", &crate::appearance::ANIMATION_CHOICES, settings.animations, |s, i| s.animations = i, cx));
             let folder_swatches = theme::FOLDER_COLORS.iter().enumerate().map(|(index, (name, dark, light))| {
                 let colour = if theme::is_light() { *light } else { *dark };
                 div().id(("folder-color", index)).size(px(20.)).flex_none().rounded_full().cursor_pointer()

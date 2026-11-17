@@ -738,7 +738,10 @@ impl Explorer {
                 this.close_project_card(cx);
                 this.focus_group(group, cx);
                 this.open_in_new_tab(&folder, cx);
-                if let Some(file) = select { this.navigate_side(group, &folder, Some(file), cx); }
+                if let Some(file) = select {
+                    this.motion.flash_as(crate::motion::Flash::Found, [file.clone()]);
+                    this.navigate_side(group, &folder, Some(file), cx);
+                }
             });
         }).detach();
     }

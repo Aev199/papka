@@ -30,6 +30,7 @@ pub(crate) const SLIDE: f32 = 10.;
 /// Strength of a new item's light `elapsed` after it came on screen: from
 /// full to nothing, fading faster at first.
 pub(crate) fn flash_strength(elapsed: Duration) -> Option<f32> {
+    if !crate::theme::animations() { return None; }
     let t = elapsed.as_secs_f32() / FLASH.as_secs_f32();
     (t < 1.).then(|| (1. - t) * (1. - t))
 }
@@ -63,6 +64,10 @@ pub(crate) enum Flash {
     Changed,
     /// The folder the pane just came out of.
     Left,
+    /// Where a search hit, a feed entry or «Показать в папке» led.
+    Found,
+    /// An item a transfer or rename could not finish.
+    Failed,
 }
 
 /// How a new item is looked up: Windows names ignore letter case, and the
@@ -128,12 +133,14 @@ impl Motion {
 
     /// How far open the tab at `index` is (1: fully), while it opens.
     pub(crate) fn tab_opening(&self, group: GroupId, index: usize) -> Option<f32> {
+        if !crate::theme::animations() { return None; }
         let (g, i, start) = self.opened_tab?;
         (g == group && i == index && start.elapsed() < TAB_OPEN).then(|| ease_out(start.elapsed(), TAB_OPEN))
     }
 
     /// The gap a closed tab leaves before `index`: its width now.
     pub(crate) fn tab_gap(&self, group: GroupId) -> Option<(usize, f32)> {
+        if !crate::theme::animations() { return None; }
         let (g, index, width, start) = self.closed_tab?;
         (g == group && start.elapsed() < TAB_CLOSE).then(|| (index, width * (1. - ease_out(start.elapsed(), TAB_CLOSE))))
     }
@@ -149,7 +156,8 @@ impl Motion {
         };
         let now = Instant::now();
         let shown = match self.progress {
-            Some((shown, at)) => glide(shown, real, (now - at).as_secs_f32().min(0.1)),
+            Some((shown, at)) if crate::theme::animations() => glide(shown, real, (now - at).as_secs_f32().min(0.1)),
+            Some(_) => real,
             None => real,
         };
         self.progress = Some((shown, now));

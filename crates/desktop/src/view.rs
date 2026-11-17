@@ -62,7 +62,8 @@ fn item_overlays(flash: Option<(crate::motion::Flash, f32)>, fill: Option<f32>) 
         let colour = match kind {
             Flash::New => accent_alpha((strength * 110.) as u8),
             Flash::Changed => accent_alpha((strength * 55.) as u8),
-            Flash::Left => text_alpha((strength * 70.) as u8),
+            Flash::Left | Flash::Found => text_alpha((strength * 70.) as u8),
+            Flash::Failed => danger_alpha((strength * 120.) as u8),
         };
         layers.push(div().absolute().top_0().left_0().size_full().bg(colour).into_any_element());
     }
@@ -259,6 +260,8 @@ impl Explorer {
             strip=strip.child(div().id(("tab",index)).group("tab").relative().flex_none().h(px(32.))
                 .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
                 .rounded_t(px(4.)).cursor_pointer()
+                // Held under dragged files it fills up until it opens.
+                .children(item_overlays(None, self.spring_fill(&crate::spring::SpringTarget::Tab(group, index))))
                 // A new tab widens into its place.
                 .when_some(opening,|tab,open|tab.min_w(px(96.*open)).max_w(px(200.*open)).overflow_hidden().opacity(open))
                 .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(if focused {TEXT} else {TEXT_MUTED})))
@@ -757,7 +760,9 @@ impl Explorer {
             crumbs = crumbs.child(
                 // The current folder is only as wide as its name: the empty
                 // rest of the bar belongs to the bar and opens the path input.
-                div().id(("crumb", index)).when(last,|crumb|crumb.min_w_0())
+                div().id(("crumb", index)).relative().overflow_hidden()
+                    .children(item_overlays(None, self.spring_fill(&crate::spring::SpringTarget::Folder(side, target.clone()))))
+                    .when(last,|crumb|crumb.min_w_0())
                     .when(!last,|crumb|crumb.flex_none()).max_w(px(220.)).truncate().px_1p5().py_0p5()
                     .rounded_sm().cursor_pointer()
                     .text_color(rgb(if last { TEXT } else { TEXT_MUTED }))
@@ -871,8 +876,10 @@ impl Explorer {
         let path = place.path.clone();
         let middle=path.clone();
         let spring=path.clone();
-        div().id(id).relative().h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
+        let fill = self.spring_fill(&crate::spring::SpringTarget::Folder(self.active_side(), path.clone()));
+        div().id(id).relative().overflow_hidden().h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
             .cursor_pointer()
+            .children(item_overlays(None, fill))
             .when(active && framed, |this| this.child(focus_mark()))
             .when(framed, |this| this.mx_2())
             .when(active, |this| this.text_color(rgb(TEXT)))

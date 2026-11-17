@@ -74,6 +74,7 @@ impl Explorer {
 
     /// How far `target` has filled on its way to opening (0..1), while it does.
     pub(crate) fn spring_fill(&self, target: &SpringTarget) -> Option<f32> {
+        if !crate::theme::animations() { return None; }
         let spring = self.spring.as_ref().filter(|spring| spring.generation != 0 && &spring.target == target)?;
         Some((spring.started.elapsed().as_secs_f32() / DELAY.as_secs_f32()).min(1.))
     }
