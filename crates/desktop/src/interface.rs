@@ -705,7 +705,7 @@ impl Explorer {
         let marked = if switched {
             Vec::new()
         } else {
-            self.marked.clone()
+            self.marked.to_vec()
         };
         let anchor = if switched { None } else { self.anchor.clone() };
         self.marquee = Some(Marquee {
@@ -836,7 +836,7 @@ impl Explorer {
                 m.scroll,
             );
             if m.current.x == m.start.x {
-                Vec::new()
+                Default::default()
             } else {
                 rows.map(|i| m.listing.entries[m.indices[i]].path.clone())
                     .collect()
@@ -866,7 +866,7 @@ impl Explorer {
         }
         let m = self.marquee.take().unwrap();
         self.selected = m.selected;
-        self.marked = m.marked;
+        self.marked = m.marked.into();
         self.anchor = m.anchor;
         cx.notify();
         true

@@ -17,6 +17,7 @@ mod compare;
 mod spring;
 mod edge_scroll;
 mod smooth_scroll;
+mod marked;
 mod search_panel;
 mod updates;
 mod icons;
@@ -362,7 +363,7 @@ struct Explorer {
     /// exactly these plans, never re-prepared ones.
     confirm_recycle: Option<Vec<(PathBuf, Plan)>>,
     /// Extra selected items (Ctrl/Shift); empty means only `selected`.
-    marked: Vec<PathBuf>,
+    marked: marked::Marked,
     /// Fixed end of a Shift range.
     anchor: Option<PathBuf>,
     /// Lower-case name filter for the focused folder ("" = none).
@@ -547,7 +548,7 @@ impl Explorer {
             address_editing: None,
             filter_open: false,
             search_mode: false,
-            marked: Vec::new(),
+            marked: Default::default(),
             anchor: None,
             filter: String::new(),
             clear_filter: false,

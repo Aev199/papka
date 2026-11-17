@@ -273,12 +273,12 @@ impl Explorer {
         if self.marked.is_empty() {
             self.selected.iter().cloned().collect()
         } else {
-            self.marked.clone()
+            self.marked.to_vec()
         }
     }
 
     pub(crate) fn is_selected(&self, path: &Path) -> bool {
-        self.selected.as_deref() == Some(path) || self.marked.iter().any(|p| p == path)
+        self.selected.as_deref().is_some_and(|selected| selected.as_os_str() == path.as_os_str()) || self.marked.contains(path)
     }
 
     /// Paths of `folder` in display order.
@@ -303,16 +303,16 @@ impl Explorer {
         if modifiers.shift && same_folder {
             let anchor = self.anchor.clone().unwrap_or_else(|| path.clone());
             let order = self.ordered_paths(folder);
-            self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &path);
+            self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &path).into();
             self.selected = Some(path);
         } else if (modifiers.control || modifiers.platform) && same_folder {
             if self.marked.is_empty() {
                 self.marked.extend(self.selected.clone());
             }
-            selection::toggle(&mut self.marked, &path);
+            self.marked.toggle(&path);
             // Keep display order for batch operations.
             let order = self.ordered_paths(folder);
-            self.marked.sort_by_key(|p| order.iter().position(|o| o == p));
+            self.marked.order_by(&order);
             self.selected = Some(path.clone());
             self.anchor = Some(path);
         } else {
@@ -352,7 +352,7 @@ impl Explorer {
         let Some(selected) = self.selected.clone() else { return };
         let Some(folder) = selected.parent().map(Path::to_path_buf) else { return };
         let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
-        if let Some(position) = indices.iter().position(|&i| listing.entries[i].path == selected) {
+        if let Some(position) = position_of(&listing, &indices, &selected) {
             // In tiles the list's items are rows of them.
             let side = self.browser.active;
             let item = if self.thumbs_view(side) { position / self.thumb_columns.get(&side).copied().unwrap_or(1).max(1) } else { position };
@@ -365,7 +365,7 @@ impl Explorer {
         let selected = self.selected.clone()?;
         let folder = selected.parent()?.to_path_buf();
         let (listing, _) = self.folder_view(self.browser.active, &folder)?;
-        listing.entries.iter().find(|entry| entry.path == selected).cloned()
+        entry_at(&listing, &selected).cloned()
     }
 
     fn extend_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -381,7 +381,7 @@ impl Explorer {
         let next = (current as isize + delta).clamp(0, order.len() as isize - 1) as usize;
         let anchor = self.anchor.clone().filter(|a| a.parent() == Some(folder.as_path()))
             .unwrap_or_else(|| order[current].clone());
-        self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &order[next]);
+        self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &order[next]).into();
         self.anchor = Some(anchor);
         self.selected = Some(order[next].clone());
         self.reveal_selected();
@@ -403,7 +403,7 @@ impl Explorer {
             return;
         }
         let current = self.selected.as_ref()
-            .and_then(|selected| indices.iter().position(|&i| &listing.entries[i].path == selected));
+            .and_then(|selected| position_of(&listing, &indices, selected));
         let last = indices.len() as isize - 1;
         let position = match (edge, current) {
             (Some(false), _) => 0,
@@ -786,7 +786,7 @@ impl Explorer {
         if self.filter.is_empty() { return; }
         let folder = self.pane_path(self.active_side());
         let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
-        let visible = self.selected.as_ref().is_some_and(|selected| indices.iter().any(|&i| &listing.entries[i].path == selected));
+        let visible = self.selected.as_ref().is_some_and(|selected| position_of(&listing, &indices, selected).is_some());
         if visible { return; }
         let first = indices.first().map(|&i| listing.entries[i].path.clone());
         self.anchor = first.clone();
@@ -945,7 +945,7 @@ impl Explorer {
         if order.is_empty() { return; }
         self.anchor = order.first().cloned();
         self.selected = order.first().cloned();
-        self.marked = order;
+        self.marked = order.into();
         cx.notify();
     }
 
@@ -957,4 +957,27 @@ impl Explorer {
 
     pub(crate) fn key_extend_next(&mut self, _: &ExtendNext, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(1, cx); }
     pub(crate) fn key_extend_prev(&mut self, _: &ExtendPrev, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(-1, cx); }
+}
+
+/// Whether `entry` is the one at `path` of the same folder. Names, not
+/// whole paths, are compared: on Windows a path comparison parses both
+/// paths (std skips its byte-wise shortcut for paths with a drive or server
+/// prefix), and these run over whole folders on every frame.
+pub(crate) fn is_entry(entry: &browser::Entry, name: &str) -> bool { entry.name == name }
+
+/// The name `path` has in its folder's listing.
+pub(crate) fn listing_name(path: &Path) -> Option<String> {
+    path.file_name().map(|name| name.to_string_lossy().into_owned())
+}
+
+/// The entry at `path` in `listing` (the listing of its folder).
+pub(crate) fn entry_at<'a>(listing: &'a browser::Listing, path: &Path) -> Option<&'a browser::Entry> {
+    let name = listing_name(path)?;
+    listing.entries.iter().find(|entry| is_entry(entry, &name))
+}
+
+/// Where `path` stands among `indices` of `listing`.
+pub(crate) fn position_of(listing: &browser::Listing, indices: &[usize], path: &Path) -> Option<usize> {
+    let name = listing_name(path)?;
+    indices.iter().position(|&i| is_entry(&listing.entries[i], &name))
 }

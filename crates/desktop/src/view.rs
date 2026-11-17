@@ -1040,7 +1040,7 @@ impl Explorer {
             .filter(|selected| {
                 selected.parent() == Some(path.as_path())
                     && self.dirs.cache.get(&path).is_some_and(|listing| {
-                        listing.entries.iter().any(|entry| &entry.path == selected && entry.is_directory)
+                        crate::keys::entry_at(listing, selected).is_some_and(|entry| entry.is_directory)
                     })
             });
         // A narrow viewport may omit the optional preview, never the trail.
@@ -1894,13 +1894,12 @@ impl Explorer {
         }
 
         if self.marked.len() > 1 {
-            let marked = self.marked.clone();
             let mut files = 0usize;
             let mut folders = 0usize;
             let mut bytes = 0u64;
-            if let Some(folder) = marked[0].parent().map(Path::to_path_buf) {
+            if let Some(folder) = self.marked[0].parent().map(Path::to_path_buf) {
                 if let Some((listing, _)) = self.folder_view(self.browser.active, &folder) {
-                    for entry in listing.entries.iter().filter(|e| marked.contains(&e.path)) {
+                    for entry in listing.entries.iter().filter(|e| self.marked.contains(&e.path)) {
                         if entry.is_directory { folders += 1 } else { files += 1; bytes += entry.size; }
                     }
                 }
@@ -1908,14 +1907,14 @@ impl Explorer {
             return panel
                 .child(div().flex().items_center().gap_2()
                     .child(icon("fm/layers.svg", TEXT_MUTED))
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Выбрано: {}", marked.len()))))
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Выбрано: {}", self.marked.len()))))
                 .child(div().flex().flex_col().gap_1p5()
                     .child(Self::property("Файлов", files.to_string()))
                     .child(Self::property("Папок", folders.to_string()))
                     .child(Self::property("Размер", format!("{} (без папок)", format_size(bytes))))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(84.)).flex_none().text_color(rgb(TEXT_MUTED)).child("Метка"))
-                        .child(self.label_picker("group-label", marked.clone(), cx))))
+                        .child(self.label_picker("group-label", self.marked.to_vec(), cx))))
                 .child(div().flex().gap_2()
                     .child(text_button("group-stage", "Отложить", ButtonKind::Ghost).flex_1()
                         .on_click(cx.listener(|this, _, _, cx| this.stage(cx))))
@@ -1928,7 +1927,7 @@ impl Explorer {
         let selected_entry = self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
             let (listing, _) = self.folder_view(self.browser.active, &folder)?;
-            listing.entries.iter().find(|entry| entry.path == selected).cloned()
+            crate::keys::entry_at(&listing, &selected).cloned()
         });
         let current = self.pane_path(self.active_side());
         let (title, icon_path, tint) = match &selected_entry {
@@ -2188,7 +2187,7 @@ impl Explorer {
         let selection = if card { None } else if marked > 1 { Some(format!("Выбрано: {marked}")) } else { self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
             let (listing, _) = self.folder_view(self.browser.active, &folder)?;
-            listing.entries.iter().find(|entry| entry.path == selected).map(|entry| {
+            crate::keys::entry_at(&listing, &selected).map(|entry| {
                 if entry.is_directory { format!("Выбрано: {}", entry.name) }
                 else { format!("Выбрано: {} · {}", entry.name, format_size(entry.size)) }
             })
@@ -2429,7 +2428,7 @@ impl Explorer {
             }
             MenuTarget::Entry(path) => {
                 let is_dir = self.dirs.cache.get(path.parent().unwrap_or(path))
-                    .and_then(|listing| listing.entries.iter().find(|e| &e.path == path).map(|e| e.is_directory))
+                    .and_then(|listing| crate::keys::entry_at(listing, path).map(|e| e.is_directory))
                     .unwrap_or(false);
                 let open_path = path.clone();
                 list = list.child(Self::menu_item("m-open", if is_dir { "fm/folder-fill.svg" } else { "fm/external.svg" },
@@ -2538,8 +2537,15 @@ impl Explorer {
                         .on_click(cx.listener({ let paths = copy_paths.clone(); move |this, _, _, cx| this.copy_paths(&paths, crate::CopyAs::Name, cx) })))
                     .when(is_dir || copy_paths.len() > 1, |list| {
                         // From the listing, not the disk: menus redraw every frame.
-                        let folders: Vec<PathBuf> = copy_paths.iter().filter(|p| self.dirs.cache.get(p.parent().unwrap_or(p))
-                            .is_some_and(|listing| listing.entries.iter().any(|e| &e.path == *p && e.is_directory))).cloned().collect();
+                        // Folder names per listing, once: the selection may be thousands.
+                        let mut folder_names: std::collections::HashMap<PathBuf, std::collections::HashSet<&str>> = Default::default();
+                        let folders: Vec<PathBuf> = copy_paths.iter().filter(|p| {
+                            let parent = p.parent().unwrap_or(p);
+                            let Some(listing) = self.dirs.cache.get(parent) else { return false };
+                            let names = folder_names.entry(parent.to_path_buf()).or_insert_with(|| listing.entries.iter()
+                                .filter(|e| e.is_directory).map(|e| e.name.as_str()).collect());
+                            crate::keys::listing_name(p).is_some_and(|name| names.contains(name.as_str()))
+                        }).cloned().collect();
                         let n = folders.len();
                         list.child(Self::menu_item("m-measure", "fm/drive.svg",
                             if n > 1 { format!("Посчитать размер ({n})") } else { "Посчитать размер".into() }, "", false, n > 0)
