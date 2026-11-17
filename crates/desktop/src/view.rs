@@ -42,6 +42,13 @@ const LIST_GAP: f32 = 8.;
 const LIST_ICON: f32 = 24.;
 const LIST_RIGHT: f32 = 20.;
 
+/// Folder contents fade in this long; clicks and keys work meanwhile.
+const LIST_APPEAR_MS: u64 = 110;
+
+fn list_appear(list: gpui::Div, delta: f32) -> gpui::Div {
+    list.opacity(0.35 + 0.65 * delta)
+}
+
 fn column_scroll_area<I: Into<gpui::ElementId>>(id: I, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<I> {
     div().id(id).relative().track_scroll(scroll).flex_1().min_w_0().min_h_0()
         .overflow_x_scroll().lock_scroll_axis()
@@ -1334,6 +1341,9 @@ impl Explorer {
             let background_marquee_folder=folder.clone();
             // Dragging near the top or bottom edge scrolls the list.
             let edge_handle = handle.0.borrow().base_handle.clone();
+            // A folder's contents come in with a short fade, once per opening:
+            // refreshes keep the same key and stay still.
+            let appear_id = SharedString::from(format!("list-appear-{}-{}", side.0, folder.display()));
             let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {
                 // Tiles: each list item is a row of them.
@@ -1353,7 +1363,7 @@ impl Explorer {
                     .track_scroll(&handle)
                     .h_full()
                     .pt_2().pl_2().pr(px(12.))
-                )).into_any_element();
+                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear)).into_any_element();
             }
             column = column.child(
                 div().flex_1().min_h_0().on_mouse_move(edge_listener).child(
@@ -1368,7 +1378,7 @@ impl Explorer {
                     .h_full()
                     .pl_1().pr(px(12.))
                     .on_mouse_down(MouseButton::Left,cx.listener({ let folder=background_marquee_folder.clone(); move |this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx) }))
-                )
+                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear)
             );
             if self.unwatched_folders.contains(&background_marquee_folder) {
                 column = column.child(

@@ -50,8 +50,12 @@ impl Explorer {
         self.edge_scroll.claimed = true;
         if self.edge_scroll.running { return; }
         self.edge_scroll.running = true;
+        let mut last = std::time::Instant::now();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(TICK).await;
+            // Speed is per 16 ms: a slow frame moves further, not slower.
+            let ticks = (last.elapsed().as_secs_f32() / TICK.as_secs_f32()).clamp(0.5, 4.);
+            last = std::time::Instant::now();
             let more = this.update(cx, |this, cx| {
                 if !this.dragging_files(cx) { this.edge_scroll.target = None; }
                 let Some((handle, speed)) = this.edge_scroll.target.as_ref() else {
@@ -60,7 +64,7 @@ impl Explorer {
                 };
                 let mut offset = handle.offset();
                 let lowest = -handle.max_offset().y;
-                let moved = (offset.y - px(*speed)).clamp(lowest.min(px(0.)), px(0.));
+                let moved = (offset.y - px(*speed * ticks)).clamp(lowest.min(px(0.)), px(0.));
                 if moved != offset.y {
                     offset.y = moved;
                     handle.set_offset(offset);

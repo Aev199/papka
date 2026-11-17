@@ -4,7 +4,7 @@
 
 use filemanager_core::browser;
 use filemanager_core::format::format_size;
-use gpui::{AnyElement, ClipboardItem, Context, MouseButton, div, prelude::*, px};
+use gpui::{AnimationExt, AnyElement, ClipboardItem, Context, MouseButton, div, prelude::*, px};
 use gpui_component::tooltip::Tooltip;
 
 use crate::Explorer;
@@ -96,6 +96,8 @@ impl Explorer {
                         .on_click(cx.listener(move |this, _, _, cx| { this.transfers.dismiss(id); this.retry_failed(cx); })))));
             }
         }
-        Some(card.into_any_element())
+        // Rises into place when a copy starts; progress updates do not replay it.
+        Some(card.with_animation("transfer-appear", crate::theme::motion(160),
+            |card, delta| card.opacity(delta).bottom(px(44. - 8. * (1. - delta)))).into_any_element())
     }
 }
