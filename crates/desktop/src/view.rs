@@ -43,10 +43,25 @@ const LIST_ICON: f32 = 24.;
 const LIST_RIGHT: f32 = 20.;
 
 /// Folder contents fade in this long; clicks and keys work meanwhile.
-const LIST_APPEAR_MS: u64 = 110;
+const LIST_APPEAR_MS: u64 = 140;
 
-fn list_appear(list: gpui::Div, delta: f32) -> gpui::Div {
-    list.opacity(0.35 + 0.65 * delta)
+/// The fade-in of a folder's contents, coming from the side the pane went:
+/// from the right into a subfolder, from the left back up to a parent.
+fn list_appear(way: f32) -> impl Fn(gpui::Div, f32) -> gpui::Div {
+    move |list, delta| list.opacity(0.35 + 0.65 * delta).left(px(way * crate::motion::SLIDE * (1. - delta)))
+}
+
+/// What lies under a row or tile's content: the light of a new item and
+/// the fill of a folder about to open under dragged files.
+fn item_overlays(flash: Option<f32>, fill: Option<f32>) -> Vec<gpui::AnyElement> {
+    let mut layers = Vec::new();
+    if let Some(strength) = flash {
+        layers.push(div().absolute().top_0().left_0().size_full().bg(accent_alpha((strength * 110.) as u8)).into_any_element());
+    }
+    if let Some(fill) = fill {
+        layers.push(div().absolute().top_0().left_0().h_full().w(gpui::relative(fill)).bg(accent_alpha(70)).into_any_element());
+    }
+    layers
 }
 
 fn column_scroll_area<I: Into<gpui::ElementId>>(id: I, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<I> {
@@ -200,7 +215,14 @@ impl Explorer {
             scroll.scroll_to_item(active_index); self.tab_reveal.insert(group,reveal);
         }
         let wheel = scroll.clone();
-        let mut strip = div().id(SharedString::from(format!("tabs-{}",group.0)))
+        // Tab widths as drawn: a closing tab narrows from its own.
+        let gap = self.motion.tab_gap(group);
+        let widths = self.motion.tab_widths.clone();
+        let mut strip = div()
+            .when(gap.is_none(), |strip| strip.on_children_prepainted(move |bounds, _, _| {
+                widths.borrow_mut().insert(group, bounds.iter().map(|b| f32::from(b.size.width)).collect());
+            }))
+            .id(SharedString::from(format!("tabs-{}",group.0)))
             .flex_1().min_w_0().h_full().flex().items_end().gap_1().px_1()
             .overflow_x_scroll().track_scroll(&scroll)
             .on_scroll_wheel(move |event,window,cx| {
@@ -219,12 +241,18 @@ impl Explorer {
         // With the project card open no tab is the current one: the card is.
         let card_open=self.cards.shown_in(group);
         for (index,tab) in tabs.iter().enumerate() {
+            if let Some((_, width)) = gap.filter(|(at, _)| *at == index) {
+                strip = strip.child(div().flex_none().h(px(32.)).w(px(width)));
+            }
+            let opening = self.motion.tab_opening(group, index);
             let active=index==active_index && !card_open;
             let closable=(tabs.len()>1 || self.browser.groups.len()>1) && !tab.pinned;
             let tip=tab.pane.path.display().to_string();
             strip=strip.child(div().id(("tab",index)).group("tab").relative().flex_none().h(px(32.))
                 .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
                 .rounded_t(px(4.)).cursor_pointer()
+                // A new tab widens into its place.
+                .when_some(opening,|tab,open|tab.min_w(px(96.*open)).max_w(px(200.*open)).overflow_hidden().opacity(open))
                 .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(if focused {TEXT} else {TEXT_MUTED})))
                 .when(active && focused,|row|row.child(div().absolute().bottom_0().left(px(10.)).right(px(10.)).h(px(2.))
                     .rounded(px(1.)).bg(rgb(ACCENT))))
@@ -250,6 +278,9 @@ impl Explorer {
                     this.focus_group(group,cx);
                     this.open_menu(event.position,MenuTarget::Tab(group,index),cx);
                 })));
+        }
+        if let Some((_, width)) = gap.filter(|(at, _)| *at >= tabs.len()) {
+            strip = strip.child(div().flex_none().h(px(32.)).w(px(width)));
         }
         // A project lives in this pane: its name leads the tab strip.
         let project = self.browser.group(group).and_then(|g|g.project.as_ref()).map(|p|p.name.clone());
@@ -1344,6 +1375,9 @@ impl Explorer {
             // A folder's contents come in with a short fade, once per opening:
             // refreshes keep the same key and stay still.
             let appear_id = SharedString::from(format!("list-appear-{}-{}", side.0, folder.display()));
+            // A column opened beside the current one (a folder's preview) comes from the right.
+            let pane_folder = self.pane_path(side);
+            let way = if folder == pane_folder { self.motion.went(side, &pane_folder) } else { 1. };
             let wheel = crate::smooth_scroll::layer(self.smooth.clone(), format!("list-{}-{}", side.0, folder.display()).into(), edge_handle.clone());
             let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {
@@ -1364,7 +1398,7 @@ impl Explorer {
                     .track_scroll(&handle)
                     .h_full()
                     .pt_2().pl_2().pr(px(12.))
-                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear)).into_any_element();
+                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear(way))).into_any_element();
             }
             column = column.child(
                 div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
@@ -1379,7 +1413,7 @@ impl Explorer {
                     .h_full()
                     .pl_1().pr(px(12.))
                     .on_mouse_down(MouseButton::Left,cx.listener({ let folder=background_marquee_folder.clone(); move |this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx) }))
-                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear)
+                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear(way))
             );
             if self.unwatched_folders.contains(&background_marquee_folder) {
                 column = column.child(
@@ -1433,6 +1467,9 @@ impl Explorer {
             .when(selected, |tile| tile.bg(rgb(if focused_pane { ACCENT_SOFT } else { HOVER })))
             .when(!selected && right_target, |tile| tile.bg(rgb(ACCENT_SOFT)))
             .when(!selected && !right_target, |tile| tile.hover(|style| style.bg(rgb(HOVER))))
+            .relative().overflow_hidden()
+            .children(item_overlays(self.motion.flash_of(&path),
+                is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
             .child(div().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
                 .child(match picture {
                     Some(file) => img(file).max_w(px(tile_w - 12.)).max_h(px(picture_size)).object_fit(ObjectFit::Contain)
@@ -1536,6 +1573,9 @@ impl Explorer {
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
+            .relative()
+            .children(item_overlays(self.motion.flash_of(&path),
+                is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
             // An older version sits indented under the newest one.
             .when(matches!(stack, Some(Stacked::Member { .. })), |row| row.child(div().w(px(16.)).flex_none()))
             .group("file-row")
@@ -2226,7 +2266,7 @@ impl Explorer {
                 bar = bar.child(div().flex_none().flex().items_center().gap_2()
                     .child(div().w(px(140.)).h(px(6.)).rounded_full().bg(rgb(BORDER)).overflow_hidden()
                         .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT }))
-                            .w(gpui::relative(fraction.clamp(0.0, 1.0) as f32))))
+                            .w(gpui::relative(self.motion.bar().unwrap_or(fraction.clamp(0.0, 1.0) as f32)))))
                     .child(div().w(px(32.)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.0).floor() as u32))));
             }
             // With the transfer panel open its own buttons do this.
@@ -2954,6 +2994,8 @@ impl Render for Explorer {
         if self.hwnd.is_none() { self.hwnd = crate::window_hwnd(window); }
         if self.interface_focus_pending {self.interface_focus_pending=false;window.focus(&self.focus_handle,cx);}
         self.validate_marquee(cx);
+        self.motion.progress(self.transfers.fraction);
+        if self.motion.wants_frame(self.transfers.fraction) || self.spring_filling() { window.request_animation_frame(); }
         if self.clear_filter {
             self.clear_filter = false;
             self.filter.clear();

@@ -40,7 +40,7 @@ impl Explorer {
                     .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx)));
             }
             card = card.child(div().h(px(6.)).w_full().rounded_full().bg(rgb(BORDER)).overflow_hidden()
-                .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT })).w(gpui::relative(fraction))));
+                .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT })).w(gpui::relative(self.motion.bar().unwrap_or(fraction)))));
             // The item being copied counts: "1 из 3" while the first one runs.
             let mut facts = if live.total > 0 { vec![format!("{} из {}", (live.processed + 1).min(live.total), live.total)] } else { Vec::new() };
             if live.total_bytes > 0 { facts.push(format!("{} из {}", format_size(live.bytes), format_size(live.total_bytes))); }

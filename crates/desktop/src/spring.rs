@@ -23,6 +23,8 @@ pub(crate) enum SpringTarget {
 pub(crate) struct Spring {
     target: SpringTarget,
     generation: u64,
+    /// When the pointer settled on the target: the fill runs from here.
+    started: std::time::Instant,
     /// Re-claimed by the hovered element on every move; the root drops an
     /// unclaimed spring, so leaving the target cancels it.
     claimed: bool,
@@ -50,7 +52,7 @@ impl Explorer {
         }
         self.spring_generation += 1;
         let generation = self.spring_generation;
-        self.spring = Some(Spring { target, generation, claimed: true });
+        self.spring = Some(Spring { target, generation, claimed: true, started: std::time::Instant::now() });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DELAY).await;
             let _ = this.update(cx, |this, cx| {
@@ -68,6 +70,17 @@ impl Explorer {
                 cx.notify();
             });
         }).detach();
+    }
+
+    /// How far `target` has filled on its way to opening (0..1), while it does.
+    pub(crate) fn spring_fill(&self, target: &SpringTarget) -> Option<f32> {
+        let spring = self.spring.as_ref().filter(|spring| spring.generation != 0 && &spring.target == target)?;
+        Some((spring.started.elapsed().as_secs_f32() / DELAY.as_secs_f32()).min(1.))
+    }
+
+    /// Whether a target is filling now (the window draws its next frame).
+    pub(crate) fn spring_filling(&self) -> bool {
+        self.spring.as_ref().is_some_and(|spring| spring.generation != 0 && spring.started.elapsed() < DELAY)
     }
 
     /// Root mouse move, after the hovered elements had their turn.

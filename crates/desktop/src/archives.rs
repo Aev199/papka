@@ -79,6 +79,7 @@ impl Explorer {
                 match result {
                     Ok(created) => {
                         this.status = format!("Извлечено в «{}»: {}", browser::display_name(&target), created.len());
+                        this.motion.flash(created.iter().cloned());
                         this.load_directory(target.clone(), true, cx);
                         if this.pane_path(this.active_side()) == target {
                             this.marked = created.iter().skip(1).cloned().collect();

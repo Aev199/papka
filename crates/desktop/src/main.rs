@@ -18,6 +18,7 @@ mod spring;
 mod edge_scroll;
 mod smooth_scroll;
 mod marked;
+mod motion;
 mod search_panel;
 mod updates;
 mod icons;
@@ -242,6 +243,7 @@ struct Explorer {
     spring_generation: u64,
     edge_scroll: edge_scroll::EdgeScroll,
     smooth: smooth_scroll::SmoothScroll,
+    motion: motion::Motion,
     /// A system drag to another program is running.
     #[cfg_attr(not(windows), allow(dead_code))]
     dragging_out: bool,
@@ -524,7 +526,7 @@ impl Explorer {
             cards: project_card::ProjectCards::new(window, cx),
             registry: inbox::Registry { due: true, ..Default::default() },
             hwnd: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, edge_scroll: Default::default(), smooth: Default::default(), dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, edge_scroll: Default::default(), smooth: Default::default(), motion: Default::default(), dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),
@@ -714,8 +716,9 @@ impl Explorer {
         // The new tab is shown: a project card over the pane gives way.
         self.leave_project_card(self.browser.active, cx);
         let path = self.browser.active().active().path.clone();
-        if let Err(e) = self.browser.new_tab(self.browser.active, path) {
-            self.status = e.to_string();
+        match self.browser.new_tab(self.browser.active, path) {
+            Ok(_) => self.motion.tab_opened(self.browser.active, self.browser.active_group().active_tab),
+            Err(e) => self.status = e.to_string(),
         }
         self.selected = None; self.marked.clear(); self.anchor = None;
         self.close_search();
@@ -784,8 +787,9 @@ impl Explorer {
 
     fn open_in_new_tab(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         self.leave_project_card(self.browser.active, cx);
-        if let Err(error) = self.browser.new_tab(self.browser.active, path) {
-            self.status = format!("Не удалось открыть вкладку: {error}");
+        match self.browser.new_tab(self.browser.active, path) {
+            Ok(_) => self.motion.tab_opened(self.browser.active, self.browser.active_group().active_tab),
+            Err(error) => self.status = format!("Не удалось открыть вкладку: {error}"),
         }
         self.selected = None;
         self.close_search();
@@ -1276,6 +1280,7 @@ impl Explorer {
                 this.load_directory(target.clone(), true, cx);
                 this.finish_transfer("Скопировано", ok, cancelled, target, failures, cx);
                 if !created.is_empty() {
+                    this.motion.flash(created.iter().filter_map(|receipt| receipt.destination.clone()));
                     let label = format!("копирование ({})", created.len());
                     this.push_undo(created, label);
                 }
@@ -1338,6 +1343,7 @@ impl Explorer {
                 }
                 this.finish_transfer("Перемещено", moved, cancelled, target, failures, cx);
                 if moved > 0 {
+                    this.motion.flash(receipts.iter().filter_map(|receipt| receipt.destination.clone()));
                     this.selected = normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));
                     let label = if moved == 1 {
                         format!("перенос «{}»", browser::display_name(&receipts[0].source))
@@ -1402,6 +1408,7 @@ impl Explorer {
                             this.refresh_parent_of(dest, cx);
                         }
                         this.status = if file { "Файл создан" } else { "Папка создана" }.into();
+                        this.motion.flash(receipt.destination.clone());
                         if let Some(dest) = receipt.destination.clone() {
                             let label = format!("создание {} «{}»", if file { "файла" } else { "папки" }, browser::display_name(&dest));
                             this.push_undo(vec![receipt.clone()], label);
@@ -1497,6 +1504,7 @@ impl Explorer {
                             this.refresh_parent_of(dest, cx);
                         }
                         this.selected = normalized(receipt.destination.clone());
+                        this.motion.flash(receipt.destination.clone());
                         let label = format!("переименование «{}»", browser::display_name(&receipt.source));
                         this.status = "Переименовано. Ctrl+Z — отменить.".into();
                         this.push_undo(vec![receipt], label);

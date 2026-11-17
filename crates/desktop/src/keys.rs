@@ -481,6 +481,7 @@ impl Explorer {
             cx.notify();
             return;
         }
+        self.motion.tab_closed(self.browser.active, index);
         self.browser.close_tab(self.browser.active, index);
         self.prune_group_state();
         self.selected = None; self.marked.clear(); self.anchor = None;
