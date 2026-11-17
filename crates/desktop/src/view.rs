@@ -2164,10 +2164,13 @@ impl Explorer {
     // -------------------------------------------------------- status bar
 
     fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // The project card covers the list: the bar speaks of the card.
+        let card = self.card_covers_list();
+        let card_summary = card.then(|| self.card_status()).flatten();
         let current = self.pane_path(self.active_side());
-        let count = self.folder_view(self.browser.active, &current).map(|(_, indices)| indices.len());
+        let count = if card { None } else { self.folder_view(self.browser.active, &current).map(|(_, indices)| indices.len()) };
         let marked = self.marked.len();
-        let selection = if marked > 1 { Some(format!("Выбрано: {marked}")) } else { self.selected.clone().and_then(|selected| {
+        let selection = if card { None } else if marked > 1 { Some(format!("Выбрано: {marked}")) } else { self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
             let (listing, _) = self.folder_view(self.browser.active, &folder)?;
             listing.entries.iter().find(|entry| entry.path == selected).map(|entry| {
@@ -2175,13 +2178,15 @@ impl Explorer {
                 else { format!("Выбрано: {} · {}", entry.name, format_size(entry.size)) }
             })
         }) };
-        let filter_shown = self.filter_open || !self.filter.is_empty();
+        let filter_shown = !card && (self.filter_open || !self.filter.is_empty());
         let split = self.browser.groups.len() > 1;
         let mut bar = div().w_full().h(px(32.)).flex_none().pl_1().pr_1().flex().items_center().gap_3()
             .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER))
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             // Atlas: a magnifier in the corner; the filter field opens in place.
-            .when(!filter_shown, |this| this.child(
+            .when_some(card_summary, |this, summary| this.child(div().flex().items_center().gap_2().pl_2()
+                .child(small_icon("fm/layers.svg", ACCENT)).child(summary)))
+            .when(!filter_shown && !card, |this| this.child(
                 bar_button("filter-open", "fm/search.svg", "Поиск во вложенных папках (Ctrl+F). Фильтр этой папки — просто начните набирать имя", false)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.key_find(&crate::keys::Find, window, cx);
@@ -2197,7 +2202,7 @@ impl Explorer {
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
             .when_some(count, |this, count| this.child(items_label(count)))
             .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
-            .when_some(self.label_filter(self.browser.active), |this, label| this.child(
+            .when_some(self.label_filter(self.browser.active).filter(|_| !card), |this, label| this.child(
                 div().id("label-filter").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded(px(4.))
                     .bg(rgb(HOVER)).text_color(rgb(TEXT))
                     .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(crate::labels::color(label))))

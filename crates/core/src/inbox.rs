@@ -7,7 +7,7 @@
 //! described in `docs/INBOX.md`; the two sides share no code, only it.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -57,11 +57,7 @@ pub fn write_registry(path: &Path, projects: Vec<RegistryProject>) -> io::Result
     let text = serde_json::to_string_pretty(&registry).map_err(io::Error::other)?;
     let folder = path.parent().ok_or_else(|| io::Error::other("у файла проектов нет папки"))?;
     fs::create_dir_all(folder)?;
-    let mut file = tempfile::NamedTempFile::new_in(folder)?;
-    file.write_all(text.as_bytes())?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    crate::path_utils::write_whole(path, text.as_bytes())
 }
 
 /// A folder deep enough to be an object, not `Z:\` or `\\server\share`.
@@ -184,9 +180,36 @@ pub fn read(inbox: &Path) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
+/// Sets the caption of an entry: the one field of a sender's `.json` Papka
+/// writes. The rest of the file stays as the sender wrote it; the file is
+/// replaced whole (a temporary file beside it, then a rename).
+pub fn set_caption(sidecar: &Path, caption: &str) -> io::Result<()> {
+    let text = fs::read_to_string(sidecar)?;
+    let mut value: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let object = value.as_object_mut().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "запись — не объект JSON"))?;
+    let caption: String = caption.trim().chars().take(500).collect();
+    object.insert("caption".into(), serde_json::Value::String(caption));
+    crate::path_utils::write_whole(sidecar, serde_json::to_string_pretty(&value).map_err(io::Error::other)?.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_caption_is_written_and_everything_else_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("20261117-143205 Снимок.json");
+        fs::write(&sidecar, r#"{"format":1,"kind":"image","caption":"","image":"20261117-143205 Снимок.png","source":{"app":"acad.exe","window":"x"},"extra":42}"#).unwrap();
+        set_caption(&sidecar, "  Сверить привязку С-18  ").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(value["caption"], "Сверить привязку С-18");
+        assert_eq!((value["extra"].as_i64(), value["source"]["app"].as_str()), (Some(42), Some("acad.exe")));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file left");
+        fs::write(&sidecar, "[1]").unwrap();
+        assert!(set_caption(&sidecar, "x").is_err());
+    }
 
     #[test]
     fn the_registry_is_written_whole_and_reads_back() {

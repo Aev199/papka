@@ -10,8 +10,9 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 pub const FILE_NAME: &str = "object.json";
 /// The read-only page the same programs write beside the passport.
@@ -36,6 +37,8 @@ pub struct Passport {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Section {
+    /// The block's key in the file; empty for the loose values on top.
+    pub key: String,
     pub title: String,
     /// Label (may be empty) and value.
     pub rows: Vec<(String, String)>,
@@ -70,10 +73,15 @@ pub fn parse(text: &str) -> io::Result<Passport> {
     let Value::Object(object) = value else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "паспорт должен быть объектом JSON"));
     };
+    Ok(from_raw(&object))
+}
+
+/// The passport as shown, from its raw file.
+pub fn from_raw(object: &Map<String, Value>) -> Passport {
     let mut passport = Passport::default();
-    let mut general = Section { title: "Объект".into(), rows: Vec::new() };
+    let mut general = Section { key: String::new(), title: "Объект".into(), rows: Vec::new() };
     let mut updated: [Option<String>; 2] = [None, None];
-    for (key, value) in &object {
+    for (key, value) in object {
         match role(key) {
             Role::Title => passport.title = scalar(value).filter(|text| !text.is_empty()),
             Role::Updated => updated[0] = scalar(value),
@@ -84,11 +92,11 @@ pub fn parse(text: &str) -> io::Result<Passport> {
             Role::Block => match value {
                 Value::Object(fields) => {
                     let rows: Vec<_> = fields.iter().filter_map(|(key, value)| Some((label(key), flat(value)?))).take(MAX_ROWS).collect();
-                    if !rows.is_empty() { passport.sections.push(Section { title: label(key), rows }); }
+                    passport.sections.push(Section { key: key.clone(), title: label(key), rows });
                 }
                 Value::Array(items) => {
                     let rows: Vec<_> = items.iter().filter_map(|item| Some((item_label(item), item_text(item)?))).take(MAX_ROWS).collect();
-                    if !rows.is_empty() { passport.sections.push(Section { title: label(key), rows }); }
+                    passport.sections.push(Section { key: key.clone(), title: label(key), rows });
                 }
                 other => if let Some(text) = flat(other) { general.rows.push((label(key), text)); },
             },
@@ -97,14 +105,15 @@ pub fn parse(text: &str) -> io::Result<Passport> {
     if !general.rows.is_empty() { passport.sections.insert(0, general); }
     let updated: Vec<String> = updated.into_iter().flatten().filter(|text| !text.is_empty()).collect();
     if !updated.is_empty() { passport.updated = Some(updated.join(" · ")); }
-    Ok(passport)
+    passport
 }
 
 enum Role { Title, Updated, UpdatedBy, Warnings, Journal, Skip, Block }
 
 fn role(key: &str) -> Role {
     match key.to_lowercase().as_str() {
-        "name" | "title" | "object" | "название" | "объект" => Role::Title,
+        // Not "объект": that is the block of the object's own values.
+        "name" | "title" | "object" | "название" => Role::Title,
         "updated" | "updated_at" | "modified" | "обновлено" => Role::Updated,
         "updated_by" | "program" | "writer" | "программа" => Role::UpdatedBy,
         "warnings" | "alerts" | "предупреждения" => Role::Warnings,
@@ -187,7 +196,8 @@ fn item_text(item: &Value) -> Option<String> {
             _ => format!("{}: {}", label(key), flat(value)?),
         }))
         .collect::<Vec<_>>().join(" · ");
-    (!text.is_empty()).then(|| clip(text))
+    // A named field still empty ("Шифр: ") stays, to be filled in.
+    (!text.is_empty() || named.is_some()).then(|| clip(text))
 }
 
 /// Warnings and journal entries: one line each, whatever their shape.
@@ -202,6 +212,188 @@ fn lines(value: &Value) -> Vec<String> {
         }).take(MAX_ROWS).collect(),
         other => flat(other).into_iter().collect(),
     }
+}
+
+// ---------------------------------------------------------------- editing
+//
+// No calculation program keeps the passport yet, so Papka does: it creates
+// `object.json` in the object's folder and edits it block by block. A block
+// Papka writes is a list — `{"name": label, "text": value}` for a
+// «Метка: значение» line, a plain string for other lines — which the reader
+// above shows exactly as typed. Blocks nobody edited keep whatever another
+// program wrote. The file is replaced whole, and not if someone changed it
+// since it was read (a shared drive with colleagues).
+
+pub type Raw = Map<String, Value>;
+
+/// Today as the passport writes dates: «17.11.2026».
+pub fn today() -> String {
+    chrono::Local::now().format("%d.%m.%Y").to_string()
+}
+
+/// The key the loose values on top are kept under once edited.
+pub const GENERAL_KEY: &str = "Объект";
+
+/// The raw passport and when it was last written, for `write`.
+pub fn read_raw(path: &Path) -> io::Result<(Raw, Option<SystemTime>)> {
+    let modified = fs::metadata(path)?.modified().ok();
+    let bytes = fs::read(path)?;
+    let text = String::from_utf8_lossy(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes));
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(raw)) => Ok((raw, modified)),
+        Ok(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "паспорт должен быть объектом JSON")),
+        Err(error) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("паспорт не читается как JSON: {error}"))),
+    }
+}
+
+/// A new passport: the object's name and empty blocks to fill.
+pub fn template(name: &str) -> Raw {
+    let field = |label: &str| serde_json::json!({ "name": label, "text": "" });
+    let mut raw = Raw::new();
+    raw.insert("format".into(), Value::from(1));
+    raw.insert("name".into(), Value::String(name.into()));
+    raw.insert(GENERAL_KEY.into(), Value::Array(["Шифр", "Адрес", "Заказчик", "Стадия", "ГИП"].iter().map(|l| field(l)).collect()));
+    raw.insert("Геология".into(), Value::Array(Vec::new()));
+    raw.insert("Модели".into(), Value::Array(Vec::new()));
+    raw.insert("warnings".into(), Value::Array(Vec::new()));
+    raw.insert("journal".into(), Value::Array(Vec::new()));
+    raw
+}
+
+/// A block's rows as text to edit: «Метка: значение» or the value alone.
+pub fn block_text(section: &Section) -> String {
+    section.rows.iter()
+        .map(|(label, value)| if label.is_empty() { value.clone() } else { format!("{label}: {value}") })
+        .collect::<Vec<_>>().join("\n")
+}
+
+/// The text typed for a block as what is written: a list of fields and lines.
+fn block_value(text: &str) -> Value {
+    Value::Array(text.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() { return None; }
+        // A short label before ": " (or a bare "Метка:") is a field.
+        match line.split_once(':') {
+            Some((label, rest)) if !label.trim().is_empty() && label.chars().count() <= 40 && !label.contains(['\\', '/'])
+                && (rest.is_empty() || rest.starts_with(' ')) =>
+                Some(serde_json::json!({ "name": label.trim(), "text": rest.trim() })),
+            _ => Some(Value::String(line.to_string())),
+        }
+    }).collect())
+}
+
+fn index_of(raw: &Raw, key: &str) -> Option<usize> {
+    raw.keys().position(|existing| existing == key)
+}
+
+fn key_of(raw: &Raw, wanted: fn(&str) -> bool) -> Option<String> {
+    raw.keys().find(|key| wanted(key)).cloned()
+}
+
+fn is_loose(key: &str, value: &Value) -> bool {
+    matches!(role(key), Role::Block) && !matches!(value, Value::Object(_) | Value::Array(_) | Value::Null)
+}
+
+/// Where a new block goes: after the last block, before the warnings and
+/// the journal if they come last.
+fn block_end(raw: &Raw) -> usize {
+    raw.iter().rposition(|(key, _)| matches!(role(key), Role::Block)).map_or(raw.len(), |index| index + 1)
+}
+
+/// Writes block `old_key` (`""`: the loose values on top) with `title` and
+/// the typed `text`, in its place. A new title becomes the block's key; a
+/// block that is new goes after the others.
+pub fn set_block(raw: &mut Raw, old_key: Option<&str>, title: &str, text: &str) {
+    let title = title.trim();
+    let mut position = None;
+    match old_key {
+        Some("") => {
+            // The loose values give way to one «Объект» block where the first was.
+            let loose: Vec<String> = raw.iter().filter(|(key, value)| is_loose(key, value)).map(|(key, _)| key.clone()).collect();
+            position = loose.first().and_then(|first| index_of(raw, first));
+            for key in loose { raw.shift_remove(&key); }
+        }
+        Some(key) => {
+            position = index_of(raw, key);
+            raw.shift_remove(key);
+        }
+        None => {}
+    }
+    let keep = old_key.filter(|key| !key.is_empty() && label(key) == title).map(str::to_string);
+    let mut key = keep.unwrap_or_else(|| if title.is_empty() { "Без названия".into() } else { title.to_string() });
+    // Not on top of another block, nor of a field with a role.
+    let base = key.clone();
+    let mut n = 2;
+    while raw.contains_key(&key) || !matches!(role(&key), Role::Block) {
+        key = format!("{base} {n}");
+        n += 1;
+    }
+    let at = position.unwrap_or_else(|| block_end(raw)).min(raw.len());
+    raw.shift_insert(at, key, block_value(text));
+}
+
+pub fn remove_block(raw: &mut Raw, key: &str) {
+    if key.is_empty() {
+        let loose: Vec<String> = raw.iter().filter(|(key, value)| is_loose(key, value)).map(|(key, _)| key.clone()).collect();
+        for key in loose { raw.shift_remove(&key); }
+    } else {
+        raw.shift_remove(key);
+    }
+}
+
+/// The warnings (one a line), under whatever key the file uses for them.
+pub fn set_warnings(raw: &mut Raw, text: &str) {
+    let key = key_of(raw, |key| matches!(role(key), Role::Warnings)).unwrap_or_else(|| "warnings".into());
+    raw.insert(key, Value::Array(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| Value::String(l.into())).collect()));
+}
+
+/// A line at the end of the journal: «17.11.2026 — text».
+pub fn add_journal(raw: &mut Raw, date: &str, text: &str) {
+    let key = key_of(raw, |key| matches!(role(key), Role::Journal)).unwrap_or_else(|| "journal".into());
+    let line = Value::String(format!("{date} — {}", text.trim()));
+    match raw.get_mut(&key) {
+        Some(Value::Array(items)) => items.push(line),
+        _ => { raw.insert(key, Value::Array(vec![line])); }
+    }
+}
+
+/// The whole journal as typed (one entry a line).
+pub fn set_journal(raw: &mut Raw, text: &str) {
+    let key = key_of(raw, |key| matches!(role(key), Role::Journal)).unwrap_or_else(|| "journal".into());
+    raw.insert(key, Value::Array(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| Value::String(l.into())).collect()));
+}
+
+pub fn set_title(raw: &mut Raw, name: &str) {
+    let key = key_of(raw, |key| matches!(role(key), Role::Title)).unwrap_or_else(|| "name".into());
+    if raw.contains_key(&key) { raw.insert(key, Value::String(name.trim().into())); }
+    else { raw.shift_insert(0, key, Value::String(name.trim().into())); }
+}
+
+/// «обновлено …»: the date and who wrote it last.
+pub fn touch(raw: &mut Raw, date: &str, by: &str) {
+    let updated = key_of(raw, |key| matches!(role(key), Role::Updated)).unwrap_or_else(|| "updated".into());
+    let writer = key_of(raw, |key| matches!(role(key), Role::UpdatedBy)).unwrap_or_else(|| "updated_by".into());
+    raw.insert(updated, Value::String(date.into()));
+    raw.insert(writer, Value::String(by.into()));
+}
+
+/// Writes the passport. `expected` is when it was read (`None`: it did not
+/// exist); if the file changed since, nothing is written and the error
+/// says so. Returns when it was written.
+pub fn write(path: &Path, raw: &Raw, expected: Option<SystemTime>) -> io::Result<Option<SystemTime>> {
+    let now = fs::metadata(path).ok().map(|metadata| metadata.modified().ok());
+    let unchanged = match (now, expected) {
+        (None, None) => true,
+        (Some(now), Some(expected)) => now == Some(expected),
+        _ => false,
+    };
+    if !unchanged {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists,
+            "паспорт изменён в другом месте — он перечитан, повторите правку"));
+    }
+    let text = serde_json::to_string_pretty(raw).map_err(io::Error::other)?;
+    crate::path_utils::write_whole(path, text.as_bytes())?;
+    Ok(fs::metadata(path)?.modified().ok())
 }
 
 #[cfg(test)]
@@ -238,8 +430,9 @@ mod tests {
             "Femgeo · расхождение собственного веса с ЛИРА 4,7 %"]);
         assert_eq!(passport.journal, ["05.11 · SoilStiffness · MIDAS → ЛИРА 2024, 3 предупреждения", "01.11 Femgeo подбор поля, 91 свая"]);
         let titles: Vec<&str> = passport.sections.iter().map(|section| section.title.as_str()).collect();
-        assert_eq!(titles, ["Объект", "Геология", "Модели", "Итерации"], "the file's order; empty blocks are left out");
+        assert_eq!(titles, ["Объект", "Геология", "Модели", "Итерации", "empty"], "the file's order; empty blocks stay, to be filled");
         assert_eq!(passport.sections[0].rows, [("Шифр".to_string(), "044".to_string())]);
+        assert_eq!(passport.sections[1].key, "geology");
         assert_eq!(passport.sections[1].rows[0], ("Файл".to_string(), "ostrov.sqlite".to_string()));
         assert_eq!(passport.sections[1].rows[2], ("ИГЭ".to_string(), "9".to_string()));
         let models = &passport.sections[2].rows;
@@ -255,6 +448,63 @@ mod tests {
         assert_eq!(parse("{}").unwrap(), Passport::default());
         let long = format!(r#"{{"note": "{}"}}"#, "я".repeat(1000));
         assert!(parse(&long).unwrap().sections[0].rows[0].1.chars().count() <= MAX_TEXT + 1);
+    }
+
+    #[test]
+    fn papka_keeps_a_passport_block_by_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE_NAME);
+        let mut raw = template("Корпус 2");
+        assert_eq!(write(&file, &raw, Some(SystemTime::UNIX_EPOCH)).unwrap_err().kind(), io::ErrorKind::AlreadyExists,
+            "a passport that is not there is not \"unchanged\"");
+        let mut stamp = write(&file, &raw, None).unwrap();
+        let shown = read(&file).unwrap();
+        assert_eq!(shown.title.as_deref(), Some("Корпус 2"));
+        let general = shown.sections.iter().find(|s| s.key == GENERAL_KEY).unwrap();
+        assert_eq!(block_text(general).lines().next(), Some("Шифр: "));
+
+        set_block(&mut raw, Some(GENERAL_KEY), "Объект", "Шифр: 044\nАдрес: Москва, ЗАО\nсвободная строка");
+        set_block(&mut raw, Some("Геология"), "Инженерная геология", "База: Z:/044/geo.sqlite\nИГЭ: 9");
+        set_block(&mut raw, None, "Нагрузки", "Сбор: 12.11");
+        set_warnings(&mut raw, "Модель ЛИРА изменена после расчёта\n\n");
+        add_journal(&mut raw, "17.11.2026", "Пересчитан C1");
+        touch(&mut raw, "17.11.2026", "Papka");
+        stamp = write(&file, &raw, stamp).unwrap();
+        let shown = read(&file).unwrap();
+        let titles: Vec<&str> = shown.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Объект", "Инженерная геология", "Модели", "Нагрузки"], "renamed in place, new after the others");
+        assert_eq!(shown.sections[0].rows, [("Шифр".into(), "044".into()), ("Адрес".into(), "Москва, ЗАО".into()), (String::new(), "свободная строка".into())]);
+        assert_eq!(block_text(&shown.sections[1]), "База: Z:/044/geo.sqlite\nИГЭ: 9", "what is typed comes back");
+        assert_eq!(shown.warnings, ["Модель ЛИРА изменена после расчёта"]);
+        assert_eq!(shown.journal, ["17.11.2026 — Пересчитан C1"]);
+        assert_eq!(shown.updated.as_deref(), Some("17.11.2026 · Papka"));
+
+        // Someone else saved meanwhile: refused, nothing lost on disk.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&file, "{\"name\":\"чужая правка\"}").unwrap();
+        let other = fs::read_to_string(&file).unwrap();
+        assert!(write(&file, &raw, stamp).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), other);
+        remove_block(&mut raw, "Нагрузки");
+        assert!(!raw.contains_key("Нагрузки"));
+    }
+
+    #[test]
+    fn loose_values_of_another_program_become_one_block_when_edited() {
+        let mut raw = match serde_json::from_str::<Value>(r#"{"name":"Остров","code":"044","geology":{"ige":9},"address":"Москва"}"#).unwrap() {
+            Value::Object(raw) => raw, _ => unreachable!() };
+        let shown = parse(&Value::Object(raw.clone()).to_string()).unwrap();
+        assert_eq!(shown.sections[0].key, "", "the loose values");
+        set_block(&mut raw, Some(""), "Объект", "Шифр: 044-1");
+        assert!(!raw.contains_key("code") && !raw.contains_key("address"));
+        let keys: Vec<&str> = raw.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["name", GENERAL_KEY, "geology"], "where the first loose value was");
+        // A block named like a role or like another block gets a number.
+        set_block(&mut raw, None, "geology", "x: 1");
+        set_block(&mut raw, None, "journal", "y: 2");
+        assert!(raw.contains_key("geology 2") && raw.contains_key("journal 2"));
+        set_title(&mut raw, "Остров-2");
+        assert_eq!(raw["name"], "Остров-2");
     }
 
     #[test]

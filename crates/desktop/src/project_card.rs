@@ -13,7 +13,7 @@ use filemanager_core::browser;
 use filemanager_core::history::{self, Event};
 use filemanager_core::inbox::{self, Entry, Kind};
 use filemanager_core::panes::GroupId;
-use filemanager_core::passport::{self, Passport};
+use filemanager_core::passport::{self, Passport, Raw};
 use filemanager_core::project_card::{self as model, Card, Line};
 use gpui::{AnyElement, AppContext, Context, Div, ElementId, Entity, Focusable, ObjectFit, Stateful, Window, div, img, prelude::*, px};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -37,13 +37,35 @@ pub(crate) enum PassportState {
     Loading,
     /// No `object.json` in the project's folders or above them.
     Absent,
-    Found { file: PathBuf, page: Option<PathBuf>, passport: Passport },
+    /// `raw` and `modified` are what is changed and written back.
+    Found { file: PathBuf, page: Option<PathBuf>, passport: Passport, raw: Raw, modified: Option<std::time::SystemTime> },
     Unreadable { file: PathBuf, error: String },
 }
 
-/// The section being edited.
+/// What is being edited in place.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Target {
+    /// A section of the card, by its index.
+    Section(usize),
+    /// The object's name in the passport.
+    PassportTitle,
+    /// A passport block by its key (`""`: the loose values on top).
+    PassportBlock(String),
+    /// A block being added to the passport.
+    NewPassportBlock,
+    PassportWarnings,
+    PassportJournal,
+    /// The caption of an inbox entry, by its `.json`.
+    Caption(PathBuf),
+}
+
+impl Target {
+    /// Only a name is typed: Enter saves, there is no text field.
+    fn title_only(&self) -> bool { matches!(self, Target::PassportTitle | Target::Caption(_)) }
+}
+
 pub(crate) struct Editing {
-    index: usize,
+    target: Target,
     /// Just added: cancelling removes it again.
     fresh: bool,
 }
@@ -55,6 +77,8 @@ pub(crate) struct OpenCard {
     editing: Option<Editing>,
     /// The section whose bin was clicked once: the second click deletes.
     doomed: Option<usize>,
+    /// The same for a passport block, by its key.
+    doomed_block: Option<String>,
     passport: PassportState,
     /// `None` while they are being read.
     changes: Option<Vec<Event>>,
@@ -77,6 +101,7 @@ pub(crate) struct ProjectCards {
     title_input: Entity<InputState>,
     text_input: Entity<TextareaState>,
     folder_input: Entity<InputState>,
+    journal_input: Entity<InputState>,
     requests: u64,
     /// Enter in the title or the path field acts like its button.
     _subscriptions: Vec<gpui::Subscription>,
@@ -86,7 +111,7 @@ pub(crate) struct ProjectCards {
 fn same_passport(a: &PassportState, b: &PassportState) -> bool {
     match (a, b) {
         (PassportState::Absent, PassportState::Absent) => true,
-        (PassportState::Found { passport: x, file: f, .. }, PassportState::Found { passport: y, file: g, .. }) => x == y && f == g,
+        (PassportState::Found { passport: x, file: f, modified: m, .. }, PassportState::Found { passport: y, file: g, modified: n, .. }) => x == y && f == g && m == n,
         (PassportState::Unreadable { error: x, .. }, PassportState::Unreadable { error: y, .. }) => x == y,
         _ => false,
     }
@@ -117,11 +142,19 @@ impl ProjectCards {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Explorer>) -> ProjectCards {
         let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Название раздела"));
         let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Путь к папке, например Z:\\Объекты\\044\\ИГИ"));
+        let journal_input = cx.new(|cx| InputState::new(window, cx).placeholder("Новая запись журнала — Enter"));
         let enter = |event: &InputEvent| matches!(event, InputEvent::PressEnter { .. });
         let subscriptions = vec![
-            // Enter in the title goes on to the text.
+            // Enter in a title goes on to the text; where there is no text
+            // (a caption, the object's name) it saves.
             cx.subscribe_in(&title_input, window, move |this, _, event: &InputEvent, window, cx| {
-                if enter(event) { let focus = this.cards.text_input.focus_handle(cx); window.focus(&focus, cx); }
+                if !enter(event) { return; }
+                let title_only = this.cards.open.as_ref().and_then(|open| open.editing.as_ref()).is_some_and(|editing| editing.target.title_only());
+                if title_only { this.save_card_section(cx); }
+                else { let focus = this.cards.text_input.focus_handle(cx); window.focus(&focus, cx); }
+            }),
+            cx.subscribe_in(&journal_input, window, move |this, _, event: &InputEvent, window, cx| {
+                if enter(event) { this.add_journal_entry(window, cx); }
             }),
             cx.subscribe_in(&folder_input, window, move |this, _, event: &InputEvent, _, cx| {
                 if enter(event) { this.add_typed_folder(cx); }
@@ -134,6 +167,7 @@ impl ProjectCards {
             text_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 30)
                 .placeholder("Текст. «Метка: значение» станет полем, путь к папке или файлу — ссылкой")),
             folder_input,
+            journal_input,
             requests: 0,
             _subscriptions: subscriptions,
         }
@@ -162,7 +196,7 @@ impl Explorer {
         let tabs: Vec<PathBuf> = self.project_tabs(group).into_iter().map(|(_, path)| path).collect();
         let started = card.start_folders(tabs.iter().map(PathBuf::as_path));
         self.cards.open = Some(OpenCard { group, name, card, editing: None, doomed: None,
-            passport: PassportState::Loading, changes: None, kinds: HashMap::new(), inbox: None, doomed_entry: None,
+            doomed_block: None, passport: PassportState::Loading, changes: None, kinds: HashMap::new(), inbox: None, doomed_entry: None,
             adding_folder: false, request: self.cards.requests });
         if started { self.store_card(); }
         self.context_menu = None;
@@ -174,6 +208,15 @@ impl Explorer {
         self.reload_project_card(false, cx);
         self.watch_project_card(cx);
         cx.notify();
+    }
+
+    /// The status bar's line while the card covers the list:
+    /// «Проект «X» · папок: 3 · во входящих: 2».
+    pub(crate) fn card_status(&self) -> Option<String> {
+        let open = self.cards.open.as_ref()?;
+        let mut parts = vec![format!("Проект «{}»", open.name), format!("папок: {}", open.card.folders.len())];
+        if let Some(Ok(entries)) = &open.inbox { parts.push(format!("во входящих: {}", entries.len())); }
+        Some(parts.join(" · "))
     }
 
     /// The project's inbox, as published for other programs.
@@ -217,7 +260,9 @@ impl Explorer {
                 let alive = this.update(cx, |this, cx| {
                     if !this.cards.open.as_ref().is_some_and(|open| open.name == name) { return false; }
                     this.read_project_inbox(cx);
-                    if ticks % RELOAD_EVERY == 0 { this.reload_project_card(true, cx); }
+                    // Not under the user's hands: a passport being edited stays as read.
+                    let editing = this.cards.open.as_ref().is_some_and(|open| open.editing.is_some());
+                    if ticks % RELOAD_EVERY == 0 && !editing { this.reload_project_card(true, cx); }
                     true
                 }).unwrap_or(false);
                 if !alive { break; }
@@ -375,8 +420,8 @@ impl Explorer {
         let task = cx.background_spawn(async move {
             let passport = match passport::find(&paths) {
                 None => PassportState::Absent,
-                Some(file) => match passport::read(&file) {
-                    Ok(passport) => PassportState::Found { page: passport::page_of(&file), file, passport },
+                Some(file) => match passport::read_raw(&file) {
+                    Ok((raw, modified)) => PassportState::Found { page: passport::page_of(&file), passport: passport::from_raw(&raw), file, raw, modified },
                     Err(error) => PassportState::Unreadable { file, error: error.to_string() },
                 },
             };
@@ -455,7 +500,7 @@ impl Explorer {
     /// Windows), then out of the card. Whether it did anything.
     pub(crate) fn dismiss_project_card(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(open) = self.cards.open.as_mut() else { return false };
-        if open.doomed.take().is_some() || open.doomed_entry.take().is_some() { cx.notify(); return true; }
+        if open.doomed.take().is_some() || open.doomed_entry.take().is_some() || open.doomed_block.take().is_some() { cx.notify(); return true; }
         if std::mem::take(&mut open.adding_folder) { cx.notify(); return true; }
         if open.editing.is_some() { self.save_card_section(cx); } else { self.close_project_card(cx); }
         true
@@ -465,8 +510,8 @@ impl Explorer {
     /// section just added goes away.
     fn cancel_card_edit(&mut self, cx: &mut Context<Self>) {
         let Some(open) = self.cards.open.as_mut() else { return };
-        if let Some(editing) = open.editing.take() {
-            if editing.fresh { open.card.remove(editing.index); }
+        if let Some(Editing { target: Target::Section(index), fresh: true }) = open.editing.take() {
+            open.card.remove(index);
         }
         cx.notify();
     }
@@ -479,17 +524,34 @@ impl Explorer {
     }
 
     fn edit_card_section(&mut self, index: usize, fresh: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cards.open.as_ref().is_some_and(|open| open.editing.is_some()) { self.save_card_section(cx); }
-        let Some(open) = self.cards.open.as_mut() else { return };
-        let Some(section) = open.card.sections.get(index) else { return };
+        let Some(section) = self.cards.open.as_ref().and_then(|open| open.card.sections.get(index)) else { return };
         // A new section starts with an empty name to type over.
         let (title, text) = (if fresh { String::new() } else { section.title.clone() }, section.text.clone());
-        open.editing = Some(Editing { index, fresh });
+        self.begin_edit(Target::Section(index), fresh, title, text, window, cx);
+    }
+
+    /// Puts `title` and `text` into the fields and the caret where typing
+    /// starts: the name for something new or with no text, else the text.
+    fn begin_edit(&mut self, target: Target, fresh: bool, title: String, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cards.open.as_ref().is_some_and(|open| open.editing.is_some()) { self.save_card_section(cx); }
+        let Some(open) = self.cards.open.as_mut() else { return };
+        let title_first = fresh || target.title_only();
+        open.editing = Some(Editing { target, fresh });
         open.doomed = None;
+        open.doomed_block = None;
+        // The caret goes to the end, where one goes on writing.
+        let end = |text: &str| {
+            let lines = text.split('\n').collect::<Vec<_>>();
+            gpui_component::input::Position { line: lines.len().saturating_sub(1) as u32, character: lines.last().map_or(0, |l| l.encode_utf16().count()) as u32 }
+        };
+        let (title_end, text_end) = (end(&title), end(&text));
         self.cards.title_input.update(cx, |input, cx| input.set_value(title, window, cx));
         self.cards.text_input.update(cx, |input, cx| input.set_value(text, window, cx));
-        let focus = if fresh { self.cards.title_input.focus_handle(cx) } else { self.cards.text_input.focus_handle(cx) };
-        window.focus(&focus, cx);
+        if title_first {
+            self.cards.title_input.update(cx, |input, cx| input.set_cursor_position(title_end, window, cx));
+        } else {
+            self.cards.text_input.update(cx, |input, cx| input.set_cursor_position(text_end, window, cx));
+        }
         cx.notify();
     }
 
@@ -507,15 +569,126 @@ impl Explorer {
         let text = self.cards.text_input.read(cx).value().to_string();
         let Some(open) = self.cards.open.as_mut() else { return };
         let Some(editing) = open.editing.take() else { return };
-        if editing.fresh && title.trim().is_empty() && text.trim().is_empty() {
-            // Added and left empty: nothing to keep.
-            open.card.remove(editing.index);
+        match editing.target {
+            Target::Section(index) => {
+                if editing.fresh && title.trim().is_empty() && text.trim().is_empty() {
+                    // Added and left empty: nothing to keep.
+                    open.card.remove(index);
+                    cx.notify();
+                    return;
+                }
+                open.card.set(index, &title, &text);
+                self.store_card();
+                self.look_at_card_links(cx);
+            }
+            Target::Caption(sidecar) => self.write_caption(sidecar, title, cx),
+            Target::PassportTitle => self.change_passport(move |raw| passport::set_title(raw, &title), cx),
+            Target::PassportBlock(key) => self.change_passport(move |raw| passport::set_block(raw, Some(&key), &title, &text), cx),
+            Target::NewPassportBlock => {
+                if !(title.trim().is_empty() && text.trim().is_empty()) {
+                    self.change_passport(move |raw| passport::set_block(raw, None, &title, &text), cx);
+                }
+            }
+            Target::PassportWarnings => self.change_passport(move |raw| passport::set_warnings(raw, &text), cx),
+            Target::PassportJournal => self.change_passport(move |raw| passport::set_journal(raw, &text), cx),
+        }
+        cx.notify();
+    }
+
+    /// Writes the caption into the entry's `.json` off the window's thread.
+    fn write_caption(&mut self, sidecar: PathBuf, caption: String, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move { inbox::set_caption(&sidecar, &caption) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result { this.status = format!("Подпись не сохранена: {error}"); }
+                this.read_project_inbox(cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Changes the passport and writes it, off the window's thread. If the
+    /// file was changed elsewhere since it was read, nothing is written and
+    /// the card reads it again.
+    fn change_passport(&mut self, change: impl FnOnce(&mut Raw) + Send + 'static, cx: &mut Context<Self>) {
+        let Some(PassportState::Found { file, raw, modified, .. }) = self.cards.open.as_ref().map(|open| &open.passport) else { return };
+        let (file, mut raw, modified) = (file.clone(), raw.clone(), *modified);
+        let name = self.cards.open.as_ref().map(|open| open.name.clone()).unwrap_or_default();
+        let task = cx.background_spawn(async move {
+            change(&mut raw);
+            passport::touch(&mut raw, &passport::today(), "Papka");
+            passport::write(&file, &raw, modified).map(|written| (raw, written))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(open) = this.cards.open.as_mut().filter(|open| open.name == name) else { return };
+                match result {
+                    Ok((raw, written)) => {
+                        if let PassportState::Found { passport: shown, raw: kept, modified, .. } = &mut open.passport {
+                            *shown = passport::from_raw(&raw);
+                            *kept = raw;
+                            *modified = written;
+                        }
+                        this.status = "Паспорт объекта сохранён".into();
+                    }
+                    Err(error) => {
+                        this.status = format!("Паспорт не сохранён: {error}");
+                        this.reload_project_card(true, cx);
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// «Создать паспорт объекта»: `object.json` in the object's folder,
+    /// with the project's name and empty blocks to fill.
+    fn create_passport(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.cards.open.as_ref().map(|open| open.name.clone()) else { return };
+        let Some(root) = self.registry.projects.get(&name).and_then(|published| published.project.root.clone()) else {
+            self.status = "Сначала укажите папку объекта: домик у папки в «Папках проекта»".into();
             cx.notify();
             return;
+        };
+        let file = root.join(passport::FILE_NAME);
+        let task = cx.background_spawn(async move {
+            let mut raw = passport::template(&name);
+            passport::touch(&mut raw, &passport::today(), "Papka");
+            passport::write(&file, &raw, None).map(|_| file)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = match result {
+                    Ok(file) => format!("Паспорт создан: {}", file.display()),
+                    Err(error) => format!("Паспорт не создан: {error}"),
+                };
+                this.reload_project_card(false, cx);
+                this.registry.due = true;
+            });
+        }).detach();
+    }
+
+    /// Enter in the journal's field: a dated line at its end.
+    fn add_journal_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.cards.journal_input.read(cx).value().trim().to_string();
+        if text.is_empty() { return; }
+        self.cards.journal_input.update(cx, |input, cx| input.set_value("", window, cx));
+        let date = passport::today();
+        self.change_passport(move |raw| passport::add_journal(raw, &date, &text), cx);
+    }
+
+    /// The bin of a passport block: the first click asks, the second removes it.
+    fn delete_passport_block(&mut self, key: String, cx: &mut Context<Self>) {
+        let Some(open) = self.cards.open.as_mut() else { return };
+        if open.doomed_block.as_ref() == Some(&key) {
+            open.doomed_block = None;
+            self.change_passport(move |raw| passport::remove_block(raw, &key), cx);
+        } else {
+            open.doomed_block = Some(key);
         }
-        open.card.set(editing.index, &title, &text);
-        self.store_card();
-        self.look_at_card_links(cx);
         cx.notify();
     }
 
@@ -595,6 +768,28 @@ impl Explorer {
             .on_click(cx.listener(move |this, _, _, cx| this.open_card_link(target.clone(), cx)))
     }
 
+    /// The fields of what is edited, in its place: a name (or a fixed
+    /// `heading`) with «Отмена» and «Готово», and the text under it. The
+    /// fields' own padding is taken back so nothing moves.
+    fn edit_fields(&self, heading: Option<String>, with_title: bool, with_text: bool, cx: &mut Context<Self>) -> Div {
+        div().flex().flex_col().gap_1()
+            .child(div().h(px(28.)).flex().items_center().gap_2()
+                .child(match heading {
+                    Some(heading) => div().flex_1().min_w_0().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(heading),
+                    None if with_title => div().flex_1().min_w_0().ml(px(-10.)).text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(Input::new(&self.cards.title_input).appearance(false)),
+                    None => div().flex_1(),
+                })
+                .child(text_button("card-cancel", "Отмена", ButtonKind::Ghost)
+                    .tooltip(|window, cx| Tooltip::new("Вернуть как было").build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_card_edit(cx))))
+                .child(text_button("card-save", "Готово", ButtonKind::Primary)
+                    .tooltip(|window, cx| Tooltip::new("Сохранить (Esc тоже сохраняет)").build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.save_card_section(cx)))))
+            .when(with_text, |fields| fields.child(div().mx(px(-12.)).rounded(px(4.)).bg(rgb(HOVER)).text_size(px(13.))
+                .child(Textarea::new(&self.cards.text_input).appearance(false))))
+    }
+
     /// One thing another program sent: picture, caption, when and from where.
     fn inbox_row(&self, index: usize, entry: &Entry, busy: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         // "notch.exe · Полка снимков" reads as "Notch · Полка снимков".
@@ -604,8 +799,27 @@ impl Explorer {
         let shown = entry.image.clone().unwrap_or_else(|| entry.sidecar_path.clone());
         let doomed = self.cards.open.as_ref().is_some_and(|open| open.doomed_entry.as_ref() == Some(&entry.sidecar_path));
         let permanent = !filemanager_core::path_utils::has_recycle_bin(&entry.sidecar_path);
+        // A click on the caption writes or changes it, in place.
+        let captioning = self.cards.open.as_ref().and_then(|open| open.editing.as_ref())
+            .is_some_and(|editing| editing.target == Target::Caption(entry.sidecar_path.clone()));
+        let (sidecar, current) = (entry.sidecar_path.clone(), entry.sidecar.caption.clone());
+        let unsigned = entry.sidecar.caption.trim().is_empty();
         let mut text = div().flex_1().min_w_0().flex().flex_col().gap_0p5()
-            .child(div().text_size(px(13.)).child(entry.title()))
+            .child(if captioning {
+                div().flex().items_center().gap_2()
+                    .child(div().flex_1().min_w_0().ml(px(-10.)).text_size(px(13.)).child(Input::new(&self.cards.title_input).appearance(false)))
+                    .child(text_button("card-caption-save", "Готово", ButtonKind::Primary)
+                        .on_click(cx.listener(|this, _, _, cx| this.save_card_section(cx))))
+                    .into_any_element()
+            } else {
+                div().id(("card-inbox-title", index)).text_size(px(13.)).cursor_text()
+                    .text_color(rgb(if unsigned && entry.sidecar.kind == Kind::Image { TEXT_MUTED } else { TEXT }))
+                    .child(if unsigned && entry.sidecar.kind == Kind::Image { "Снимок без подписи — щёлкните, чтобы подписать".to_string() } else { entry.title() })
+                    .tooltip(|window, cx| Tooltip::new("Щёлкните, чтобы изменить подпись").build(window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx|
+                        this.begin_edit(Target::Caption(sidecar.clone()), false, current.clone(), String::new(), window, cx)))
+                    .into_any_element()
+            })
             .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                 .child(if source.is_empty() { entry.when() } else { format!("{} · {source}", entry.when()) }));
         if entry.sidecar.kind == Kind::Text {
@@ -645,8 +859,9 @@ impl Explorer {
     pub(crate) fn project_card_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(open) = self.cards.open.as_ref() else { return div().into_any_element() };
         let group = open.group;
-        let editing = open.editing.as_ref().map(|editing| editing.index);
-        let busy = editing.is_some();
+        let target = open.editing.as_ref().map(|editing| editing.target.clone());
+        let editing = match &target { Some(Target::Section(index)) => Some(*index), _ => None };
+        let busy = target.is_some();
         let dim = |text: String| div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(text);
         let heading = |title: String| div().flex_1().min_w_0().truncate().text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title);
         let block = |key: String| div().group(gpui::SharedString::from(key)).flex().flex_col().gap_1().pb_3().border_b_1().border_color(rgb(BORDER));
@@ -660,19 +875,7 @@ impl Explorer {
         for (index, section) in open.card.sections.iter().enumerate() {
             let key = format!("card-section-{index}");
             if editing == Some(index) {
-                page = page.child(block(key)
-                    .child(div().h(px(28.)).flex().items_center().gap_2()
-                        // The field's own padding is taken back: the title stays put.
-                        .child(div().flex_1().min_w_0().ml(px(-10.)).text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(Input::new(&self.cards.title_input).appearance(false)))
-                        .child(text_button("card-cancel", "Отмена", ButtonKind::Ghost)
-                            .tooltip(|window, cx| Tooltip::new("Вернуть как было").build(window, cx))
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_card_edit(cx))))
-                        .child(text_button("card-save", "Готово", ButtonKind::Primary)
-                            .tooltip(|window, cx| Tooltip::new("Сохранить (Esc тоже сохраняет)").build(window, cx))
-                            .on_click(cx.listener(|this, _, _, cx| this.save_card_section(cx)))))
-                    .child(div().mx(px(-12.)).rounded(px(4.)).bg(rgb(HOVER)).text_size(px(13.))
-                        .child(Textarea::new(&self.cards.text_input).appearance(false))));
+                page = page.child(block(key).child(self.edit_fields(None, true, true, cx)));
                 continue;
             }
             let doomed = open.doomed == Some(index);
@@ -785,34 +988,97 @@ impl Explorer {
             }
             page = page.child(body);
         }
-        // The passport is shown only when the object has one: until the
-        // calculation programs write object.json there is nothing to show.
-        let has_passport = matches!(open.passport, PassportState::Found { .. } | PassportState::Unreadable { .. });
-        if has_passport && !open.card.is_hidden("passport") {
-            let mut body = block("card-passport".into()).child(built_in("passport", "Паспорт объекта", None, cx));
+        // The object passport: Papka keeps it (no calculation program does
+        // yet). Everything here is edited in place, like the sections above.
+        if !open.card.is_hidden("passport") {
+            let found = matches!(open.passport, PassportState::Found { .. });
+            let tools_extra = found.then(|| div().flex().items_center().gap_1()
+                .child(icon_button("card-passport-add", "fm/plus.svg", "Добавить блок паспорта", false, !busy)
+                    .when(!busy, |button| button.on_click(cx.listener(|this, _, window, cx|
+                        this.begin_edit(Target::NewPassportBlock, true, String::new(), String::new(), window, cx)))))
+                .child(icon_button("card-passport-warn", "fm/alert.svg", "Предупреждения: что требует внимания", false, !busy)
+                    .when(!busy, |button| button.on_click(cx.listener(|this, _, window, cx| {
+                        let text = match this.cards.open.as_ref().map(|open| &open.passport) {
+                            Some(PassportState::Found { passport, .. }) => passport.warnings.join("\n"),
+                            _ => String::new(),
+                        };
+                        this.begin_edit(Target::PassportWarnings, false, "Предупреждения".into(), text, window, cx);
+                    }))))
+                .into_any_element());
+            let mut body = block("card-passport".into()).child(built_in("passport", "Паспорт объекта", tools_extra, cx));
             match &open.passport {
-                PassportState::Loading | PassportState::Absent => {}
+                PassportState::Loading => body = body.child(dim("Читается…".into())),
+                PassportState::Absent => {
+                    let root = published.as_ref().and_then(|published| published.project.root.clone());
+                    body = body.child(div().flex().items_center().gap_3()
+                        .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(match &root {
+                            Some(root) => format!("Паспорта ещё нет. Он будет лежать в {} — общий для всех, кто работает с объектом.", root.join(passport::FILE_NAME).display()),
+                            None => "Паспорта ещё нет. Сначала укажите папку объекта — домик у папки в «Папках проекта»: паспорт ляжет туда.".into(),
+                        }))
+                        .when(root.is_some(), |row| row.child(text_button("card-passport-create", "Создать паспорт", ButtonKind::Primary)
+                            .on_click(cx.listener(|this, _, _, cx| this.create_passport(cx))))));
+                }
                 PassportState::Unreadable { file, error } => {
                     body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(format!("Не прочитан: {error}")))
                         .child(self.link_row("card-passport-file", file, None, cx));
                 }
-                PassportState::Found { passport, file, page: html } => {
-                    if passport.title.is_some() || passport.updated.is_some() {
+                PassportState::Found { passport, file, page: html, .. } => {
+                    // The object's name: a click renames it.
+                    if target == Some(Target::PassportTitle) {
+                        body = body.child(self.edit_fields(None, true, false, cx));
+                    } else {
+                        let name = passport.title.clone().unwrap_or_default();
                         body = body.child(div().flex().items_baseline().gap_2().text_size(px(13.))
-                            .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::SEMIBOLD).child(passport.title.clone().unwrap_or_default()))
+                            .child(div().id("card-passport-title").flex_1().min_w_0().font_weight(gpui::FontWeight::SEMIBOLD).cursor_text()
+                                .text_color(rgb(if name.is_empty() { TEXT_DIM } else { TEXT }))
+                                .child(if name.is_empty() { "Название объекта — щёлкните, чтобы написать".to_string() } else { name.clone() })
+                                .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportTitle, false, name.clone(), String::new(), window, cx))))
                             .when_some(passport.updated.clone(), |row, updated| row.child(div().flex_none().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                                 .child(format!("обновлено {updated}")))));
                     }
-                    for warning in &passport.warnings {
-                        body = body.child(div().flex().items_start().gap_2().px_2().py_1().rounded(px(4.)).bg(rgb(ACCENT_SOFT))
-                            .child(div().mt(px(3.)).child(small_icon("fm/alert.svg", DANGER)))
-                            .child(div().flex_1().min_w_0().text_size(px(12.)).child(warning.clone())));
+                    if target == Some(Target::PassportWarnings) {
+                        body = body.child(self.edit_fields(Some("Предупреждения — одно в строке".into()), false, true, cx));
+                    } else {
+                        for (index, warning) in passport.warnings.iter().enumerate() {
+                            let text = passport.warnings.join("\n");
+                            body = body.child(div().id(("card-warning", index)).flex().items_start().gap_2().px_2().py_1().rounded(px(4.)).bg(rgb(ACCENT_SOFT)).cursor_text()
+                                .child(div().mt(px(3.)).child(small_icon("fm/alert.svg", DANGER)))
+                                .child(div().flex_1().min_w_0().text_size(px(12.)).child(warning.clone()))
+                                .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportWarnings, false, "Предупреждения".into(), text.clone(), window, cx))));
+                        }
                     }
                     let mut row_id = 0usize;
                     for section in &passport.sections {
-                        body = body.child(div().mt_1().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(section.title.to_uppercase()));
+                        let key = section.key.clone();
+                        if target == Some(Target::PassportBlock(key.clone())) {
+                            body = body.child(div().mt_1().child(self.edit_fields(None, true, true, cx)));
+                            continue;
+                        }
+                        let doomed = open.doomed_block.as_ref() == Some(&key);
+                        let group_key = format!("card-pblock-{row_id}");
+                        let (title, text) = (section.title.clone(), passport::block_text(section));
+                        let (edit_key, edit_title, edit_text, gone) = (key.clone(), title.clone(), text.clone(), key.clone());
+                        let start = cx.listener(move |this, _, window, cx|
+                            this.begin_edit(Target::PassportBlock(edit_key.clone()), false, edit_title.clone(), edit_text.clone(), window, cx));
+                        let mut part = div().group(gpui::SharedString::from(group_key.clone())).flex().flex_col().gap_1()
+                            .child(div().h(px(24.)).mt_1().flex().items_center().gap_1()
+                                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(section.title.to_uppercase()))
+                                .when(doomed, |row| row.child(div().flex_none().text_size(px(12.)).text_color(rgb(DANGER)).child("Удалить блок? Нажмите ещё раз")))
+                                .child(tools(group_key).when(doomed, |row| row.visible())
+                                    .child(icon_button(("card-pblock-edit", row_id), "fm/pencil.svg", "Изменить блок (или щёлкните по нему)", false, !busy)
+                                        .when(!busy, |button| button.on_click(start)))
+                                    .child(icon_button(("card-pblock-delete", row_id), "fm/trash.svg", "Удалить блок", doomed, !busy)
+                                        .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.delete_passport_block(gone.clone(), cx)))))));
+                        if section.rows.is_empty() {
+                            let (k, t) = (key.clone(), title.clone());
+                            part = part.child(div().id(("card-pblock-empty", row_id)).text_size(px(12.)).text_color(rgb(TEXT_DIM)).cursor_text()
+                                .child("Пусто — щёлкните, чтобы заполнить")
+                                .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportBlock(k.clone()), false, t.clone(), String::new(), window, cx))));
+                        }
                         for (label, value) in &section.rows {
                             row_id += 1;
+                            let (k, t, x) = (key.clone(), title.clone(), text.clone());
+                            let edit = cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportBlock(k.clone()), false, t.clone(), x.clone(), window, cx));
                             // A model or base file named in the passport opens like any link.
                             let value_view = match passport_link(file, value) {
                                 Some(path) => {
@@ -822,19 +1088,38 @@ impl Explorer {
                                         .when_some(rest, |row, rest| row.child(div().min_w_0().truncate().child(rest)))
                                         .into_any_element()
                                 }
-                                None => div().flex_1().min_w_0().child(value.clone()).into_any_element(),
+                                // An empty field shows a dash to click and fill.
+                                None => div().id(("card-pvalue", row_id)).flex_1().min_w_0().cursor_text()
+                                    .when(value.is_empty(), |cell| cell.text_color(rgb(TEXT_DIM)))
+                                    .child(if value.is_empty() { "—".to_string() } else { value.clone() }).on_click(edit).into_any_element(),
                             };
-                            body = body.child(div().flex().items_start().gap_3().text_size(px(12.))
+                            part = part.child(div().flex().items_start().gap_3().text_size(px(12.))
                                 .child(div().w(px(150.)).flex_none().text_color(rgb(TEXT_MUTED)).child(label.clone()))
                                 .child(value_view));
                         }
+                        row_id += 1;
+                        body = body.child(part);
                     }
-                    if !passport.journal.is_empty() {
-                        body = body.child(div().mt_1().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ЖУРНАЛ РАСЧЁТОВ"));
-                        for line in passport.journal.iter().take(12) { body = body.child(div().text_size(px(12.)).child(line.clone())); }
-                        if passport.journal.len() > 12 { body = body.child(dim(format!("…и ещё {}", passport.journal.len() - 12))); }
+                    if target == Some(Target::NewPassportBlock) {
+                        body = body.child(div().mt_1().child(self.edit_fields(None, true, true, cx)));
                     }
-                    body = body.child(div().flex().items_center().gap_2()
+                    // The journal: what was done and when, newest last.
+                    body = body.child(div().h(px(24.)).mt_1().flex().items_center().gap_1()
+                        .child(div().flex_1().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ЖУРНАЛ")));
+                    if target == Some(Target::PassportJournal) {
+                        body = body.child(self.edit_fields(Some("Журнал — запись в строке".into()), false, true, cx));
+                    } else {
+                        let shown = passport.journal.len().saturating_sub(12);
+                        if shown > 0 { body = body.child(dim(format!("…ещё {shown} раньше"))); }
+                        let all = passport.journal.join("\n");
+                        for (index, line) in passport.journal.iter().enumerate().skip(shown) {
+                            let all = all.clone();
+                            body = body.child(div().id(("card-journal", index)).text_size(px(12.)).cursor_text().child(line.clone())
+                                .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportJournal, false, "Журнал".into(), all.clone(), window, cx))));
+                        }
+                        body = body.child(div().text_size(px(12.)).child(Input::new(&self.cards.journal_input)));
+                    }
+                    body = body.child(div().flex().items_center().gap_2().mt_1()
                         .child(self.link_row("card-passport-file", file, None, cx).flex_1().min_w_0())
                         .when_some(html.clone(), |row, html| row.child(text_button("card-passport-page", "Страница паспорта", ButtonKind::Ghost)
                             .tooltip(|window, cx| Tooltip::new("Открыть object.html в браузере").build(window, cx))
@@ -865,7 +1150,7 @@ impl Explorer {
             page = page.child(body);
         }
         let hidden: Vec<(&'static str, &'static str)> = model::BUILT_IN.into_iter()
-            .filter(|(key, _)| open.card.is_hidden(key) && (*key != "passport" || has_passport)).collect();
+            .filter(|(key, _)| open.card.is_hidden(key)).collect();
         if !hidden.is_empty() && !busy {
             let mut row = div().flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Скрыто:");
             for (key, title) in hidden {

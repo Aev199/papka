@@ -248,6 +248,20 @@ pub fn free_name(folder: &Path, name: &str) -> String {
         .unwrap_or_else(|| name.to_owned())
 }
 
+/// Replaces `path` with `bytes` whole: a temporary file beside it, then a
+/// rename, so no reader ever sees half of it. The temporary file is named
+/// like Papka's other ones (`.papka-replacing-….tmp`), which the history
+/// and the search index pass over.
+pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let folder = path.parent().ok_or_else(|| std::io::Error::other("у файла нет папки"))?;
+    let mut file = tempfile::Builder::new().prefix(".papka-replacing-").suffix(".tmp").tempfile_in(folder)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn mentions(text: &str, path: &Path) -> bool {
     let text = text.replace(r"\\?\", "");
