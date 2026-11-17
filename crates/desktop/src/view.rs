@@ -209,8 +209,10 @@ impl Explorer {
                 this.move_tab_to(drag,group,end,cx);
             }));
         let focused=group==self.browser.active;
+        // With the project card open no tab is the current one: the card is.
+        let card_open=self.cards.shown_in(group);
         for (index,tab) in tabs.iter().enumerate() {
-            let active=index==active_index;
+            let active=index==active_index && !card_open;
             let closable=(tabs.len()>1 || self.browser.groups.len()>1) && !tab.pinned;
             let tip=tab.pane.path.display().to_string();
             strip=strip.child(div().id(("tab",index)).group("tab").relative().flex_none().h(px(32.))
@@ -247,9 +249,12 @@ impl Explorer {
         // Never wider than its pane: overflowing tabs scroll inside the strip.
         div().h(px(34.)).w_full().flex_none().min_w_0().overflow_hidden().flex().items_center().bg(rgb(WINDOW))
             .when_some(project, |bar,name| bar.child(div().id(SharedString::from(format!("project-{}",group.0)))
-                .flex_none().max_w(px(180.)).h(px(24.)).ml_1().pl_2().pr_0p5().flex().items_center().gap_1p5()
-                .rounded(px(4.)).bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT)).cursor_pointer()
-                .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(format!("Проект «{name}»: щелчок — карточка проекта")).build(window,cx)})
+                .relative().flex_none().max_w(px(180.)).h(px(24.)).ml_1().pl_2().pr_0p5().flex().items_center().gap_1p5()
+                .rounded(px(4.)).bg(rgb(if card_open {SURFACE} else {ACCENT_SOFT})).text_size(px(12.)).text_color(rgb(TEXT)).cursor_pointer()
+                // Open card: the name is the current "tab", marked like one.
+                .when(card_open && focused,|chip|chip.child(div().absolute().bottom(px(-5.)).left(px(10.)).right(px(10.)).h(px(2.))
+                    .rounded(px(1.)).bg(rgb(ACCENT))))
+                .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(if card_open {format!("Проект «{name}»: щелчок — вернуться к папкам")} else {format!("Проект «{name}»: щелчок — карточка проекта")}).build(window,cx)})
                 .on_click(cx.listener(move |this,_,_,cx|this.toggle_project_card(group,cx)))
                 .child(small_icon("fm/layers.svg",ACCENT))
                 .child(div().min_w_0().truncate().child(name))
@@ -2432,6 +2437,16 @@ impl Explorer {
                                 this.context_menu = None;
                                 this.open_in_other_pane(&other_path, cx);
                             })));
+                    // The pane shows a project: the folder can join its list.
+                    let project = self.browser.active_group().project.as_ref().map(|project| project.name.clone());
+                    if let Some(project) = project.filter(|_| !filemanager_core::archive::is_inside(path)) {
+                        let keep = path.clone();
+                        list = list.child(Self::menu_item("m-project-folder", "fm/layers.svg", format!("В папки проекта «{project}»"), "", false, true)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.context_menu = None;
+                                this.add_folder_to_project(&project, keep.clone(), cx);
+                            })));
+                    }
                 }
                 // Archives: the whole one next to it, or what is chosen inside
                 // one into the other pane.
@@ -2559,6 +2574,17 @@ impl Explorer {
                                 this.context_menu = None;
                                 this.undo_last(cx);
                             })))
+                        .child(Self::separator());
+                }
+                // The pane shows a project: this folder can join its list.
+                let project = self.browser.active_group().project.as_ref().map(|project| project.name.clone());
+                if let Some(project) = project.filter(|_| !filemanager_core::archive::is_inside(folder)) {
+                    let keep = folder.clone();
+                    list = list.child(Self::menu_item("m-project-here", "fm/layers.svg", format!("Эту папку — в папки проекта «{project}»"), "", false, true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.context_menu = None;
+                            this.add_folder_to_project(&project, keep.clone(), cx);
+                        })))
                         .child(Self::separator());
                 }
                 list = list

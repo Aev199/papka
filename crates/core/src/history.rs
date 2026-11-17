@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 
 pub struct Journal { database: PathBuf }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     pub id: i64,
     pub path: PathBuf,

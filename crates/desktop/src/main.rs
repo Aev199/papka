@@ -1671,6 +1671,17 @@ impl Explorer {
         self.selected = None;
         self.marked.clear();
         self.selected_history_event = None;
+        self.run_recycle(plans, cx);
+    }
+
+    /// Deletes what `plans` name, already confirmed: to the Recycle Bin
+    /// where there is one, through the journal, undone with Ctrl+Z.
+    pub(crate) fn run_recycle(&mut self, plans: Vec<(PathBuf, Plan)>, cx: &mut Context<Self>) {
+        if self.transfers.copying || self.transfers.busy {
+            self.status = "Дождитесь завершения текущей операции".into();
+            cx.notify();
+            return;
+        }
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.status = "Операция отклонена: журнал SQLite недоступен".into();
             cx.notify();
@@ -1726,6 +1737,8 @@ impl Explorer {
                     };
                     this.push_undo(recycled, label);
                 }
+                // A deleted inbox entry leaves the card at once.
+                this.project_card_registry_changed(cx);
                 cx.notify();
             });
         }).detach();

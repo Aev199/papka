@@ -1,9 +1,10 @@
 //! The project card: the project's own page, shown in its pane in place of
 //! the file list. It opens from the project's name at the head of the tab
 //! strip. The user's sections (free text: notes, fields, links to folders)
-//! are edited right there and saved with the project; three more sections
-//! are filled in by Papka — the project's folders, the object passport
-//! (`object.json`, read only) and the latest changes — and can be hidden.
+//! are edited right there and saved with the project, as is the project's
+//! own list of folders. Papka fills in the rest — the inbox (what Notch
+//! sent), the object passport (`object.json`, read only, shown only when
+//! there is one) and the latest changes — and keeps it up to date by itself.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use filemanager_core::panes::GroupId;
 use filemanager_core::passport::{self, Passport};
 use filemanager_core::project_card::{self as model, Card, Line};
 use gpui::{AnyElement, AppContext, Context, Div, ElementId, Entity, Focusable, ObjectFit, Stateful, Window, div, img, prelude::*, px};
-use gpui_component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::tooltip::Tooltip;
 
 use crate::Explorer;
@@ -25,6 +26,10 @@ use crate::view::{ButtonKind, icon_button, small_icon, text_button};
 /// Changes are read this far back and this many are shown.
 const DAYS: i64 = 30;
 const CHANGES: usize = 12;
+/// The inbox is looked at this often while the card is open…
+const INBOX_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
+/// …and the passport and the changes every this many looks.
+const RELOAD_EVERY: u32 = 4;
 
 #[derive(Default)]
 pub(crate) enum PassportState {
@@ -60,6 +65,10 @@ pub(crate) struct OpenCard {
     /// What other programs sent: `None` while it is read, an error text
     /// when the inbox cannot be read (a share offline).
     inbox: Option<Result<Vec<Entry>, String>>,
+    /// The inbox entry whose bin was clicked once: the second click deletes.
+    doomed_entry: Option<PathBuf>,
+    /// The field for a folder's path is open under the folder list.
+    adding_folder: bool,
     request: u64,
 }
 
@@ -67,7 +76,31 @@ pub(crate) struct ProjectCards {
     pub(crate) open: Option<OpenCard>,
     title_input: Entity<InputState>,
     text_input: Entity<TextareaState>,
+    folder_input: Entity<InputState>,
     requests: u64,
+    /// Enter in the title or the path field acts like its button.
+    _subscriptions: Vec<gpui::Subscription>,
+}
+
+/// Whether two readings of the passport show the same thing (no redraw).
+fn same_passport(a: &PassportState, b: &PassportState) -> bool {
+    match (a, b) {
+        (PassportState::Absent, PassportState::Absent) => true,
+        (PassportState::Found { passport: x, file: f, .. }, PassportState::Found { passport: y, file: g, .. }) => x == y && f == g,
+        (PassportState::Unreadable { error: x, .. }, PassportState::Unreadable { error: y, .. }) => x == y,
+        _ => false,
+    }
+}
+
+/// A passport value that names a file: absolute, or relative to the
+/// passport's folder (`lira/ostrov.txt`). Only the part before the first
+/// " · " is looked at.
+pub(crate) fn passport_link(passport: &Path, value: &str) -> Option<PathBuf> {
+    let first = value.split(" · ").next()?.trim();
+    if let Some(path) = model::as_path(first) { return Some(path); }
+    let relative = Path::new(first);
+    let looks_like_file = first.contains(['/', '\\']) && relative.extension().is_some() && !first.contains("://") && !first.contains(' ');
+    looks_like_file.then(|| passport.parent().unwrap_or(Path::new("")).join(relative))
 }
 
 /// The newest events of several folders in one list, without the repeats
@@ -82,12 +115,27 @@ pub(crate) fn merge_changes(lists: Vec<Vec<Event>>, limit: usize) -> Vec<Event> 
 
 impl ProjectCards {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Explorer>) -> ProjectCards {
+        let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Название раздела"));
+        let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Путь к папке, например Z:\\Объекты\\044\\ИГИ"));
+        let enter = |event: &InputEvent| matches!(event, InputEvent::PressEnter { .. });
+        let subscriptions = vec![
+            // Enter in the title goes on to the text.
+            cx.subscribe_in(&title_input, window, move |this, _, event: &InputEvent, window, cx| {
+                if enter(event) { let focus = this.cards.text_input.focus_handle(cx); window.focus(&focus, cx); }
+            }),
+            cx.subscribe_in(&folder_input, window, move |this, _, event: &InputEvent, _, cx| {
+                if enter(event) { this.add_typed_folder(cx); }
+            }),
+        ];
         ProjectCards {
             open: None,
-            title_input: cx.new(|cx| InputState::new(window, cx).placeholder("Название раздела")),
-            text_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 18)
-                .placeholder("Свободный текст. «Метка: значение» станет полем, путь к папке — ссылкой.")),
+            title_input,
+            // One line to start with, like the text it replaces.
+            text_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 30)
+                .placeholder("Текст. «Метка: значение» станет полем, путь к папке или файлу — ссылкой")),
+            folder_input,
             requests: 0,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -109,16 +157,22 @@ impl Explorer {
         let Some(name) = self.browser.group(group).and_then(|pane| pane.project.as_ref()).map(|project| project.name.clone()) else { return };
         let saved = self.workspaces.as_ref().and_then(|store| store.value(&model::storage_key(&name)).ok().flatten());
         self.cards.requests = self.cards.requests.wrapping_add(1);
-        self.cards.open = Some(OpenCard { group, name, card: Card::load(saved.as_deref()), editing: None, doomed: None,
-            passport: PassportState::Loading, changes: None, kinds: HashMap::new(), inbox: None, request: self.cards.requests });
+        let mut card = Card::load(saved.as_deref());
+        // The first opening keeps the project's tabs as its folders.
+        let tabs: Vec<PathBuf> = self.project_tabs(group).into_iter().map(|(_, path)| path).collect();
+        let started = card.start_folders(tabs.iter().map(PathBuf::as_path));
+        self.cards.open = Some(OpenCard { group, name, card, editing: None, doomed: None,
+            passport: PassportState::Loading, changes: None, kinds: HashMap::new(), inbox: None, doomed_entry: None,
+            adding_folder: false, request: self.cards.requests });
+        if started { self.store_card(); }
         self.context_menu = None;
         self.focus_group(group, cx);
         // Nothing stays chosen in the list hidden under the card.
         self.selected = None; self.marked.clear(); self.anchor = None; self.marquee = None;
         self.confirm_recycle = None; self.address_editing = None; self.filter_open = false;
         self.close_search();
-        self.reload_project_card(cx);
-        self.watch_project_inbox(cx);
+        self.reload_project_card(false, cx);
+        self.watch_project_card(cx);
         cx.notify();
     }
 
@@ -149,20 +203,25 @@ impl Explorer {
         }).detach();
     }
 
-    /// While the card is open its inbox is looked at every few seconds:
-    /// a screenshot sent from Notch shows up by itself.
-    fn watch_project_inbox(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.cards.open.as_ref().map(|open| open.request) else { return };
-        let name = self.cards.open.as_ref().map(|open| open.name.clone()).unwrap_or_default();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
-            let alive = this.update(cx, |this, cx| {
-                if !this.cards.open.as_ref().is_some_and(|open| open.name == name) { return false; }
-                let _ = request;
-                this.read_project_inbox(cx);
-                true
-            }).unwrap_or(false);
-            if !alive { break; }
+    /// While the card is open it keeps itself up to date: the inbox every
+    /// few seconds (a screenshot sent from Notch shows up by itself), the
+    /// passport and the changes a little less often. Nothing is redrawn
+    /// unless something changed.
+    fn watch_project_card(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.cards.open.as_ref().map(|open| open.name.clone()) else { return };
+        cx.spawn(async move |this, cx| {
+            let mut ticks = 0u32;
+            loop {
+                cx.background_executor().timer(INBOX_EVERY).await;
+                ticks = ticks.wrapping_add(1);
+                let alive = this.update(cx, |this, cx| {
+                    if !this.cards.open.as_ref().is_some_and(|open| open.name == name) { return false; }
+                    this.read_project_inbox(cx);
+                    if ticks % RELOAD_EVERY == 0 { this.reload_project_card(true, cx); }
+                    true
+                }).unwrap_or(false);
+                if !alive { break; }
+            }
         }).detach();
     }
 
@@ -193,18 +252,124 @@ impl Explorer {
         cx.notify();
     }
 
+    /// The bin of an inbox entry: the first click asks, the second sends
+    /// its picture and its `.json` to the Recycle Bin through the journal
+    /// (Ctrl+Z brings them back). On a share without one it is permanent,
+    /// and the question says so.
+    fn delete_inbox_entry(&mut self, entry: Entry, cx: &mut Context<Self>) {
+        let Some(open) = self.cards.open.as_mut() else { return };
+        if open.doomed_entry.as_ref() != Some(&entry.sidecar_path) {
+            open.doomed_entry = Some(entry.sidecar_path.clone());
+            cx.notify();
+            return;
+        }
+        open.doomed_entry = None;
+        let mut plans = Vec::new();
+        for path in entry.image.iter().chain(std::iter::once(&entry.sidecar_path)) {
+            let action = if filemanager_core::path_utils::has_recycle_bin(path) {
+                filemanager_core::operations::Action::Recycle
+            } else {
+                filemanager_core::operations::Action::Delete
+            };
+            match filemanager_core::operations::Plan::prepare(action, path, None) {
+                Ok(plan) => plans.push((path.clone(), plan)),
+                Err(error) => {
+                    self.status = format!("Запись не удалена: {error}");
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        self.run_recycle(plans, cx);
+    }
+
+    /// Adds a folder to project `name`'s card, open or not. From the
+    /// folder's context menu, or the field under the card's folder list.
+    pub(crate) fn add_folder_to_project(&mut self, name: &str, path: PathBuf, cx: &mut Context<Self>) {
+        let added = if self.cards.open.as_ref().is_some_and(|open| open.name == name) {
+            let open = self.cards.open.as_mut().unwrap();
+            let added = open.card.add_folder(&path);
+            self.store_card();
+            self.look_at_card_links(cx);
+            added
+        } else {
+            let Some(store) = &self.workspaces else { return };
+            let mut card = Card::load(store.value(&model::storage_key(name)).ok().flatten().as_deref());
+            let added = card.add_folder(&path);
+            if let Err(error) = store.set_value(&model::storage_key(name), &card.to_json()) {
+                self.status = format!("Папка не добавлена: {error}");
+                cx.notify();
+                return;
+            }
+            added
+        };
+        self.status = if added { format!("«{}» — в папках проекта «{name}»", browser::display_name(&path)) }
+            else { format!("«{}» уже в папках проекта «{name}»", browser::display_name(&path)) };
+        self.registry.due = true;
+        cx.notify();
+    }
+
+    /// The path typed under the folder list: checked off the window's
+    /// thread (a share may be slow), then added.
+    fn add_typed_folder(&mut self, cx: &mut Context<Self>) {
+        let typed = self.cards.folder_input.read(cx).value().trim().trim_matches('"').to_string();
+        let Some(name) = self.cards.open.as_ref().map(|open| open.name.clone()) else { return };
+        if typed.is_empty() { return; }
+        let path = PathBuf::from(&typed);
+        let probe = path.clone();
+        let task = cx.background_spawn(async move { probe.is_dir() });
+        cx.spawn(async move |this, cx| {
+            let is_dir = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if !is_dir {
+                    this.status = format!("Папки «{typed}» нет или она недоступна");
+                    cx.notify();
+                    return;
+                }
+                if let Some(open) = this.cards.open.as_mut() { open.adding_folder = false; }
+                this.add_folder_to_project(&name, path, cx);
+            });
+        }).detach();
+    }
+
+    fn open_folder_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.cards.open.as_mut() else { return };
+        open.adding_folder = true;
+        self.cards.folder_input.update(cx, |input, cx| input.set_value("", window, cx));
+        let focus = self.cards.folder_input.focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// «Взять открытые вкладки»: the project's tabs join its folder list.
+    fn add_tabs_to_folders(&mut self, cx: &mut Context<Self>) {
+        let Some(group) = self.cards.open.as_ref().map(|open| open.group) else { return };
+        let tabs = self.project_tabs(group);
+        let Some(open) = self.cards.open.as_mut() else { return };
+        let added = tabs.iter().filter(|(_, path)| open.card.add_folder(path)).count();
+        self.store_card();
+        self.look_at_card_links(cx);
+        self.registry.due = true;
+        self.status = if added > 0 { format!("Добавлено папок: {added}") } else { "Все открытые вкладки уже в списке".into() };
+        cx.notify();
+    }
+
     /// Reads the passport and the changes again. Everything on disk (a
     /// passport on a network drive, the journal) is read off the window's
     /// thread; the card is on screen meanwhile.
-    fn reload_project_card(&mut self, cx: &mut Context<Self>) {
-        let Some(group) = self.cards.open.as_ref().map(|open| open.group) else { return };
-        let paths = self.project_folders(group).into_iter().map(|(_, path)| path).collect::<Vec<_>>();
+    /// `quiet`: a background refresh — what is shown stays until the new
+    /// answer, so nothing blinks.
+    fn reload_project_card(&mut self, quiet: bool, cx: &mut Context<Self>) {
+        let paths = self.card_folders();
+        if paths.is_empty() && self.cards.open.is_none() { return; }
         self.cards.requests = self.cards.requests.wrapping_add(1);
         let request = self.cards.requests;
         let Some(open) = self.cards.open.as_mut() else { return };
         open.request = request;
-        open.passport = PassportState::Loading;
-        open.changes = None;
+        if !quiet {
+            open.passport = PassportState::Loading;
+            open.changes = None;
+        }
         self.look_at_card_links(cx);
         let journal = self.journal.clone();
         let task = cx.background_spawn(async move {
@@ -225,9 +390,10 @@ impl Explorer {
             let (passport, changes) = task.await;
             let _ = this.update(cx, |this, cx| {
                 let Some(open) = this.cards.open.as_mut().filter(|open| open.request == request) else { return };
+                let same = open.changes.as_ref() == Some(&changes) && same_passport(&open.passport, &passport);
                 open.passport = passport;
                 open.changes = Some(changes);
-                cx.notify();
+                if !same { cx.notify(); }
             });
         }).detach();
         cx.notify();
@@ -249,14 +415,26 @@ impl Explorer {
             let kinds = task.await;
             let _ = this.update(cx, |this, cx| {
                 let Some(open) = this.cards.open.as_mut().filter(|open| open.name == name) else { return };
+                let changed = kinds.iter().any(|(path, kind)| open.kinds.get(path) != Some(kind));
                 open.kinds.extend(kinds);
-                cx.notify();
+                if changed { cx.notify(); }
             });
         }).detach();
     }
 
+    /// Where the card looks for the passport and the changes: the
+    /// project's saved folders and the tabs open in it now.
+    fn card_folders(&self) -> Vec<PathBuf> {
+        let Some(open) = self.cards.open.as_ref() else { return Vec::new() };
+        let mut folders: Vec<PathBuf> = open.card.folders.iter().map(|folder| folder.path.clone()).collect();
+        for (_, path) in self.project_tabs(open.group) {
+            if !folders.contains(&path) { folders.push(path); }
+        }
+        folders
+    }
+
     /// The project's tabs: title and folder.
-    fn project_folders(&self, group: GroupId) -> Vec<(String, PathBuf)> {
+    fn project_tabs(&self, group: GroupId) -> Vec<(String, PathBuf)> {
         self.browser.group(group).map(|pane| pane.tabs.iter().map(|tab| (tab.title.clone(), tab.pane.path.clone())).collect())
             .unwrap_or_default()
     }
@@ -273,18 +451,24 @@ impl Explorer {
         if self.cards.shown_in(group) { self.close_project_card(cx); }
     }
 
-    /// Esc: out of the edit first, then out of the card. Whether it did anything.
+    /// Esc: out of the edit first (what was typed is kept, as everywhere in
+    /// Windows), then out of the card. Whether it did anything.
     pub(crate) fn dismiss_project_card(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(open) = self.cards.open.as_mut() else { return false };
-        if open.doomed.take().is_some() { cx.notify(); return true; }
-        match open.editing.take() {
-            Some(editing) => {
-                if editing.fresh { open.card.remove(editing.index); }
-                cx.notify();
-            }
-            None => self.close_project_card(cx),
-        }
+        if open.doomed.take().is_some() || open.doomed_entry.take().is_some() { cx.notify(); return true; }
+        if std::mem::take(&mut open.adding_folder) { cx.notify(); return true; }
+        if open.editing.is_some() { self.save_card_section(cx); } else { self.close_project_card(cx); }
         true
+    }
+
+    /// «Отмена» while editing: the section goes back to what it was; a
+    /// section just added goes away.
+    fn cancel_card_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.cards.open.as_mut() else { return };
+        if let Some(editing) = open.editing.take() {
+            if editing.fresh { open.card.remove(editing.index); }
+        }
+        cx.notify();
     }
 
     fn store_card(&mut self) {
@@ -323,6 +507,12 @@ impl Explorer {
         let text = self.cards.text_input.read(cx).value().to_string();
         let Some(open) = self.cards.open.as_mut() else { return };
         let Some(editing) = open.editing.take() else { return };
+        if editing.fresh && title.trim().is_empty() && text.trim().is_empty() {
+            // Added and left empty: nothing to keep.
+            open.card.remove(editing.index);
+            cx.notify();
+            return;
+        }
         open.card.set(editing.index, &title, &text);
         self.store_card();
         self.look_at_card_links(cx);
@@ -407,9 +597,13 @@ impl Explorer {
 
     /// One thing another program sent: picture, caption, when and from where.
     fn inbox_row(&self, index: usize, entry: &Entry, busy: bool, cx: &mut Context<Self>) -> Stateful<Div> {
-        let source = [entry.sidecar.source.app.as_str(), entry.sidecar.source.window.as_str()]
+        // "notch.exe · Полка снимков" reads as "Notch · Полка снимков".
+        let app = match entry.sidecar.source.app.as_str() { "notch.exe" => "Notch", other => other };
+        let source = [app, entry.sidecar.source.window.as_str()]
             .into_iter().filter(|part| !part.trim().is_empty()).collect::<Vec<_>>().join(" · ");
         let shown = entry.image.clone().unwrap_or_else(|| entry.sidecar_path.clone());
+        let doomed = self.cards.open.as_ref().is_some_and(|open| open.doomed_entry.as_ref() == Some(&entry.sidecar_path));
+        let permanent = !filemanager_core::path_utils::has_recycle_bin(&entry.sidecar_path);
         let mut text = div().flex_1().min_w_0().flex().flex_col().gap_0p5()
             .child(div().text_size(px(13.)).child(entry.title()))
             .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
@@ -424,19 +618,27 @@ impl Explorer {
         if let Some(file) = &entry.sidecar.file {
             text = text.child(self.link_row(("card-inbox-file", index), file, None, cx));
         }
-        let (notes, reveal) = (entry.clone(), shown.clone());
-        div().id(("card-inbox", index)).flex().items_start().gap_3().py_1()
+        if doomed {
+            text = text.child(div().text_size(px(12.)).text_color(rgb(DANGER))
+                .child(if permanent { "Удалить безвозвратно (здесь нет Корзины)? Нажмите корзину ещё раз" } else { "Удалить в Корзину? Нажмите корзину ещё раз" }));
+        }
+        let (notes, reveal, gone) = (entry.clone(), shown.clone(), entry.clone());
+        let group: gpui::SharedString = format!("card-inbox-{index}").into();
+        div().id(("card-inbox", index)).group(group.clone()).flex().items_start().gap_3().py_1()
             .when_some(entry.image.clone(), |row, picture| row.child(div().id(("card-inbox-image", index)).flex_none().w(px(140.)).h(px(84.))
                 .rounded(px(4.)).overflow_hidden().border_1().border_color(rgb(BORDER)).cursor_pointer()
                 .child(img(picture.clone()).size_full().object_fit(ObjectFit::Contain))
                 .tooltip(|window, cx| Tooltip::new("Открыть снимок").build(window, cx))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_outside(&picture, cx)))))
             .child(text)
-            .child(div().flex_none().flex().items_center().gap_1()
+            // Actions show on the row under the mouse; a question stays.
+            .child(div().flex_none().flex().items_center().gap_1().when(!doomed, |row| row.invisible().group_hover(group, |style| style.visible()))
                 .child(icon_button(("card-inbox-notes", index), "fm/file-text.svg", "В заметки: добавить в первый раздел карточки", false, !busy)
                     .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.inbox_to_notes(notes.clone(), cx)))))
-                .child(icon_button(("card-inbox-reveal", index), "fm/folder-fill.svg", "Показать в папке входящих (там можно переместить или удалить)", false, true)
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_card_link(reveal.clone(), cx)))))
+                .child(icon_button(("card-inbox-reveal", index), "fm/folder-fill.svg", "Показать в папке входящих", false, true)
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_card_link(reveal.clone(), cx))))
+                .child(icon_button(("card-inbox-delete", index), "fm/trash.svg", if entry.image.is_some() { "Удалить запись (снимок и подпись)" } else { "Удалить запись" }, doomed, !busy)
+                    .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.delete_inbox_entry(gone.clone(), cx))))))
     }
 
     /// The card in place of the pane's address row and file list.
@@ -447,50 +649,61 @@ impl Explorer {
         let busy = editing.is_some();
         let dim = |text: String| div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(text);
         let heading = |title: String| div().flex_1().min_w_0().truncate().text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title);
-        let block = || div().flex().flex_col().gap_1().pb_3().border_b_1().border_color(rgb(BORDER));
+        let block = |key: String| div().group(gpui::SharedString::from(key)).flex().flex_col().gap_1().pb_3().border_b_1().border_color(rgb(BORDER));
+        // A section's buttons show while the mouse is over it.
+        let tools = |key: String| div().flex_none().h(px(28.)).flex().items_center().gap_1().invisible()
+            .group_hover(gpui::SharedString::from(key), |style| style.visible());
         let mut page = div().w_full().max_w(px(860.)).flex().flex_col().gap_3();
 
-        // The user's own sections, in their order.
+        // The user's own sections, in their order. Editing happens in place:
+        // the heading becomes a field, the text becomes a field, nothing moves.
         for (index, section) in open.card.sections.iter().enumerate() {
+            let key = format!("card-section-{index}");
             if editing == Some(index) {
-                page = page.child(block()
-                    .child(Input::new(&self.cards.title_input))
-                    .child(Textarea::new(&self.cards.text_input))
-                    .child(div().flex().items_center().gap_2()
-                        .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(TEXT_DIM))
-                            .child("Строка «Метка: значение» станет полем, путь к папке или файлу — ссылкой."))
+                page = page.child(block(key)
+                    .child(div().h(px(28.)).flex().items_center().gap_2()
+                        // The field's own padding is taken back: the title stays put.
+                        .child(div().flex_1().min_w_0().ml(px(-10.)).text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(Input::new(&self.cards.title_input).appearance(false)))
                         .child(text_button("card-cancel", "Отмена", ButtonKind::Ghost)
-                            .on_click(cx.listener(|this, _, _, cx| { this.dismiss_project_card(cx); })))
-                        .child(text_button("card-save", "Сохранить", ButtonKind::Primary)
-                            .on_click(cx.listener(|this, _, _, cx| this.save_card_section(cx))))));
+                            .tooltip(|window, cx| Tooltip::new("Вернуть как было").build(window, cx))
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_card_edit(cx))))
+                        .child(text_button("card-save", "Готово", ButtonKind::Primary)
+                            .tooltip(|window, cx| Tooltip::new("Сохранить (Esc тоже сохраняет)").build(window, cx))
+                            .on_click(cx.listener(|this, _, _, cx| this.save_card_section(cx)))))
+                    .child(div().mx(px(-12.)).rounded(px(4.)).bg(rgb(HOVER)).text_size(px(13.))
+                        .child(Textarea::new(&self.cards.text_input).appearance(false))));
                 continue;
             }
             let doomed = open.doomed == Some(index);
-            let mut body = block().child(div().flex().items_center().gap_1()
+            let mut body = block(key.clone()).child(div().h(px(28.)).flex().items_center().gap_1()
                 .child(heading(section.title.clone()))
                 .when(doomed, |row| row.child(div().flex_none().text_size(px(12.)).text_color(rgb(DANGER)).child("Удалить раздел? Нажмите ещё раз")))
-                .child(icon_button(("card-edit", index), "fm/pencil.svg", "Изменить раздел", false, true)
-                    .on_click(cx.listener(move |this, _, window, cx| this.edit_card_section(index, false, window, cx))))
-                .child(icon_button(("card-up", index), "fm/arrow-up.svg", "Поднять выше", false, index > 0 && !busy)
-                    .when(index > 0 && !busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.change_card(|card| card.move_up(index), cx)))))
-                .child(icon_button(("card-delete", index), "fm/trash.svg", "Удалить раздел", doomed, !busy)
-                    .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.delete_card_section(index, cx))))));
+                .child(tools(key).when(doomed, |row| row.visible())
+                    .child(icon_button(("card-edit", index), "fm/pencil.svg", "Изменить (или щёлкните по тексту)", false, true)
+                        .on_click(cx.listener(move |this, _, window, cx| this.edit_card_section(index, false, window, cx))))
+                    .child(icon_button(("card-up", index), "fm/arrow-up.svg", "Поднять выше", false, index > 0 && !busy)
+                        .when(index > 0 && !busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.change_card(|card| card.move_up(index), cx)))))
+                    .child(icon_button(("card-delete", index), "fm/trash.svg", "Удалить раздел", doomed, !busy)
+                        .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.delete_card_section(index, cx)))))));
             if section.text.is_empty() {
-                body = body.child(div().id(("card-empty", index)).text_size(px(12.)).text_color(rgb(TEXT_DIM)).cursor_pointer()
+                body = body.child(div().id(("card-empty", index)).text_size(px(13.)).text_color(rgb(TEXT_DIM)).cursor_text()
                     .child("Пусто — щёлкните, чтобы написать")
                     .on_click(cx.listener(move |this, _, window, cx| this.edit_card_section(index, false, window, cx))));
             }
             for (row, line) in model::read_lines(&section.text).into_iter().enumerate() {
                 let id = index * 10_000 + row;
+                // A click on plain text edits the section; links open.
+                let edit = cx.listener(move |this, _, window, cx| this.edit_card_section(index, false, window, cx));
                 body = match line {
                     Line::Blank => body.child(div().h(px(6.))),
-                    Line::Text(text) => body.child(div().text_size(px(13.)).child(text)),
+                    Line::Text(text) => body.child(div().id(("card-text", id)).text_size(px(13.)).cursor_text().child(text).on_click(edit)),
                     Line::Link(path) => body.child(self.link_row(("card-link", id), &path, None, cx)),
                     Line::Field { label, value, link } => body.child(div().flex().items_start().gap_3().text_size(px(13.))
                         .child(div().w(px(150.)).flex_none().text_color(rgb(TEXT_MUTED)).child(label))
                         .child(match link {
                             Some(path) => self.link_row(("card-field", id), &path, None, cx).flex_1().min_w_0().into_any_element(),
-                            None => div().flex_1().min_w_0().child(value).into_any_element(),
+                            None => div().id(("card-value", id)).flex_1().min_w_0().cursor_text().child(value).on_click(edit).into_any_element(),
                         })),
                 };
             }
@@ -498,13 +711,15 @@ impl Explorer {
         }
 
         // Papka's own sections: hidden with the eye, brought back below.
-        let built_in = |key: &'static str, title: &'static str, cx: &mut Context<Self>| div().flex().items_center().gap_1()
+        let built_in = |key: &'static str, title: &'static str, extra: Option<AnyElement>, cx: &mut Context<Self>| div().h(px(28.)).flex().items_center().gap_1()
             .child(heading(title.into()))
-            .child(icon_button(gpui::SharedString::from(format!("card-hide-{key}")), "fm/eye-off.svg", "Скрыть раздел", false, !busy)
-                .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.change_card(|card| card.set_hidden(key, true), cx)))));
+            .child(tools(format!("card-{key}"))
+                .when_some(extra, |row, extra| row.child(extra))
+                .child(icon_button(gpui::SharedString::from(format!("card-hide-{key}")), "fm/eye-off.svg", "Скрыть раздел", false, !busy)
+                    .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.change_card(|card| card.set_hidden(key, true), cx))))));
         let published = self.registry.projects.get(&open.name).cloned();
         if !open.card.is_hidden("inbox") {
-            let mut body = block().child(built_in("inbox", "Входящие", cx));
+            let mut body = block("card-inbox".into()).child(built_in("inbox", "Входящие", None, cx));
             match (&published, &open.inbox) {
                 (None, _) | (_, None) => body = body.child(dim("Читаются…".into())),
                 (Some(_), Some(Err(error))) => body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(format!("Папка входящих недоступна: {error}"))),
@@ -518,7 +733,13 @@ impl Explorer {
             page = page.child(body);
         }
         if !open.card.is_hidden("folders") {
-            let mut body = block().child(built_in("folders", "Папки проекта", cx));
+            let add = div().flex().items_center().gap_1()
+                .child(icon_button("card-folder-add", "fm/folder-plus.svg", "Добавить папку по пути", false, !busy)
+                    .when(!busy, |button| button.on_click(cx.listener(|this, _, window, cx| this.open_folder_field(window, cx)))))
+                .child(icon_button("card-folder-tabs", "fm/plus.svg", "Добавить все открытые вкладки проекта", false, !busy)
+                    .when(!busy, |button| button.on_click(cx.listener(|this, _, _, cx| this.add_tabs_to_folders(cx)))))
+                .into_any_element();
+            let mut body = block("card-folders".into()).child(built_in("folders", "Папки проекта", Some(add), cx));
             let name = open.name.clone();
             if let Some(published) = &published {
                 let root_line = match &published.project.root {
@@ -532,23 +753,45 @@ impl Explorer {
                         .hover(|style| style.bg(rgb(HOVER))).child("определять самой")
                         .on_click(cx.listener({ let name = name.clone(); move |this, _, _, cx| this.set_project_root(&name, None, cx) })))));
             }
-            for (index, (title, path)) in self.project_folders(group).into_iter().enumerate() {
-                let is_root = published.as_ref().and_then(|published| published.project.root.as_ref()) == Some(&path);
-                let (name, root) = (name.clone(), path.clone());
-                body = body.child(div().flex().items_center().gap_1()
-                    .child(self.link_row(("card-folder", index), &path, Some(title), cx).flex_1().min_w_0())
-                    .when(!is_root, |row| row.child(icon_button(("card-root", index), "fm/home.svg", "Сделать папкой объекта: сюда будут приходить входящие", false, !busy)
-                        .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.set_project_root(&name, Some(root.clone()), cx)))))));
+            if open.card.folders.is_empty() && !open.adding_folder {
+                body = body.child(dim("Здесь хранятся папки проекта для быстрого перехода. Добавьте их кнопками справа от заголовка или командой «В папки проекта» в меню папки.".into()));
+            }
+            for (index, folder) in open.card.folders.iter().enumerate() {
+                let is_root = published.as_ref().and_then(|published| published.project.root.as_ref()) == Some(&folder.path);
+                let (name, root) = (name.clone(), folder.path.clone());
+                let row_key = format!("card-folder-row-{index}");
+                let title = (!folder.title.is_empty()).then(|| folder.title.clone());
+                body = body.child(div().group(gpui::SharedString::from(row_key.clone())).flex().items_center().gap_1()
+                    .child(self.link_row(("card-folder", index), &folder.path, title, cx).flex_1().min_w_0())
+                    .when(is_root, |row| row.child(div().flex_none().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("папка объекта")))
+                    .child(tools(row_key)
+                        .when(!is_root, |row| row.child(icon_button(("card-root", index), "fm/home.svg", "Сделать папкой объекта: сюда будут приходить входящие", false, !busy)
+                            .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.set_project_root(&name, Some(root.clone()), cx))))))
+                        .child(icon_button(("card-folder-up", index), "fm/arrow-up.svg", "Выше", false, index > 0 && !busy)
+                            .when(index > 0 && !busy, |button| button.on_click(cx.listener(move |this, _, _, cx| { this.change_card(|card| card.move_folder_up(index), cx); }))))
+                        .child(icon_button(("card-folder-remove", index), "fm/x.svg", "Убрать из списка (папка остаётся на диске)", false, !busy)
+                            .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| {
+                                this.change_card(|card| card.remove_folder(index), cx);
+                                this.registry.due = true;
+                            }))))));
+            }
+            if open.adding_folder {
+                body = body.child(div().flex().items_center().gap_2()
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.cards.folder_input)))
+                    .child(text_button("card-folder-cancel", "Отмена", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, _, cx| { if let Some(open) = this.cards.open.as_mut() { open.adding_folder = false; } cx.notify(); })))
+                    .child(text_button("card-folder-save", "Добавить", ButtonKind::Primary)
+                        .on_click(cx.listener(|this, _, _, cx| this.add_typed_folder(cx)))));
             }
             page = page.child(body);
         }
-        if !open.card.is_hidden("passport") {
-            let mut body = block().child(built_in("passport", "Паспорт объекта", cx));
+        // The passport is shown only when the object has one: until the
+        // calculation programs write object.json there is nothing to show.
+        let has_passport = matches!(open.passport, PassportState::Found { .. } | PassportState::Unreadable { .. });
+        if has_passport && !open.card.is_hidden("passport") {
+            let mut body = block("card-passport".into()).child(built_in("passport", "Паспорт объекта", None, cx));
             match &open.passport {
-                PassportState::Loading => body = body.child(dim("Читается…".into())),
-                PassportState::Absent => body = body.child(dim(format!(
-                    "В папках проекта и до пяти уровней выше нет файла {}. Его ведут расчётные программы; Papka только показывает.",
-                    passport::FILE_NAME))),
+                PassportState::Loading | PassportState::Absent => {}
                 PassportState::Unreadable { file, error } => {
                     body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(format!("Не прочитан: {error}")))
                         .child(self.link_row("card-passport-file", file, None, cx));
@@ -565,12 +808,25 @@ impl Explorer {
                             .child(div().mt(px(3.)).child(small_icon("fm/alert.svg", DANGER)))
                             .child(div().flex_1().min_w_0().text_size(px(12.)).child(warning.clone())));
                     }
+                    let mut row_id = 0usize;
                     for section in &passport.sections {
                         body = body.child(div().mt_1().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(section.title.to_uppercase()));
                         for (label, value) in &section.rows {
+                            row_id += 1;
+                            // A model or base file named in the passport opens like any link.
+                            let value_view = match passport_link(file, value) {
+                                Some(path) => {
+                                    let rest = value.split_once(" · ").map(|(_, rest)| rest.to_string());
+                                    div().flex_1().min_w_0().flex().items_center().gap_2()
+                                        .child(self.link_row(("card-passport-link", row_id), &path, None, cx).flex_none().max_w(px(420.)))
+                                        .when_some(rest, |row, rest| row.child(div().min_w_0().truncate().child(rest)))
+                                        .into_any_element()
+                                }
+                                None => div().flex_1().min_w_0().child(value.clone()).into_any_element(),
+                            };
                             body = body.child(div().flex().items_start().gap_3().text_size(px(12.))
                                 .child(div().w(px(150.)).flex_none().text_color(rgb(TEXT_MUTED)).child(label.clone()))
-                                .child(div().flex_1().min_w_0().child(value.clone())));
+                                .child(value_view));
                         }
                     }
                     if !passport.journal.is_empty() {
@@ -578,17 +834,17 @@ impl Explorer {
                         for line in passport.journal.iter().take(12) { body = body.child(div().text_size(px(12.)).child(line.clone())); }
                         if passport.journal.len() > 12 { body = body.child(dim(format!("…и ещё {}", passport.journal.len() - 12))); }
                     }
-                    body = body.child(self.link_row("card-passport-file", file, None, cx));
-                    if let Some(html) = html.clone() {
-                        body = body.child(div().flex().child(text_button("card-passport-page", "Открыть страницу паспорта в браузере", ButtonKind::Ghost)
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_outside(&html, cx)))));
-                    }
+                    body = body.child(div().flex().items_center().gap_2()
+                        .child(self.link_row("card-passport-file", file, None, cx).flex_1().min_w_0())
+                        .when_some(html.clone(), |row, html| row.child(text_button("card-passport-page", "Страница паспорта", ButtonKind::Ghost)
+                            .tooltip(|window, cx| Tooltip::new("Открыть object.html в браузере").build(window, cx))
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_outside(&html, cx))))));
                 }
             }
             page = page.child(body);
         }
         if !open.card.is_hidden("changes") {
-            let mut body = block().child(built_in("changes", "Последние изменения", cx));
+            let mut body = block("card-changes".into()).child(built_in("changes", "Последние изменения", None, cx));
             match &open.changes {
                 None => body = body.child(dim("Читаются…".into())),
                 Some(changes) if changes.is_empty() => body = body.child(dim(format!(
@@ -608,7 +864,8 @@ impl Explorer {
             }
             page = page.child(body);
         }
-        let hidden: Vec<(&'static str, &'static str)> = model::BUILT_IN.into_iter().filter(|(key, _)| open.card.is_hidden(key)).collect();
+        let hidden: Vec<(&'static str, &'static str)> = model::BUILT_IN.into_iter()
+            .filter(|(key, _)| open.card.is_hidden(key) && (*key != "passport" || has_passport)).collect();
         if !hidden.is_empty() && !busy {
             let mut row = div().flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Скрыто:");
             for (key, title) in hidden {
@@ -625,8 +882,6 @@ impl Explorer {
                 .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Проект «{}»", open.name)))
                 .child(text_button("card-add", "Добавить раздел", ButtonKind::Ghost)
                     .on_click(cx.listener(|this, _, window, cx| this.add_card_section(window, cx))))
-                .child(icon_button("card-refresh", "fm/refresh.svg", "Прочитать паспорт и изменения заново", false, true)
-                    .on_click(cx.listener(|this, _, _, cx| this.reload_project_card(cx))))
                 .child(icon_button("card-close", "fm/x.svg", "Вернуться к папкам (Esc)", false, true)
                     .on_click(cx.listener(|this, _, _, cx| this.close_project_card(cx)))))
             .child(div().id(("project-card-page", group.0 as usize)).flex_1().min_h_0().overflow_y_scroll().p_4().child(page))
@@ -649,5 +904,15 @@ mod tests {
         assert_eq!(merged.iter().map(|event| event.id).collect::<Vec<_>>(), [3, 2, 1]);
         assert_eq!(merge_changes(vec![vec![event(1, 100), event(2, 200), event(3, 300)]], 2).iter().map(|event| event.id).collect::<Vec<_>>(), [3, 2]);
         assert!(merge_changes(Vec::new(), 5).is_empty());
+    }
+
+    #[test]
+    fn files_named_in_the_passport_become_links() {
+        let passport = Path::new("/srv/044/object.json");
+        assert_eq!(passport_link(passport, "lira/ostrov.txt · м, кН · Изменён: 03.11"), Some(PathBuf::from("/srv/044/lira/ostrov.txt")));
+        assert_eq!(passport_link(passport, "/srv/base/ostrov.sqlite"), Some(PathBuf::from("/srv/base/ostrov.sqlite")));
+        for text in ["ostrov.sqlite", "м, кН", "14.10", "C1 ±6 % к №1", "https://example.com/a.html", "ЛИРА 2024/2", "a b/c.txt"] {
+            assert_eq!(passport_link(passport, text), None, "{text}");
+        }
     }
 }

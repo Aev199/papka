@@ -7,7 +7,7 @@
 //! - `Модель: Z:\Объекты\044\model.txt` — a field whose value is a link;
 //! - anything else — a line of text.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,17 @@ pub struct Section {
     pub text: String,
 }
 
+/// A folder kept on the card for quick access, whatever tabs are open.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedFolder {
+    pub path: PathBuf,
+    /// The name shown; empty: the folder's own name.
+    #[serde(default)]
+    pub title: String,
+}
+
+const MAX_FOLDERS: usize = 100;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
     #[serde(default)]
@@ -37,6 +48,13 @@ pub struct Card {
     /// Keys of built-in sections the user has hidden.
     #[serde(default)]
     pub hidden: Vec<String>,
+    /// The project's folders, chosen by the user.
+    #[serde(default)]
+    pub folders: Vec<SavedFolder>,
+    /// The folder list was started (from the tabs open then): an emptied
+    /// list stays empty instead of filling itself again.
+    #[serde(default)]
+    pub folders_started: bool,
 }
 
 /// The settings key a project's card is stored under.
@@ -47,7 +65,7 @@ pub fn storage_key(project: &str) -> String {
 impl Card {
     /// What a project without a saved card starts with.
     pub fn starter() -> Card {
-        Card { sections: vec![Section { title: "Заметки".into(), text: String::new() }], hidden: Vec::new() }
+        Card { sections: vec![Section { title: "Заметки".into(), text: String::new() }], ..Card::default() }
     }
 
     /// The saved card; a project that has none (or whose record cannot
@@ -83,6 +101,31 @@ impl Card {
     /// Moves a section one place up; the first one stays.
     pub fn move_up(&mut self, index: usize) {
         if index > 0 && index < self.sections.len() { self.sections.swap(index - 1, index); }
+    }
+
+    /// Adds a folder unless it is there already; whether it was added.
+    pub fn add_folder(&mut self, path: &Path) -> bool {
+        self.folders_started = true;
+        if self.folders.len() >= MAX_FOLDERS || self.folders.iter().any(|folder| folder.path == path) { return false; }
+        self.folders.push(SavedFolder { path: path.to_path_buf(), title: String::new() });
+        true
+    }
+
+    pub fn remove_folder(&mut self, index: usize) {
+        if index < self.folders.len() { self.folders.remove(index); }
+    }
+
+    pub fn move_folder_up(&mut self, index: usize) {
+        if index > 0 && index < self.folders.len() { self.folders.swap(index - 1, index); }
+    }
+
+    /// The first time the card is opened its folders are the project's
+    /// tabs; after that the list is the user's own. Whether it changed.
+    pub fn start_folders<'a>(&mut self, tabs: impl IntoIterator<Item = &'a Path>) -> bool {
+        if self.folders_started { return false; }
+        for path in tabs { self.add_folder(path); }
+        self.folders_started = true;
+        true
     }
 
     pub fn is_hidden(&self, key: &str) -> bool { self.hidden.iter().any(|hidden| hidden == key) }
@@ -135,7 +178,7 @@ pub fn read_lines(text: &str) -> Vec<Line> {
 
 /// Every place the card's sections link to, once each.
 pub fn links(card: &Card) -> Vec<PathBuf> {
-    let mut found: Vec<PathBuf> = Vec::new();
+    let mut found: Vec<PathBuf> = card.folders.iter().map(|folder| folder.path.clone()).collect();
     for line in card.sections.iter().flat_map(|section| read_lines(&section.text)) {
         let path = match line {
             Line::Link(path) | Line::Field { link: Some(path), .. } => path,
@@ -193,13 +236,35 @@ mod tests {
         let card = Card { sections: vec![
             Section { title: "а".into(), text: "Z:\\A\nМодель: Z:\\A\nтекст".into() },
             Section { title: "б".into(), text: "\\\\srv\\x".into() },
-        ], hidden: Vec::new() };
+        ], ..Card::default() };
         assert_eq!(links(&card), [PathBuf::from("Z:\\A"), PathBuf::from("\\\\srv\\x")]);
     }
 
     #[test]
+    fn the_folder_list_starts_from_the_tabs_once_and_then_is_the_users() {
+        let mut card = Card::starter();
+        let tabs = [PathBuf::from("/srv/044/ИГИ"), PathBuf::from("/srv/044/КЖ"), PathBuf::from("/srv/044/ИГИ")];
+        assert!(card.start_folders(tabs.iter().map(PathBuf::as_path)));
+        assert_eq!(card.folders.iter().map(|f| f.path.clone()).collect::<Vec<_>>(), tabs[..2], "no repeats");
+        assert!(!card.start_folders([Path::new("/other")]), "only once");
+        assert!(!card.add_folder(Path::new("/srv/044/КЖ")));
+        assert!(card.add_folder(Path::new("/srv/044/АР")));
+        card.move_folder_up(2);
+        assert_eq!(card.folders[1].path, PathBuf::from("/srv/044/АР"));
+        card.remove_folder(0); card.remove_folder(0); card.remove_folder(0);
+        assert!(card.folders.is_empty());
+        let saved = Card::load(Some(&card.to_json()));
+        assert!(saved.folders.is_empty() && saved.folders_started, "an emptied list stays empty");
+        // A card saved before folders existed starts them on first open.
+        assert!(!Card::load(Some(r#"{"sections":[]}"#)).folders_started);
+        let mut with = Card::starter();
+        with.add_folder(Path::new("/x"));
+        assert_eq!(links(&with), [PathBuf::from("/x")], "folders are looked at like links");
+    }
+
+    #[test]
     fn sections_move_up_and_go_away() {
-        let mut card = Card { sections: ["а", "б", "в"].map(|title| Section { title: title.into(), text: String::new() }).into(), hidden: Vec::new() };
+        let mut card = Card { sections: ["а", "б", "в"].map(|title| Section { title: title.into(), text: String::new() }).into(), ..Card::default() };
         card.move_up(2);
         card.move_up(0);
         card.move_up(9);

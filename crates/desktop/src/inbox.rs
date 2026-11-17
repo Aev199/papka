@@ -67,9 +67,14 @@ impl Explorer {
             let mut published = Vec::new();
             for name in names {
                 let Ok((id, chosen)) = store.project_identity(&name) else { continue };
-                let folders = open.get(&name).cloned().unwrap_or_else(|| store.load_project(&name).ok().flatten()
+                // The folders saved on the card first, then the tabs.
+                let card = filemanager_core::project_card::Card::load(
+                    store.value(&filemanager_core::project_card::storage_key(&name)).ok().flatten().as_deref());
+                let mut folders: Vec<PathBuf> = card.folders.iter().map(|folder| folder.path.clone()).collect();
+                let tabs = open.get(&name).cloned().unwrap_or_else(|| store.load_project(&name).ok().flatten()
                     .map(|workspace| workspace.groups.iter().flat_map(|group| group.tabs.iter().map(|tab| tab.pane.path.clone())).collect())
                     .unwrap_or_default());
+                for tab in tabs { if !folders.contains(&tab) { folders.push(tab); } }
                 let (root, source) = match chosen {
                     Some(root) => (Some(root), RootSource::Chosen),
                     None => {
