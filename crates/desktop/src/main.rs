@@ -368,8 +368,9 @@ struct Explorer {
     recent: Vec<PathBuf>,
     /// How often and how lately folders were stayed in, for Ctrl+P.
     visits: filemanager_core::jump::Visits,
-    /// The folder last counted as a stay.
+    /// The folder last counted as a stay, and the one active on the last tick.
     visit_noted: Option<PathBuf>,
+    visit_seen: Option<PathBuf>,
     /// Panes showing only files of one kind.
     kinds: kind_filter::KindFilters,
     /// Sidebar sections folded by the user.
@@ -651,6 +652,7 @@ impl Explorer {
             visits: workspaces.as_ref().and_then(|store| store.value(projects::VISITS).ok().flatten())
                 .map(|text| filemanager_core::jump::Visits::parse(&text)).unwrap_or_default(),
             visit_noted: None,
+            visit_seen: None,
             kinds: Default::default(),
             drives: places::drives(),
             drive_space: HashMap::new(),
