@@ -750,7 +750,7 @@ impl Explorer {
                 continue;
             }
             if index > 0 {
-                crumbs = crumbs.child(small_icon("fm/chevron-right.svg", TEXT_DIM));
+                crumbs = crumbs.child(self.crumb_chevron(side, index, chain[index - 1].clone(), Some(folder.clone()), cx));
             }
             let last = index + 1 == chain.len();
             let target = folder.clone();
@@ -774,7 +774,68 @@ impl Explorer {
                     })))
             );
         }
+        // After the current folder: its own subfolders.
+        if let Some(current) = chain.last() {
+            crumbs = crumbs.child(self.crumb_chevron(side, chain.len(), current.clone(), None, cx));
+        }
         crumbs.into_any_element()
+    }
+
+    /// A › of the path bar: a click lists the subfolders of `parent`, so a
+    /// sibling of the next folder (or a subfolder of the current one) is
+    /// one click away, without going up first.
+    fn crumb_chevron(&self, side: GroupId, index: usize, parent: PathBuf, next: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.context_menu.as_ref().is_some_and(|menu| matches!(&menu.target,
+            MenuTarget::Children(group, folder, _) if *group == side && *folder == parent));
+        div().id(("crumb-next", index)).flex_none().size(px(18.)).rounded_sm().flex().items_center().justify_center()
+            .cursor_pointer().hover(|style| style.bg(rgb(PRESSED)))
+            .when(open, |chevron| chevron.bg(rgb(PRESSED)))
+            .child(small_icon(if open { "fm/chevron-down.svg" } else { "fm/chevron-right.svg" }, if open { TEXT } else { TEXT_DIM }))
+            // No tip over its own open menu.
+            .when(!open, |chevron| chevron.tooltip(|window, cx| Tooltip::new("Папки здесь").build(window, cx)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.focus_group(side, cx);
+                // The folder may not be read yet: the menu fills in when it is.
+                this.load_directory(parent.clone(), false, cx);
+                let at = gpui::point(event.position.x - px(8.), event.position.y + px(12.));
+                this.open_menu(at, MenuTarget::Children(side, parent.clone(), next.clone()), cx);
+            }))
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .into_any_element()
+    }
+
+    /// The subfolders listed under a › of the path bar, by name.
+    fn crumb_children(&self, side: GroupId, parent: &Path, next: Option<&Path>, mut list: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let Some(listing) = self.dirs.cache.get(parent) else {
+            let text = match self.dirs.errors.get(parent) {
+                Some(error) => format!("Не удалось прочитать: {error}"),
+                None => "Загрузка…".to_string(),
+            };
+            return list.child(div().h(px(28.)).px_2().flex().items_center().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child(text));
+        };
+        let mut folders: Vec<&Entry> = listing.entries.iter()
+            .filter(|entry| entry.is_directory && (self.show_hidden || !entry.hidden)).collect();
+        folders.sort_by_cached_key(|entry| entry.name.to_lowercase());
+        if folders.is_empty() {
+            return list.child(div().h(px(28.)).px_2().flex().items_center().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Вложенных папок нет"));
+        }
+        let next_name = next.and_then(crate::keys::listing_name);
+        for (index, entry) in folders.into_iter().enumerate() {
+            let here = next_name.as_deref() == Some(entry.name.as_str());
+            let path = entry.path.clone();
+            list = list.child(div().id(("crumb-child", index)).h(px(28.)).flex_none().px_2().flex().items_center().gap_2().rounded(px(4.))
+                .text_size(px(13.)).text_color(rgb(TEXT)).cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
+                .when(here, |row| row.bg(rgb(ACCENT_SOFT)))
+                .child(small_icon("fm/folder-fill.svg", FOLDER))
+                .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                    this.context_menu = None;
+                    // Ctrl: in a new tab, as with links elsewhere.
+                    if event.modifiers().control { this.open_in_new_tab(&path, cx); } else { this.navigate_side(side, &path, None, cx); }
+                })));
+        }
+        list
     }
 
     fn nav_row(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1374,6 +1435,8 @@ impl Explorer {
                         .child(icon("fm/folder-fill.svg", BORDER_STRONG))
                         .child(if listing.entries.is_empty() {
                             "Папка пуста".to_string()
+                        } else if let Some(kind) = self.kinds.get(side) {
+                            format!("Нет файлов «{}» — фильтр «Тип» внизу", kind.name())
                         } else if !self.filter.is_empty() && folder == self.pane_path(self.active_side()) {
                             format!("Нет имён, содержащих «{}». Enter — искать во вложенных папках", self.filter)
                         } else {
@@ -2266,6 +2329,29 @@ impl Explorer {
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
             .when_some(count, |this, count| this.child(items_label(count)))
             .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
+            // «Тип»: only drawings, PDF, … in this pane, in one click.
+            .when(!card, |this| this.child({
+                let active = self.kinds.get(self.browser.active).is_some();
+                let open = self.context_menu.as_ref().is_some_and(|menu| matches!(menu.target, MenuTarget::Kinds));
+                div().id("kind-filter").flex_none().size(px(24.)).rounded_sm().flex().items_center().justify_center()
+                    .cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
+                    .when(active || open, |button| button.bg(rgb(ACCENT_SOFT)))
+                    .when(!open, |button| button.tooltip(|window, cx| Tooltip::new("Показать только файлы одного типа: чертежи, PDF, документы…").build(window, cx)))
+                    .child(svg().path("fm/filter.svg").size(px(14.)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_menu(gpui::point(event.position.x, event.position.y - px(8.)), MenuTarget::Kinds, cx);
+                }))
+            }))
+            .when_some(self.kinds.get(self.browser.active).filter(|_| !card), |this, kind| this.child(
+                div().id("kind-filter-chip").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded(px(4.))
+                    .bg(rgb(HOVER)).text_color(rgb(TEXT))
+                    .child(format!("Только «{}»", kind.name()))
+                    .child(div().id("kind-filter-clear").size(px(16.)).rounded(px(4.)).flex().items_center().justify_center()
+                        .cursor_pointer().hover(|style| style.bg(rgb(PRESSED)))
+                        .child(small_icon("fm/x.svg", TEXT_MUTED))
+                        .tooltip(|window, cx| Tooltip::new("Показать файлы всех типов").build(window, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.set_kind_filter(None, cx))))))
             .when_some(self.label_filter(self.browser.active).filter(|_| !card), |this, label| this.child(
                 div().id("label-filter").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded(px(4.))
                     .bg(rgb(HOVER)).text_color(rgb(TEXT))
@@ -2436,6 +2522,31 @@ impl Explorer {
             }));
         let staged = self.zone.items().len();
         match &menu.target {
+            MenuTarget::Children(side, parent, next) => {
+                list = self.crumb_children(*side, parent, next.as_deref(), list, cx);
+            }
+            MenuTarget::Kinds => {
+                let chosen = self.kinds.get(self.browser.active);
+                let here = self.kinds_here();
+                if here.is_empty() && chosen.is_none() {
+                    list = list.child(div().h(px(28.)).px_2().flex().items_center().text_size(px(12.)).text_color(rgb(TEXT_DIM))
+                        .child("Здесь нет чертежей, PDF, документов, таблиц, изображений и архивов"));
+                }
+                for (index, (kind, count)) in here.into_iter().enumerate() {
+                    let current = chosen == Some(kind);
+                    list = list.child(div().id(("kind", index)).h(px(28.)).flex_none().px_2().flex().items_center().gap_2().rounded(px(4.))
+                        .text_size(px(13.)).text_color(rgb(TEXT)).cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
+                        .when(current, |row| row.bg(rgb(ACCENT_SOFT)))
+                        .child(small_icon(if current { "fm/check.svg" } else { "fm/filter.svg" }, if current { ACCENT } else { TEXT_MUTED }))
+                        .child(div().flex_1().min_w_0().truncate().child(kind.name()))
+                        .child(div().flex_none().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child(count.to_string()))
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_kind_filter((!current).then_some(kind), cx))));
+                }
+                if chosen.is_some() {
+                    list = list.child(Self::separator()).child(Self::menu_item("kind-all", "fm/x.svg", "Все типы", "", false, true)
+                        .on_click(cx.listener(|this, _, _, cx| this.set_kind_filter(None, cx))));
+                }
+            }
             MenuTarget::Recent(path) => {
                 let (open, tab, forget, star) = (path.clone(), path.clone(), path.clone(), path.clone());
                 list = list.child(Self::menu_item("recent-open","fm/folder-fill.svg","Открыть","",false,true)

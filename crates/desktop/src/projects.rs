@@ -12,6 +12,8 @@ pub(crate) const PLACES: &str = "places";
 pub(crate) const COLLAPSED: &str = "collapsed_sections";
 /// Recently used folders, most recent first, one per line.
 pub(crate) const RECENT: &str = "recent";
+/// How often and how lately folders were stayed in (`jump::Visits`).
+pub(crate) const VISITS: &str = "folder_visits";
 const RECENT_KEPT: usize = 30;
 pub(crate) const RECENT_SHOWN: usize = 8;
 
@@ -176,6 +178,12 @@ impl Explorer {
         let mut current: Vec<PathBuf> = self.browser.leaves().into_iter().map(|id|self.pane_path(id)).collect();
         // The active pane's folder is the most recent.
         let active=self.pane_path(self.active_side());
+        // A folder stayed in (seen on this tick) counts once per stay.
+        if self.visit_noted.as_ref()!=Some(&active) {
+            self.visit_noted=Some(active.clone());
+            self.visits.visit(&active,crate::now_ms());
+            if let Some(store)=&self.workspaces { let _=store.set_value(VISITS,&self.visits.to_text()); }
+        }
         current.retain(|p|p!=&active); current.insert(0,active);
         let mut next=current.clone();
         next.extend(self.recent.iter().filter(|p|!current.contains(p)).cloned());

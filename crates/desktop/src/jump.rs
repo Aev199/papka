@@ -49,6 +49,9 @@ impl Explorer {
         let current = self.pane_path(self.active_side());
         for path in &self.favorites { folders.add(path.clone(), "Избранное"); }
         for path in &self.recent { folders.add(path.clone(), "Недавние"); }
+        // Folders of daily work, however deep or far (a share): offered even
+        // when the walk below does not reach them.
+        for path in self.visits.top(80, crate::now_ms()) { folders.add(path, "Частые"); }
         for group in &self.browser.groups {
             for tab in &group.tabs { folders.add(tab.active().path.clone(), "Вкладка"); }
         }
@@ -108,8 +111,10 @@ impl Explorer {
             results.extend(folders.items.iter().filter(|(_, source)| *source != "Вложенная").take(SHOWN).cloned());
             return results;
         }
+        // Folders opened often and lately rank above equal matches.
+        let now = crate::now_ms();
         let mut scored: Vec<(i64, usize)> = folders.items.iter().enumerate()
-            .filter_map(|(index, (path, _))| jump::score(query, path).map(|score| (score, index)))
+            .filter_map(|(index, (path, _))| jump::score(query, path).map(|score| (score + self.visits.bonus(path, now), index)))
             .collect();
         // Better match first; among equals, the order of the sources.
         scored.sort_by_key(|(score, index)| (-score, *index));

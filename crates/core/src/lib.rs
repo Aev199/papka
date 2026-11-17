@@ -4,6 +4,7 @@ pub mod browser;
 pub mod history;
 pub mod versions;
 pub mod labels;
+pub mod kinds;
 pub mod jump;
 pub mod archive;
 pub mod table;

@@ -135,6 +135,7 @@ impl Explorer {
         let sizes = if spec.key == filemanager_core::sort::SortKey::Size { self.sizes.revision } else { 0 };
         let label_filter = self.label_filter(group);
         let labels_rev = if label_filter.is_some() { self.labels.revision } else { 0 };
+        let kind_filter = self.kinds.get(group);
         if let Some(view) = self.folder_views.get(&(group,folder.to_path_buf())) {
             if Arc::ptr_eq(&view.listing, &listing)
                 && view.spec == spec
@@ -144,6 +145,7 @@ impl Explorer {
                 && view.stacks_rev == self.stacks_rev
                 && view.label_filter == label_filter
                 && view.labels_rev == labels_rev
+                && view.kind_filter == kind_filter
             {
                 return Some((listing, Arc::clone(&view.indices)));
             }
@@ -156,6 +158,9 @@ impl Explorer {
         if let Some(label) = label_filter {
             // Folders stay, so the way to labelled files stays open.
             indices.retain(|&row| listing.entries[row].is_directory || self.label_of(&listing.entries[row].path) == Some(label));
+        }
+        if let Some(kind) = kind_filter {
+            indices.retain(|&row| listing.entries[row].is_directory || filemanager_core::kinds::Kind::of(&listing.entries[row].path) == Some(kind));
         }
         // Versions of one document fold into its newest file.
         let (indices, stacks) = if self.stack_versions {
@@ -177,6 +182,7 @@ impl Explorer {
             stacks_rev: self.stacks_rev,
             label_filter,
             labels_rev,
+            kind_filter,
             indices: Arc::clone(&indices),
             stacks: Arc::new(stacks),
         });
@@ -919,6 +925,7 @@ impl Explorer {
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));
         self.folder_views.retain(|(id,_),_|ids.contains(id));
+        self.kinds.retain(&ids);
         self.tab_scroll.retain(|id,_|ids.contains(id));
         self.tab_reveal.retain(|id,_|ids.contains(id));
     }

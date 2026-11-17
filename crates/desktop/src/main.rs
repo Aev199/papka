@@ -19,6 +19,7 @@ mod edge_scroll;
 mod smooth_scroll;
 mod marked;
 mod motion;
+mod kind_filter;
 mod search_panel;
 mod updates;
 mod icons;
@@ -212,6 +213,11 @@ pub(crate) fn wants_shell_thumbnail(path: &std::path::Path) -> bool {
 }
 
 /// A path from an operation receipt as the listings know it (no `\\?\`).
+/// Now, in milliseconds since 1970.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
 fn normalized(path: Option<PathBuf>) -> Option<PathBuf> {
     path.map(|path| filemanager_core::path_utils::normalize_extended_path(&path))
 }
@@ -253,6 +259,11 @@ enum MenuTarget {
     /// A row of «Места», or (None) the section title.
     Place(Option<usize>),
     Recent(PathBuf),
+    /// The status bar's «Тип»: the kinds of files in the active pane.
+    Kinds,
+    /// A › of the path bar: the subfolders of the folder before it, the
+    /// next part of the path (if any) marked, to jump to one in the pane.
+    Children(GroupId, PathBuf, Option<PathBuf>),
 }
 
 struct RightDrag {
@@ -292,6 +303,8 @@ struct FolderView {
     /// The label shown alone, and the labels as they were when filtered.
     label_filter: Option<filemanager_core::labels::Label>,
     labels_rev: u64,
+    /// The kind of file shown alone.
+    kind_filter: Option<filemanager_core::kinds::Kind>,
     indices: Arc<Vec<usize>>,
     /// Rows that head or belong to a stack of versions.
     stacks: Arc<HashMap<PathBuf, filemanager_core::versions::Stacked>>,
@@ -353,6 +366,12 @@ struct Explorer {
     all_places: Vec<Place>,
     /// Folders used recently, most recent first.
     recent: Vec<PathBuf>,
+    /// How often and how lately folders were stayed in, for Ctrl+P.
+    visits: filemanager_core::jump::Visits,
+    /// The folder last counted as a stay.
+    visit_noted: Option<PathBuf>,
+    /// Panes showing only files of one kind.
+    kinds: kind_filter::KindFilters,
     /// Sidebar sections folded by the user.
     collapsed: HashSet<String>,
     sizes: folder_sizes::FolderSizes,
@@ -629,6 +648,10 @@ impl Explorer {
             comparison: None,
             recent: workspaces.as_ref().and_then(|store| store.value(projects::RECENT).ok().flatten())
                 .map(|text| text.lines().map(PathBuf::from).collect()).unwrap_or_default(),
+            visits: workspaces.as_ref().and_then(|store| store.value(projects::VISITS).ok().flatten())
+                .map(|text| filemanager_core::jump::Visits::parse(&text)).unwrap_or_default(),
+            visit_noted: None,
+            kinds: Default::default(),
             drives: places::drives(),
             drive_space: HashMap::new(),
             sorts: HashMap::new(),
