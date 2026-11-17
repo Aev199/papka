@@ -227,9 +227,28 @@ impl Explorer {
         // Tab widths as drawn: a closing tab narrows from its own.
         let gap = self.motion.tab_gap(group);
         let widths = self.motion.tab_widths.clone();
+        // The active tab's line slides from tab to tab: drawn by the strip
+        // from the tabs' widths of the last frame (their place is known only
+        // once laid out), in its own place when they are not known yet.
+        let focused_strip = group==self.browser.active && !self.cards.shown_in(group);
+        let line = self.motion.tab_widths.borrow().get(&group)
+            .filter(|known| known.len() == tabs.len() && active_index < known.len())
+            .filter(|_| focused_strip)
+            .map(|known| {
+                // The strip's padding and the gap between tabs are 4 px.
+                let x = 4. + known[..active_index].iter().map(|w| w + 4.).sum::<f32>() + 10.;
+                self.motion.tab_line(group, x, (known[active_index] - 20.).max(0.))
+            });
         let mut strip = div()
-            .when(gap.is_none(), |strip| strip.on_children_prepainted(move |bounds, _, _| {
-                widths.borrow_mut().insert(group, bounds.iter().map(|b| f32::from(b.size.width)).collect());
+            .when(gap.is_none(), |strip| strip.on_children_prepainted(move |bounds, window, _| {
+                let measured: Vec<f32> = bounds.iter().map(|b| f32::from(b.size.width)).collect();
+                let mut known = widths.borrow_mut();
+                // New widths (a tab opened, renamed, the window resized): the
+                // line is drawn once more with them.
+                if known.get(&group) != Some(&measured) {
+                    known.insert(group, measured);
+                    window.request_animation_frame();
+                }
             }))
             .id(SharedString::from(format!("tabs-{}",group.0)))
             .flex_1().min_w_0().h_full().flex().items_end().gap_1().px_1()
@@ -265,7 +284,7 @@ impl Explorer {
                 // A new tab widens into its place.
                 .when_some(opening,|tab,open|tab.min_w(px(96.*open)).max_w(px(200.*open)).overflow_hidden().opacity(open))
                 .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(if focused {TEXT} else {TEXT_MUTED})))
-                .when(active && focused,|row|row.child(div().absolute().bottom_0().left(px(10.)).right(px(10.)).h(px(2.))
+                .when(active && focused && line.is_none(),|row|row.child(div().absolute().bottom_0().left(px(10.)).right(px(10.)).h(px(2.))
                     .rounded(px(1.)).bg(rgb(ACCENT))))
                 .when(!active,|row|row.text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
                 .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
@@ -294,6 +313,9 @@ impl Explorer {
         }
         if let Some((_, width)) = gap.filter(|(at, _)| *at >= tabs.len()) {
             strip = strip.child(div().flex_none().h(px(32.)).w(px(width)));
+        }
+        if let Some((x, width)) = line {
+            strip = strip.relative().child(div().absolute().bottom_0().left(px(x)).w(px(width)).h(px(2.)).rounded(px(1.)).bg(rgb(ACCENT)));
         }
         // A project lives in this pane: its name leads the tab strip.
         let project = self.browser.group(group).and_then(|g|g.project.as_ref()).map(|p|p.name.clone());
@@ -1459,7 +1481,9 @@ impl Explorer {
             let edge_handle = handle.0.borrow().base_handle.clone();
             // A folder's contents come in with a short fade, once per opening:
             // refreshes keep the same key and stay still.
-            let appear_id = SharedString::from(format!("list-appear-{}-{}", side.0, folder.display()));
+            // Switching list, columns and tiles fades the contents in too.
+            let mode = if self.thumbs_view(side) { 't' } else if list_mode { 'l' } else { 'c' };
+            let appear_id = SharedString::from(format!("list-appear-{}-{mode}-{}", side.0, folder.display()));
             // A column opened beside the current one (a folder's preview) comes from the right.
             let pane_folder = self.pane_path(side);
             let way = if folder == pane_folder { self.motion.went(side, &pane_folder) } else { 1. };
@@ -1491,7 +1515,7 @@ impl Explorer {
                         range.map(|position| {
                             let entry = &listing.entries[indices[position]];
                             let on_trail = trail.as_ref() == Some(&entry.path);
-                            this.row(entry, &folder, side, on_trail, list_mode, list_mode && position % 2 == 1, cx)
+                            this.row(entry, &folder, side, position, on_trail, list_mode, list_mode && position % 2 == 1, cx)
                         }).collect::<Vec<_>>()
                     }}))
                     .track_scroll(&handle)
@@ -1560,7 +1584,8 @@ impl Explorer {
                     Some(file) => img(file).max_w(px(tile_w - 12.)).max_h(px(picture_size)).object_fit(ObjectFit::Contain)
                         // A file that only looks like a picture keeps its icon.
                         .with_fallback(move || svg().path(icon_path).size(px((picture_size / 2.).round())).text_color(rgb(tint)).into_any_element())
-                        .when(entry.hidden, |image| image.opacity(0.55)).into_any_element(),
+                        // A thumbnail just made comes in softly.
+                        .opacity(if entry.hidden { 0.55 } else { 1. } * self.motion.picture_opacity(&format!("thumb:{}", path.display()))).into_any_element(),
                     None => svg().path(icon_path).size(px((picture_size / 2.).round())).text_color(rgb(tint))
                         .when(entry.hidden, |svg| svg.opacity(0.55)).into_any_element(),
                 }));
@@ -1631,16 +1656,26 @@ impl Explorer {
             .into_any_element()
     }
 
-    fn row(&self, entry: &Entry, folder: &Path, side: GroupId, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn row(&self, entry: &Entry, folder: &Path, side: GroupId, position: usize, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
         let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
+        // The selection sliding to this row: the part of it over each row
+        // it passes is drawn under the row's text; the row it goes to shows
+        // its own colour only once it is there.
+        let plate = self.motion.plate_at(side, folder).filter(|_| focused_pane);
+        let plate_part = plate.and_then(|(at, _)| {
+            let (top, bottom) = (at.max(position as f32), (at + 1.).min(position as f32 + 1.));
+            (bottom > top).then_some((top - position as f32, bottom - top))
+        });
+        let arriving = plate.is_some_and(|(_, to)| to == position);
+        let selected_bg = selected && !arriving;
         let (icon_path, tint) = entry_icon(entry);
         let stack = self.stack_role(side, folder, &path);
-        let bg = if selected && focused_pane {
+        let bg = if selected_bg && focused_pane {
             Some(SELECTED)
-        } else if selected {
+        } else if selected_bg {
             Some(INACTIVE_SELECTED)
         } else if on_trail {
             Some(TRAIL)
@@ -1650,9 +1685,10 @@ impl Explorer {
         let base = if striped { STRIPE } else { SURFACE };
         let right_target = is_dir && self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&path);
         let bg = if right_target && !selected { Some(ACCENT_SOFT) } else { bg };
-        let text = if selected { SELECTION_TEXT } else if entry.hidden { TEXT_MUTED } else { TEXT };
-        let metadata_text = if selected { SELECTION_TEXT } else { TEXT_MUTED };
-        let tint = if selected { SELECTION_TEXT } else { tint };
+        // White text only on the selection's colour: not while it slides in.
+        let text = if selected_bg { SELECTION_TEXT } else if entry.hidden { TEXT_MUTED } else { TEXT };
+        let metadata_text = if selected_bg { SELECTION_TEXT } else { TEXT_MUTED };
+        let tint = if selected_bg { SELECTION_TEXT } else { tint };
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
             .w_full().h(px(row_height())).pl(px(6.)).pr_2().flex().items_center().gap_2()
             .border_l_2().border_color(rgb(bg.unwrap_or(base)))
@@ -1661,6 +1697,8 @@ impl Explorer {
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
             .relative()
+            .when_some(plate_part, |row, (top, height)| row.child(div().absolute().left_0().w_full()
+                .top(px(top * row_height())).h(px(height * row_height())).bg(rgb(SELECTED))))
             .children(item_overlays(self.motion.flash_of(&path),
                 is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
             // An older version sits indented under the newest one.
@@ -2182,7 +2220,8 @@ impl Explorer {
             return div().flex().flex_col().gap_1()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Предпросмотр"))
                 .child(div().w_full().h(px(240.)).p_1().flex().items_center().justify_center()
-                    .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)))
+                    .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)
+                        .opacity(self.motion.picture_opacity(&format!("inspector:{}", entry.path.display())))))
                 .into_any_element();
         }
         if self.inspector.loading {
@@ -3301,6 +3340,8 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_filter_search(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.card_covers_list() || this.palette.is_some() || this.settings.is_some() { Self::key_select_prev(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_first(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_page_down(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_page_up(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_last(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_open(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_column_left(this,event,window,cx); } }))

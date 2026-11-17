@@ -12,7 +12,7 @@ use crate::{Explorer, FolderView, GroupId};
 actions!(filemanager, [
     PaletteEnter, SettingsToggle, SettingsApply, OpenPalette, OpenSettings, Back, Forward, Up, NewTab, CloseTab, NextTab, PrevTab, Split, Refresh, Stage, Find,
     AddressBar, RenameSelected, NewFolder, DismissOverlay, SelectNext, SelectPrev,
-    SelectFirst, SelectLast, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
+    SelectFirst, SelectLast, SelectPageDown, SelectPageUp, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
     SplitRight, SplitDown, ClosePane, ReopenTab, PreviousPane, PaneLeft, PaneRight, PaneUp, PaneDown,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
     CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
@@ -82,6 +82,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", SelectPrev, Some(CONTEXT)),
         KeyBinding::new("home", SelectFirst, Some(CONTEXT)),
         KeyBinding::new("end", SelectLast, Some(CONTEXT)),
+        KeyBinding::new("pagedown", SelectPageDown, Some(CONTEXT)),
+        KeyBinding::new("pageup", SelectPageUp, Some(CONTEXT)),
         KeyBinding::new("enter", OpenSelected, Some(CONTEXT)),
         KeyBinding::new("left", ColumnLeft, Some(CONTEXT)),
         KeyBinding::new("right", ColumnRight, Some(CONTEXT)),
@@ -353,6 +355,28 @@ impl Explorer {
         cx.notify();
     }
 
+    /// A far jump of the selection (Home, End, a page, a found file) glides
+    /// the list there, as the wheel does, instead of a cut; near moves and a
+    /// list not laid out yet scroll at once. True when it glides.
+    fn glide_to_row(&self, side: GroupId, folder: &Path, handle: &gpui::UniformListScrollHandle, item: usize) -> bool {
+        if !crate::theme::animations() { return false; }
+        let state = handle.0.borrow();
+        // GPUI's `last_item_size.item` is the list's visible area, not a row.
+        let Some(size) = state.last_item_size else { return false };
+        let view = f32::from(size.item.height);
+        let base = state.base_handle.clone();
+        drop(state);
+        let row = crate::layout::row_height();
+        if row <= 0. || view <= 0. { return false; }
+        let offset = f32::from(base.offset().y);
+        let (top, bottom) = (item as f32 * row, item as f32 * row + row);
+        let target = if top < -offset { -top } else if bottom > -offset + view { -(bottom - view) } else { return true };
+        if (target - offset).abs() <= 3. * row { return false; }
+        let key = format!("list-{}-{}", side.0, folder.display()).into();
+        self.smooth.glide_to(key, &base, target);
+        true
+    }
+
     /// Scrolls the list holding the selection so it is visible.
     pub(crate) fn reveal_selected(&mut self) {
         let Some(selected) = self.selected.clone() else { return };
@@ -362,7 +386,9 @@ impl Explorer {
             // In tiles the list's items are rows of them.
             let side = self.browser.active;
             let item = if self.thumbs_view(side) { position / self.thumb_columns.get(&side).copied().unwrap_or(1).max(1) } else { position };
-            self.scroll_handle(side, &folder).scroll_to_item(item, ScrollStrategy::Nearest);
+            let handle = self.scroll_handle(side, &folder);
+            if !self.thumbs_view(side) && self.glide_to_row(side, &folder, &handle, item) { return; }
+            handle.scroll_to_item(item, ScrollStrategy::Nearest);
         }
     }
 
@@ -418,6 +444,12 @@ impl Explorer {
             (None, Some(current)) => (current as isize + delta).clamp(0, last),
         } as usize;
         let path = listing.entries[indices[position]].path.clone();
+        // A step of a few rows slides the selection there (not in tiles,
+        // nor with several items marked).
+        match current.filter(|_| !self.thumbs_view(side) && self.marked.len() <= 1) {
+            Some(from) => self.motion.plate_moved(side, &folder, from, position),
+            None => self.motion.plate_moved(side, &folder, position, position),
+        }
         self.navigate_side(side, &folder, Some(path), cx);
     }
 
@@ -838,6 +870,25 @@ impl Explorer {
     }
     pub(crate) fn key_select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(false), cx); }
     pub(crate) fn key_select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(true), cx); }
+    /// PageDown / PageUp: the selection a screenful of rows on (the list
+    /// glides there).
+    pub(crate) fn key_select_page_down(&mut self, _: &SelectPageDown, _: &mut Window, cx: &mut Context<Self>) { let page = self.page_rows(); self.move_selection(page, None, cx); }
+    pub(crate) fn key_select_page_up(&mut self, _: &SelectPageUp, _: &mut Window, cx: &mut Context<Self>) { let page = self.page_rows(); self.move_selection(-page, None, cx); }
+
+    /// Rows that fit in the active list, less one kept for context.
+    fn page_rows(&mut self) -> isize {
+        let side = self.active_side();
+        let folder = self.pane_path(side);
+        let view = self.scroll_handle(side, &folder).0.borrow().last_item_size.map_or(0., |size| f32::from(size.item.height));
+        if self.thumbs_view(side) {
+            // Tiles: whole rows of them.
+            let rows = (view / (crate::thumbs::tile_height() + crate::thumbs::TILE_GAP)).floor() as isize;
+            let columns = self.thumb_columns.get(&side).copied().unwrap_or(1).max(1) as isize;
+            return (rows - 1).max(1) * columns;
+        }
+        let rows = (view / crate::layout::row_height()).floor() as isize;
+        (rows - 1).max(1)
+    }
 
     pub(crate) fn key_open(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
         // Enter in a name, path or search field belongs to that field: the

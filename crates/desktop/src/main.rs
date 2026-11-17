@@ -48,6 +48,7 @@ use filemanager_core::search;
 use filemanager_core::sort::SortSpec;
 use filemanager_core::operation_journal::{InterruptedAction, OperationJournal};
 use filemanager_core::workspace::WorkspaceStore;
+use gpui::AnimationExt as _;
 use gpui::{
     div, prelude::*, px, size, App, Bounds, Context, Entity, FocusHandle, Focusable,
     IntoElement, Pixels, Point, Render, Subscription, TitlebarOptions, UniformListScrollHandle,
@@ -175,10 +176,13 @@ impl Render for FileDragPreview {
                     .border_1().border_color(rgb(theme::SELECTED_BORDER))
                     .text_color(rgb(theme::SELECTION_TEXT)).text_size(px(13.))
                     .flex().items_center().gap_2()
+                    .shadow_lg()
                     .child(self.name.clone())
                     // What a release here does; Ctrl and Shift change it at once.
                     .when_some(word, |chip, word| chip.child(div().px_1p5().rounded_sm().text_size(px(11.))
                         .bg(rgb(theme::SELECTED_BORDER)).child(word)))
+                    // Picked up: it rises a little from the row and casts its shadow.
+                    .with_animation("drag-lift", theme::motion(160), |chip, delta| chip.opacity(0.7 + 0.3 * delta).mt(px(5. * (1. - delta))))
             )
     }
 }

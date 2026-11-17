@@ -77,6 +77,15 @@ impl SmoothScroll {
         true
     }
 
+    /// Glides the area to `target` (a far jump of the selection: Home, End,
+    /// a page, a found file). The area's layer moves it from the next frame.
+    pub(crate) fn glide_to(&self, key: SharedString, handle: &ScrollHandle, target: f32) {
+        let current = f32::from(handle.offset().y);
+        let target = target.clamp(-f32::from(handle.max_offset().y).max(0.), 0.);
+        if (target - current).abs() < 0.5 { return; }
+        self.0.borrow_mut().insert(key, Glide { target, placed: current, last: None });
+    }
+
     /// A wheel notch over the area: the glide's target moves by `delta`.
     fn wheel(&self, key: SharedString, handle: &ScrollHandle, delta: f32) -> bool {
         let max = f32::from(handle.max_offset().y);

@@ -91,7 +91,29 @@ pub(crate) struct Motion {
     progress: Option<(f32, Instant)>,
     /// Where each pane was, and which way it went last.
     places: HashMap<GroupId, (PathBuf, f32)>,
+    /// The active tab's line per pane: drawn x and width, their target, and
+    /// when it was last drawn.
+    tab_lines: RefCell<HashMap<GroupId, TabLine>>,
+    /// Pictures (thumbnails, the details panel's) and when each arrived.
+    pictures: RefCell<HashMap<String, Instant>>,
+    /// The selection sliding from row to row: pane, folder, from, to, start.
+    plate: Option<(GroupId, PathBuf, usize, usize, Instant)>,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct TabLine {
+    x: f32,
+    width: f32,
+    target_x: f32,
+    target_width: f32,
+    drawn: Instant,
+}
+
+/// How long a picture takes to come in, and the selection to slide a row.
+pub(crate) const PICTURE_IN: Duration = Duration::from_millis(160);
+pub(crate) const PLATE: Duration = Duration::from_millis(100);
+/// Time constant of the tab line's glide.
+const LINE_TAU: f32 = 0.045;
 
 impl Motion {
     /// Lights up `paths` as they appear in their folders.
@@ -185,6 +207,53 @@ impl Motion {
         }
     }
 
+    /// Where to draw the active tab's line in `group` this frame, on its
+    /// way to `target` (x, width): it slides when another tab becomes active
+    /// or the tabs move. A pane seen for the first time gets it in place.
+    pub(crate) fn tab_line(&self, group: GroupId, target_x: f32, target_width: f32) -> (f32, f32) {
+        let now = Instant::now();
+        let mut lines = self.tab_lines.borrow_mut();
+        let line = lines.entry(group).or_insert(TabLine { x: target_x, width: target_width, target_x, target_width, drawn: now });
+        let dt = (now - line.drawn).as_secs_f32().min(0.05);
+        // Not drawn for a while (the pane was hidden): no slide from the past.
+        let fresh = now - line.drawn < Duration::from_millis(500);
+        let step = |from: f32, to: f32| {
+            if !crate::theme::animations() || !fresh || (to - from).abs() < 0.5 { to } else { from + (to - from) * (1. - (-dt / LINE_TAU).exp()) }
+        };
+        line.x = step(line.x, target_x);
+        line.width = step(line.width, target_width);
+        line.target_x = target_x;
+        line.target_width = target_width;
+        line.drawn = now;
+        (line.x, line.width)
+    }
+
+    /// A picture for `key` has just arrived: it comes in softly.
+    pub(crate) fn picture_arrived(&self, key: String) {
+        if !crate::theme::animations() { return; }
+        self.pictures.borrow_mut().insert(key, Instant::now());
+    }
+
+    /// How far in the picture for `key` is (1: fully, or never tracked).
+    pub(crate) fn picture_opacity(&self, key: &str) -> f32 {
+        self.pictures.borrow().get(key).map_or(1., |arrived| ease_out(arrived.elapsed(), PICTURE_IN))
+    }
+
+    /// The selection moved by keys from row `from` to row `to` of `folder`.
+    pub(crate) fn plate_moved(&mut self, group: GroupId, folder: &Path, from: usize, to: usize) {
+        if !crate::theme::animations() || from == to || from.abs_diff(to) > 3 { self.plate = None; return; }
+        self.plate = Some((group, folder.to_path_buf(), from, to, Instant::now()));
+    }
+
+    /// Where the sliding selection is in `folder` of `group` (in rows), and
+    /// the row it goes to; None once it is there.
+    pub(crate) fn plate_at(&self, group: GroupId, folder: &Path) -> Option<(f32, usize)> {
+        let (g, f, from, to, start) = self.plate.as_ref()?;
+        if *g != group || f != folder || start.elapsed() >= PLATE { return None; }
+        let t = ease_out(start.elapsed(), PLATE);
+        Some((*from as f32 + (*to as f32 - *from as f32) * t, *to))
+    }
+
     /// Whether something is moving and the next frame must be drawn. Also
     /// drops what has finished.
     pub(crate) fn wants_frame(&mut self, fraction: Option<f64>) -> bool {
@@ -198,7 +267,17 @@ impl Motion {
         if self.opened_tab.is_some_and(|(_, _, start)| start.elapsed() >= TAB_OPEN) { self.opened_tab = None; }
         if self.closed_tab.is_some_and(|(_, _, _, start)| start.elapsed() >= TAB_CLOSE) { self.closed_tab = None; }
         let gliding = self.progress_moving(fraction);
-        flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding
+        // A line of a pane no longer drawn is let go.
+        let mut lines = self.tab_lines.borrow_mut();
+        lines.retain(|_, line| line.drawn.elapsed() < Duration::from_secs(2));
+        let line_moving = lines.values().any(|line| (line.x - line.target_x).abs() >= 0.5 || (line.width - line.target_width).abs() >= 0.5);
+        drop(lines);
+        let mut pictures = self.pictures.borrow_mut();
+        pictures.retain(|_, arrived| arrived.elapsed() < PICTURE_IN * 3);
+        let pictures_coming = pictures.values().any(|arrived| arrived.elapsed() < PICTURE_IN);
+        drop(pictures);
+        if self.plate.as_ref().is_some_and(|plate| plate.4.elapsed() >= PLATE) { self.plate = None; }
+        flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding || line_moving || pictures_coming || self.plate.is_some()
     }
 
     /// Whether the progress bar still has a way to go to `fraction`.
@@ -258,6 +337,31 @@ mod tests {
         // Redrawing the same folder keeps the way it came in.
         assert_eq!(motion.went(group, Path::new("/a/b")), 1.);
         assert_eq!(motion.went(group, Path::new("/a")), -1.);
+    }
+
+    #[test]
+    fn the_tab_line_slides_to_its_tab() {
+        let motion = Motion::default();
+        let group = GroupId(1);
+        assert_eq!(motion.tab_line(group, 10., 80.), (10., 80.));
+        std::thread::sleep(Duration::from_millis(16));
+        let (x, width) = motion.tab_line(group, 110., 60.);
+        assert!(x > 10. && x < 110. && width < 80. && width > 60., "{x} {width}");
+        for _ in 0..80 { std::thread::sleep(Duration::from_millis(5)); motion.tab_line(group, 110., 60.); }
+        assert_eq!(motion.tab_line(group, 110., 60.), (110., 60.));
+    }
+
+    #[test]
+    fn the_plate_slides_a_few_rows_only() {
+        let mut motion = Motion::default();
+        let group = GroupId(1);
+        motion.plate_moved(group, Path::new("/w"), 3, 4);
+        let (at, to) = motion.plate_at(group, Path::new("/w")).unwrap();
+        assert!((3. ..=4.).contains(&at) && to == 4);
+        assert!(motion.plate_at(group, Path::new("/other")).is_none());
+        // A jump (Home, End, PageDown) does not slide.
+        motion.plate_moved(group, Path::new("/w"), 0, 40);
+        assert!(motion.plate_at(group, Path::new("/w")).is_none());
     }
 
     #[test]

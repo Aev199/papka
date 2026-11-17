@@ -119,6 +119,7 @@ impl Explorer {
             let _ = this.update(cx, |this, cx| {
                 this.thumbs.running = false;
                 for (path, picture) in made {
+                    if picture.is_some() { this.motion.picture_arrived(format!("thumb:{}", path.display())); }
                     if let Some(slot) = this.thumbs.map.get_mut(&path) { *slot = picture; }
                 }
                 this.pump_thumbs(cx);
