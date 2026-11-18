@@ -1491,7 +1491,9 @@ impl Explorer {
             // or up: a slide of their own made them jump back and forth.
             let way = if list_mode { way } else { 0. };
             // A change of view (list, columns, tiles) fades in from further.
-            let from = if self.motion.view_changed(side, mode) { 0.1 } else { 0.35 };
+            // Columns do not fade at all: each step through them would flash.
+            let changed = self.motion.view_changed(side, mode);
+            let from = if !list_mode { 1. } else if changed { 0.1 } else { 0.35 };
             let wheel = crate::smooth_scroll::layer(self.smooth.clone(), format!("list-{}-{}", side.0, folder.display()).into(), edge_handle.clone());
             let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {

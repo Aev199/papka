@@ -168,11 +168,13 @@ struct TabDrag { group: GroupId, index: usize, title: String }
 impl Render for FileDragPreview {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let modifiers = window.modifiers();
-        // Picked up: the label rises a little and its shadow grows. Counted
-        // from the moment it was taken (GPUI draws a drag's picture afresh on
-        // every move, so an element animation would start over each time).
+        // Picked up: the label grows out from under the cursor, moves away
+        // from it and casts a shadow, as if lifted. A rise alone was lost:
+        // the label follows the cursor anyway. Counted from the moment it was
+        // taken (GPUI draws a drag's picture afresh on every move, so an
+        // element animation would start over each time).
         let lift = if theme::animations() {
-            let t = (self.picked.elapsed().as_secs_f32() / 0.18).min(1.);
+            let t = (self.picked.elapsed().as_secs_f32() / 0.25).min(1.);
             if t < 1. { window.request_animation_frame(); }
             1. - (1. - t).powi(3)
         } else { 1. };
@@ -182,19 +184,21 @@ impl Render for FileDragPreview {
             DropAt::Folder(folder) => drop_word(&mode.first, mode.from_archive, folder, modifiers.control, modifiers.shift),
         });
         div()
-            .pl(self.position.x + px(12.))
-            .pt(self.position.y + px(8.))
+            // Off the cursor: from 4 px to 14 px as it is lifted.
+            .pl(self.position.x + px(4. + 10. * lift))
+            .pt(self.position.y + px(2. + 8. * lift))
             .child(
-                div().px_3().py_1().rounded(px(4.)).bg(rgb(theme::SELECTED))
+                div().rounded(px(4.)).bg(rgb(theme::SELECTED))
                     .border_1().border_color(rgb(theme::SELECTED_BORDER))
-                    .text_color(rgb(theme::SELECTION_TEXT)).text_size(px(13.))
+                    .text_color(rgb(theme::SELECTION_TEXT))
+                    // From a small tag to its full size.
+                    .px(px(4. + 8. * lift)).py(px(1. + 3. * lift)).text_size(px(11. + 2. * lift))
                     .flex().items_center().gap_2()
-                    .opacity(0.6 + 0.4 * lift)
-                    .mt(px(8. * (1. - lift)))
+                    .opacity(0.5 + 0.5 * lift)
                     .shadow(vec![gpui::BoxShadow {
-                        color: gpui::hsla(0., 0., 0., 0.45 * lift),
-                        offset: gpui::point(px(0.), px(2. + 4. * lift)),
-                        blur_radius: px(4. + 10. * lift),
+                        color: gpui::hsla(0., 0., 0., 0.55 * lift),
+                        offset: gpui::point(px(0.), px(2. + 6. * lift)),
+                        blur_radius: px(4. + 14. * lift),
                         spread_radius: px(0.),
                         inset: false,
                     }])
