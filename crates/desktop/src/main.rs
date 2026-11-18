@@ -48,7 +48,6 @@ use filemanager_core::search;
 use filemanager_core::sort::SortSpec;
 use filemanager_core::operation_journal::{InterruptedAction, OperationJournal};
 use filemanager_core::workspace::WorkspaceStore;
-use gpui::AnimationExt as _;
 use gpui::{
     div, prelude::*, px, size, App, Bounds, Context, Entity, FocusHandle, Focusable,
     IntoElement, Pixels, Point, Render, Subscription, TitlebarOptions, UniformListScrollHandle,
@@ -76,7 +75,13 @@ struct ColumnResize {
 #[derive(Clone)]
 struct FileDragInfo { paths: Vec<PathBuf> }
 
-struct FileDragPreview { name: String, position: Point<Pixels>, mode: Option<DropMode> }
+struct FileDragPreview { name: String, position: Point<Pixels>, mode: Option<DropMode>, picked: std::time::Instant }
+
+impl FileDragPreview {
+    fn new(name: String, position: Point<Pixels>, mode: Option<DropMode>) -> Self {
+        Self { name, position, mode, picked: std::time::Instant::now() }
+    }
+}
 
 /// The folder files would land in if released now, shared with the drag's
 /// picture so it can say «Копия» or «Перенос».
@@ -163,6 +168,14 @@ struct TabDrag { group: GroupId, index: usize, title: String }
 impl Render for FileDragPreview {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let modifiers = window.modifiers();
+        // Picked up: the label rises a little and its shadow grows. Counted
+        // from the moment it was taken (GPUI draws a drag's picture afresh on
+        // every move, so an element animation would start over each time).
+        let lift = if theme::animations() {
+            let t = (self.picked.elapsed().as_secs_f32() / 0.18).min(1.);
+            if t < 1. { window.request_animation_frame(); }
+            1. - (1. - t).powi(3)
+        } else { 1. };
         let word = self.mode.as_ref().and_then(|mode| match &mode.target.borrow().at {
             DropAt::Nothing => None,
             DropAt::Stage => Some("Отложить"),
@@ -176,13 +189,19 @@ impl Render for FileDragPreview {
                     .border_1().border_color(rgb(theme::SELECTED_BORDER))
                     .text_color(rgb(theme::SELECTION_TEXT)).text_size(px(13.))
                     .flex().items_center().gap_2()
-                    .shadow_lg()
+                    .opacity(0.6 + 0.4 * lift)
+                    .mt(px(8. * (1. - lift)))
+                    .shadow(vec![gpui::BoxShadow {
+                        color: gpui::hsla(0., 0., 0., 0.45 * lift),
+                        offset: gpui::point(px(0.), px(2. + 4. * lift)),
+                        blur_radius: px(4. + 10. * lift),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }])
                     .child(self.name.clone())
                     // What a release here does; Ctrl and Shift change it at once.
                     .when_some(word, |chip, word| chip.child(div().px_1p5().rounded_sm().text_size(px(11.))
                         .bg(rgb(theme::SELECTED_BORDER)).child(word)))
-                    // Picked up: it rises a little from the row and casts its shadow.
-                    .with_animation("drag-lift", theme::motion(160), |chip, delta| chip.opacity(0.7 + 0.3 * delta).mt(px(5. * (1. - delta))))
             )
     }
 }
@@ -2040,7 +2059,16 @@ impl Explorer {
                 match this.dirs.finish(&folder, request, result, &visible) {
                     directories::Finished::Stale => {}
                     directories::Finished::Reload => this.load_directory(folder, true, cx),
-                    directories::Finished::Stored => cx.notify(),
+                    directories::Finished::Stored => {
+                        // F5's «Обновление…» gives way once its folders are read.
+                        if this.dirs.refresh_ended(&folder) && this.status == "Обновление…" {
+                            this.status = match this.dirs.errors.get(&folder) {
+                                Some(_) => "Обновлено; часть папок не прочитана".into(),
+                                None => "Обновлено".into(),
+                            };
+                        }
+                        cx.notify();
+                    }
                 }
             });
         }).detach();
@@ -2062,7 +2090,9 @@ impl Explorer {
     }
 
     fn refresh_visible_directories(&mut self, cx: &mut Context<Self>) {
-        for folder in self.visible_directories() {
+        let folders = self.visible_directories();
+        self.dirs.start_refresh(folders.iter().cloned());
+        for folder in folders {
             self.load_directory(folder, true, cx);
         }
         self.inspector.path = None;

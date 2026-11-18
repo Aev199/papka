@@ -86,18 +86,40 @@ pub(crate) struct Motion {
     /// A closed tab's place: its pane, position and width.
     closed_tab: Option<(GroupId, usize, f32, Instant)>,
     /// Tab widths drawn last, per pane: a closed tab narrows from its own.
-    pub(crate) tab_widths: Rc<RefCell<HashMap<GroupId, Vec<f32>>>>,
+    /// How many tabs each pane's strip had when last drawn: the layout the
+    /// strip's scroll handle keeps is of those.
+    tabs_drawn: RefCell<HashMap<GroupId, usize>>,
     /// The progress bar as drawn, and when.
     progress: Option<(f32, Instant)>,
     /// Where each pane was, and which way it went last.
     places: HashMap<GroupId, (PathBuf, f32)>,
     /// The active tab's line per pane: drawn x and width, their target, and
     /// when it was last drawn.
-    tab_lines: RefCell<HashMap<GroupId, TabLine>>,
+    pub(crate) tab_lines: Rc<RefCell<HashMap<GroupId, TabLine>>>,
     /// Pictures (thumbnails, the details panel's) and when each arrived.
     pictures: RefCell<HashMap<String, Instant>>,
+    /// Each pane's view (list, columns, tiles) and when it last changed.
+    views: RefCell<HashMap<GroupId, (char, Instant)>>,
+    /// Set while drawing when something decided only then (the tab line's
+    /// new place) still moves: the window asks for one more frame.
+    pub(crate) late_frame: Rc<std::cell::Cell<bool>>,
     /// The selection sliding from row to row: pane, folder, from, to, start.
     plate: Option<(GroupId, PathBuf, usize, usize, Instant)>,
+}
+
+/// Where tab `index` lies in its strip (x from the strip's left, width),
+/// by the layout of the last frame that the strip's scroll handle keeps.
+pub(crate) fn tab_place(scroll: &gpui::ScrollHandle, index: usize) -> Option<(f32, f32)> {
+    let first = scroll.bounds_for_item(0)?;
+    let tab = scroll.bounds_for_item(index)?;
+    // The strip's padding is 4 px.
+    Some((f32::from(tab.origin.x - first.origin.x) + 4., f32::from(tab.size.width)))
+}
+
+/// Whether `group`'s line has to move toward (x, width): after layout, a
+/// renamed or added tab can shift it with nothing else being redrawn.
+pub(crate) fn line_behind(lines: &RefCell<HashMap<GroupId, TabLine>>, group: GroupId, x: f32, width: f32) -> bool {
+    lines.borrow().get(&group).is_some_and(|line| (line.target_x - x).abs() >= 0.5 || (line.target_width - width).abs() >= 0.5)
 }
 
 #[derive(Clone, Copy)]
@@ -150,9 +172,9 @@ impl Motion {
         self.closed_tab = None;
     }
 
-    pub(crate) fn tab_closed(&mut self, group: GroupId, index: usize) {
+    /// The tab at `index` of `group`, `width` wide, was closed.
+    pub(crate) fn tab_closed(&mut self, group: GroupId, index: usize, width: f32) {
         if !crate::theme::animations() { return; }
-        let width = self.tab_widths.borrow().get(&group).and_then(|widths| widths.get(index).copied()).unwrap_or(120.);
         self.closed_tab = Some((group, index, width, Instant::now()));
         self.opened_tab = None;
     }
@@ -207,6 +229,12 @@ impl Motion {
         }
     }
 
+    /// Notes that `group`'s strip is drawn with `count` tabs; true when it
+    /// had as many last time (the kept layout is of these tabs).
+    pub(crate) fn tabs_drawn(&self, group: GroupId, count: usize) -> bool {
+        self.tabs_drawn.borrow_mut().insert(group, count) == Some(count)
+    }
+
     /// Where to draw the active tab's line in `group` this frame, on its
     /// way to `target` (x, width): it slides when another tab becomes active
     /// or the tabs move. A pane seen for the first time gets it in place.
@@ -225,7 +253,21 @@ impl Motion {
         line.target_x = target_x;
         line.target_width = target_width;
         line.drawn = now;
+        // The target was learnt while drawing: ask for the frame the window
+        // did not know it needed.
+        if (line.x - target_x).abs() >= 0.5 || (line.width - target_width).abs() >= 0.5 { self.late_frame.set(true); }
         (line.x, line.width)
+    }
+
+    /// Notes `group`'s view (`mode`); true for a short while after it
+    /// changed, so the contents of the new view come in more visibly.
+    pub(crate) fn view_changed(&self, group: GroupId, mode: char) -> bool {
+        let mut views = self.views.borrow_mut();
+        match views.get_mut(&group) {
+            Some((old, at)) if *old != mode => { *old = mode; *at = Instant::now(); true }
+            Some((_, at)) => at.elapsed() < Duration::from_millis(300),
+            None => { views.insert(group, (mode, Instant::now() - Duration::from_secs(1))); false }
+        }
     }
 
     /// A picture for `key` has just arrived: it comes in softly.

@@ -543,7 +543,9 @@ impl Explorer {
             cx.notify();
             return;
         }
-        self.motion.tab_closed(self.browser.active, index);
+        let group = self.browser.active;
+        let width = self.tab_scroll.get(&group).and_then(|scroll| scroll.bounds_for_item(index)).map_or(120., |tab| f32::from(tab.size.width));
+        self.motion.tab_closed(group, index, width);
         self.browser.close_tab(self.browser.active, index);
         self.prune_group_state();
         self.selected = None; self.marked.clear(); self.anchor = None;

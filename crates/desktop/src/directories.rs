@@ -16,12 +16,15 @@ pub(crate) struct DirectoryCache<L> {
     dirty: HashSet<PathBuf>,
     order: VecDeque<PathBuf>,
     request: u64,
+    /// Folders an F5 is reading again; the status says «Обновлено» once
+    /// none is left.
+    refreshing: HashSet<PathBuf>,
 }
 
 impl<L> Default for DirectoryCache<L> {
     fn default() -> Self {
         Self { cache: HashMap::new(), errors: HashMap::new(), loading: HashMap::new(), dirty: HashSet::new(),
-            order: VecDeque::new(), request: 0 }
+            order: VecDeque::new(), request: 0, refreshing: HashSet::new() }
     }
 }
 
@@ -37,6 +40,17 @@ pub(crate) enum Finished {
 
 impl<L> DirectoryCache<L> {
     pub(crate) fn is_loading(&self, folder: &Path) -> bool { self.loading.contains_key(folder) }
+
+    /// An F5: these folders are read again.
+    pub(crate) fn start_refresh(&mut self, folders: impl IntoIterator<Item = PathBuf>) {
+        self.refreshing = folders.into_iter().collect();
+    }
+
+    /// A read of `folder` ended (read, failed or dropped); true when it was
+    /// the last folder an F5 waited for.
+    pub(crate) fn refresh_ended(&mut self, folder: &Path) -> bool {
+        self.refreshing.remove(folder) && self.refreshing.is_empty()
+    }
 
     /// The number of the scan to start, or `None` when nothing is to be read:
     /// the folder is known (and not forced), or a scan is already running.
@@ -101,6 +115,16 @@ mod tests {
         assert_eq!(dirs.begin(a, false), None, "already known");
         assert!(dirs.begin(a, true).is_some());
         assert!(!dirs.cache.contains_key(a), "a forced read drops the old listing");
+    }
+
+    #[test]
+    fn a_refresh_ends_with_its_last_folder() {
+        let mut dirs = DirectoryCache::<u32>::default();
+        dirs.start_refresh([PathBuf::from("a"), PathBuf::from("b")]);
+        assert!(!dirs.refresh_ended(Path::new("a")));
+        assert!(!dirs.refresh_ended(Path::new("c")), "not part of the refresh");
+        assert!(dirs.refresh_ended(Path::new("b")));
+        assert!(!dirs.refresh_ended(Path::new("b")), "said once");
     }
 
     #[test]

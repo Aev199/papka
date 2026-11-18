@@ -47,8 +47,9 @@ const LIST_APPEAR_MS: u64 = 140;
 
 /// The fade-in of a folder's contents, coming from the side the pane went:
 /// from the right into a subfolder, from the left back up to a parent.
-fn list_appear(way: f32) -> impl Fn(gpui::Div, f32) -> gpui::Div {
-    move |list, delta| list.opacity(0.35 + 0.65 * delta).left(px(way * crate::motion::SLIDE * (1. - delta)))
+/// `from`: the opacity it starts at (lower after a change of view).
+fn list_appear(way: f32, from: f32) -> impl Fn(gpui::Div, f32) -> gpui::Div {
+    move |list, delta| list.opacity(from + (1. - from) * delta).left(px(way * crate::motion::SLIDE * (1. - delta)))
 }
 
 /// What lies under a row or tile's content: the light of a new item and
@@ -224,32 +225,18 @@ impl Explorer {
             scroll.scroll_to_item(active_index); self.tab_reveal.insert(group,reveal);
         }
         let wheel = scroll.clone();
-        // Tab widths as drawn: a closing tab narrows from its own.
         let gap = self.motion.tab_gap(group);
-        let widths = self.motion.tab_widths.clone();
-        // The active tab's line slides from tab to tab: drawn by the strip
-        // from the tabs' widths of the last frame (their place is known only
-        // once laid out), in its own place when they are not known yet.
+        // The active tab's line slides from tab to tab. Where the tabs are is
+        // known from the last frame's layout, kept by the strip's scroll
+        // handle (GPUI hands a scrolled strip's children nowhere else); while
+        // that does not match the tabs (one just opened or closing) the tab
+        // draws its own line in place.
         let focused_strip = group==self.browser.active && !self.cards.shown_in(group);
-        let line = self.motion.tab_widths.borrow().get(&group)
-            .filter(|known| known.len() == tabs.len() && active_index < known.len())
-            .filter(|_| focused_strip)
-            .map(|known| {
-                // The strip's padding and the gap between tabs are 4 px.
-                let x = 4. + known[..active_index].iter().map(|w| w + 4.).sum::<f32>() + 10.;
-                self.motion.tab_line(group, x, (known[active_index] - 20.).max(0.))
-            });
+        let laid_out = self.motion.tabs_drawn(group, tabs.len());
+        let line = (focused_strip && gap.is_none() && laid_out)
+            .then(|| crate::motion::tab_place(&scroll, active_index)).flatten()
+            .map(|(x, width)| self.motion.tab_line(group, x + 10., (width - 20.).max(0.)));
         let mut strip = div()
-            .when(gap.is_none(), |strip| strip.on_children_prepainted(move |bounds, window, _| {
-                let measured: Vec<f32> = bounds.iter().map(|b| f32::from(b.size.width)).collect();
-                let mut known = widths.borrow_mut();
-                // New widths (a tab opened, renamed, the window resized): the
-                // line is drawn once more with them.
-                if known.get(&group) != Some(&measured) {
-                    known.insert(group, measured);
-                    window.request_animation_frame();
-                }
-            }))
             .id(SharedString::from(format!("tabs-{}",group.0)))
             .flex_1().min_w_0().h_full().flex().items_end().gap_1().px_1()
             .overflow_x_scroll().track_scroll(&scroll)
@@ -301,7 +288,7 @@ impl Explorer {
                 // A tab only opens under dragged files; releasing there does nothing.
                 .on_mouse_move(cx.listener(|this,_,_,cx| this.drag_over(crate::DropAt::Nothing,cx)))
                 .on_drag(TabDrag {group,index,title:titles[index].clone()},|drag: &TabDrag,position,_,cx|
-                    cx.new(|_|FileDragPreview {name:drag.title.clone(),position,mode:None}))
+                    cx.new(|_|FileDragPreview::new(drag.title.clone(),position,None)))
                 .drag_over::<TabDrag>(|style,_,_,_|style.border_l_2().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {cx.stop_propagation();this.move_tab_to(drag,group,index,cx);} ))
                 .on_mouse_down(MouseButton::Middle,cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);} ))
@@ -337,6 +324,19 @@ impl Explorer {
                     .tooltip(|window,cx|Tooltip::new("Закрыть проект — вернуть прежние вкладки").build(window,cx))
                     .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.close_project(group,cx);})))))
             .child(strip)
+            // After the strip is laid out: a line behind its tab (renamed,
+            // added, the window resized), or a strip just changed, asks for
+            // one more frame.
+            .child({
+                let (lines, waiting, drawn) = (self.motion.tab_lines.clone(), focused_strip && !laid_out, line.is_some());
+                gpui::canvas(move |_, window, _| {
+                    // Only the strip that draws the line: another pane's old
+                    // line must not ask for frames forever.
+                    let behind = drawn && crate::motion::tab_place(&scroll, active_index)
+                        .is_some_and(|(x, width)| crate::motion::line_behind(&lines, group, x + 10., (width - 20.).max(0.)));
+                    if waiting || behind { window.request_animation_frame(); }
+                }, |_, _, _, _| {}).absolute().size_0()
+            })
             .child(icon_button("new-tab","fm/plus.svg","Новая вкладка (Ctrl+T)",false,true)
                 .on_click(cx.listener(move |this,_,_,cx| {this.focus_group(group,cx);this.add_tab(cx);})))
             .child(icon_button("tab-list","fm/chevron-down.svg","Все вкладки",false,true)
@@ -959,7 +959,7 @@ impl Explorer {
             let drag_name = place.label.clone();
             side = side.child(self.place_row(("place", index), place, active, true, cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(Some(index)),cx)))
-                .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position,mode:None}))
+                .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview::new(drag_name.clone(),position,None)))
                 .drag_over::<PlaceDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &PlaceDrag,_,cx|this.move_place(data.index,index,cx))));
         }
@@ -976,7 +976,7 @@ impl Explorer {
                 .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
                 .on_click(cx.listener(move |this,_,_,cx|this.navigate_side(this.active_side(),&target,None,cx)))
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Favorite(index),cx)))
-                .on_drag(FavoriteDrag {index},move |_: &FavoriteDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position,mode:None}))
+                .on_drag(FavoriteDrag {index},move |_: &FavoriteDrag,position,_,cx|cx.new(|_|FileDragPreview::new(drag_name.clone(),position,None)))
                 .drag_over::<FavoriteDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &FavoriteDrag,_,cx|this.move_favorite(data.index,index,cx))));
         }
@@ -1115,7 +1115,7 @@ impl Explorer {
         // a row carries one, into any folder, pane or program.
         let preview = |target: crate::DragTargetCell| move |info: &FileDragInfo, position, _: &mut Window, cx: &mut App| {
             let name = match info.paths.as_slice() { [single] => browser::display_name(single), many => format!("{} элементов", many.len()) };
-            cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode::new(first, &target)) })
+            cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
         };
         zone = zone.child(div().id("zone-all").flex().items_center().gap_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             .cursor_grab().rounded_sm().hover(|style| style.bg(rgb(HOVER)))
@@ -1487,6 +1487,11 @@ impl Explorer {
             // A column opened beside the current one (a folder's preview) comes from the right.
             let pane_folder = self.pane_path(side);
             let way = if folder == pane_folder { self.motion.went(side, &pane_folder) } else { 1. };
+            // Columns move sideways by themselves when the pane goes deeper
+            // or up: a slide of their own made them jump back and forth.
+            let way = if list_mode { way } else { 0. };
+            // A change of view (list, columns, tiles) fades in from further.
+            let from = if self.motion.view_changed(side, mode) { 0.1 } else { 0.35 };
             let wheel = crate::smooth_scroll::layer(self.smooth.clone(), format!("list-{}-{}", side.0, folder.display()).into(), edge_handle.clone());
             let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {
@@ -1507,7 +1512,7 @@ impl Explorer {
                     .track_scroll(&handle)
                     .h_full()
                     .pt_2().pl_2().pr(px(12.))
-                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear(way))).into_any_element();
+                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear(way, from))).into_any_element();
             }
             column = column.child(
                 div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
@@ -1522,7 +1527,7 @@ impl Explorer {
                     .h_full()
                     .pl_1().pr(px(12.))
                     .on_mouse_down(MouseButton::Left,cx.listener({ let folder=background_marquee_folder.clone(); move |this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx) }))
-                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear(way))
+                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear(way, from))
             );
             if self.unwatched_folders.contains(&background_marquee_folder) {
                 column = column.child(
@@ -1632,7 +1637,7 @@ impl Explorer {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode::new(first, &target)) })
+                cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -1843,7 +1848,7 @@ impl Explorer {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview { name, position, mode: info.paths.first().map(|first| crate::DropMode::new(first, &target)) })
+                cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -3216,7 +3221,13 @@ impl Render for Explorer {
                 .child(self.inspector(cx)));
         }
 
+        // Something that learnt only while drawing that it moves (the tab
+        // line) asks here for the next frame.
+        let late = self.motion.late_frame.clone();
+        let late_frame = gpui::canvas(move |_, window, _| { if late.replace(false) { window.request_animation_frame(); } }, |_, _, _, _| {})
+            .absolute().size_0();
         let mut root = div().relative().size_full().flex().flex_col().bg(rgb(WINDOW))
+            .child(late_frame)
             .text_color(rgb(TEXT)).text_size(px(13.))
             .key_context("Filemanager")
             .track_focus(&self.focus_handle)
