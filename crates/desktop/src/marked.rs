@@ -22,6 +22,11 @@ impl Marked {
         self.set.clear();
     }
 
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&Path) -> bool) {
+        self.list.retain(|path| keep(path));
+        self.set = self.list.iter().cloned().collect();
+    }
+
     /// Adds the paths not marked yet, at the end.
     pub(crate) fn extend(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         for path in paths {

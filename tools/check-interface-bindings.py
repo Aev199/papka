@@ -21,6 +21,13 @@ for key, action in [('up', 'SelectPrev'), ('down', 'SelectNext'), ('enter', 'Pal
     cases.append(f'''let predicate=KeyBindingContextPredicate::parse("{predicate}").unwrap();
 assert_eq!(predicate.depth_of(&palette),Some(3),"{key} must match focused palette Input");
 assert_eq!(predicate.depth_of(&ordinary),None,"{key} must not change ordinary Input");''')
+# Document-edge keys belong to inputs, never the file-list context.
+for key, action in [('ctrl-home', 'MoveToStart'), ('ctrl-end', 'MoveToEnd'), ('ctrl-shift-home', 'SelectToStart'), ('ctrl-shift-end', 'SelectToEnd')]:
+    contexts = re.findall(r'KeyBinding::new\("' + re.escape(key) + r'",\s*gpui_component::input::' + action + r',\s*Some\("([^\"]*)"\)\)', keys)
+    assert contexts == ['Input'], (key, contexts)
+    cases.append(f'''let predicate=KeyBindingContextPredicate::parse("Input").unwrap();
+assert!(predicate.depth_of(&ordinary).is_some(),"{key} matches text input");
+assert_eq!(predicate.depth_of(&vec![KeyContext::parse("Filemanager").unwrap()]),None,"{key} does not take file-list keys");''')
 # Run the actual opener's early-return predicate with existing-dialog fixtures.
 interface = (repo / 'crates/desktop/src/interface.rs').read_text()
 open_body = interface.split('pub(crate) fn open_settings(', 1)[1]
@@ -44,6 +51,6 @@ use context::{KeyContext,KeyBindingContextPredicate};
 fn main() {
  let palette=vec![KeyContext::parse("Filemanager").unwrap(),KeyContext::parse("CommandPalette").unwrap(),KeyContext::parse("Input").unwrap()];
  let ordinary=vec![KeyContext::parse("Filemanager").unwrap(),KeyContext::parse("Input").unwrap()];
-'''+'\n'.join(cases)+'\nprintln!("4 palette bindings match and remain scoped");\n}\n')
+'''+'\n'.join(cases)+'\nprintln!("4 palette and 4 document-edge bindings match and remain scoped");\n}\n')
     cargo = Path(os.environ['CARGO_HOME'])/'bin/cargo'
     subprocess.run([str(cargo),'run','--offline','--manifest-path',str(task/'Cargo.toml')],check=True)

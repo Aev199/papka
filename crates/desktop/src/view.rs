@@ -2439,11 +2439,11 @@ impl Explorer {
                     .child("Отменить передачу")
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx)))
             ); }
-        } else if let Some((items, _, _)) = self.transfers.retry.as_ref().filter(|_| !self.transfers.panel_visible()) {
+        } else if self.transfers.retry_count() > 0 && !self.transfers.panel_visible() {
             bar = bar.child(
                 div().id("retry-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
                     .hover(|style| style.bg(rgb(HOVER)))
-                    .child(format!("Повторить сбойные ({})", items.len()))
+                    .child(format!("Повторить сбойные ({})", self.transfers.retry_count()))
                     .tooltip(|window, cx| Tooltip::new("Снова скопировать или перенести файлы, которые не прошли, например при обрыве сети").build(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.retry_failed(cx)))
             );

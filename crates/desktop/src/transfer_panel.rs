@@ -60,14 +60,16 @@ impl Explorer {
             let failed = !report.failures.is_empty();
             let id = report.id;
             if self.transfers.live.is_some() { card = card.child(div().h(px(1.)).bg(rgb(BORDER))); }
-            let target = report.target.display().to_string();
+            let target = report.targets.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n");
+            let target_label = if report.targets.len() == 1 { format!("в «{}»", browser::display_name(&report.targets[0])) }
+                else { format!("Папок назначения: {}", report.targets.len()) };
             card = card.child(div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(if failed { DANGER } else { TEXT })).child(report.title.clone()))
                 .child(icon_button("transfer-close", "fm/x.svg", "Закрыть", false, true)
                     .on_click(cx.listener(move |this, _, _, cx| { this.transfers.dismiss(id); cx.notify(); }))));
             card = card.child(div().id("transfer-report-target").min_w_0().truncate().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                .child(format!("в «{}»", browser::display_name(&report.target)))
+                .child(target_label)
                 .tooltip(move |window, cx| Tooltip::new(target.clone()).build(window, cx)));
             if failed {
                 // Every error in full: the text wraps, the list scrolls.
@@ -84,7 +86,7 @@ impl Explorer {
                 }
                 card = card.child(list);
                 let text = transfers::failures_text(&report.title, &report.failures);
-                let retry = self.transfers.retry.as_ref().map(|(items, _, _)| items.len()).filter(|_| !self.transfers.copying);
+                let retry = Some(self.transfers.retry_count()).filter(|count| *count > 0 && !self.transfers.occupied());
                 card = card.child(div().flex().gap_2().justify_end()
                     .child(text_button("transfer-copy-errors", "Скопировать текст", ButtonKind::Ghost)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -93,7 +95,7 @@ impl Explorer {
                             cx.notify();
                         })))
                     .when_some(retry, |row, count| row.child(text_button("transfer-retry", format!("Повторить сбойные ({count})"), ButtonKind::Primary)
-                        .on_click(cx.listener(move |this, _, _, cx| { this.transfers.dismiss(id); this.retry_failed(cx); })))));
+                        .on_click(cx.listener(move |this, _, _, cx| { this.retry_failed(cx); })))));
             }
         }
         // Rises into place when a copy starts; progress updates do not replay it.

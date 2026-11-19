@@ -1,6 +1,7 @@
 //! The object passport: an `object.json` kept in an object's folder by the
 //! calculation programs (geology base, models and their units, iterations,
-//! warnings, a journal of runs). Papka only reads it, for the project card.
+//! warnings, a journal of runs). Papka shows it in the project card and
+//! changes a block only when the user edits it.
 //!
 //! The file belongs to those programs and may grow new blocks, so nothing
 //! here depends on its exact shape: known blocks (name, date, warnings,
@@ -8,7 +9,7 @@
 //! by block. See `docs/PROJECT_CARD.md`.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -21,8 +22,6 @@ pub const PAGE_NAME: &str = "object.html";
 const LEVELS_UP: usize = 5;
 /// A passport is a page of text; anything larger is something else.
 const MAX_BYTES: u64 = 2 << 20;
-const MAX_ROWS: usize = 60;
-const MAX_TEXT: usize = 400;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Passport {
@@ -58,13 +57,7 @@ pub fn page_of(passport: &Path) -> Option<PathBuf> {
 }
 
 pub fn read(path: &Path) -> io::Result<Passport> {
-    if fs::metadata(path)?.len() > MAX_BYTES {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "файл паспорта слишком велик"));
-    }
-    let bytes = fs::read(path)?;
-    // Programs on Windows often write a byte order mark first.
-    let text = String::from_utf8_lossy(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes));
-    parse(&text)
+    read_raw(path).map(|(raw, _)| from_raw(&raw))
 }
 
 pub fn parse(text: &str) -> io::Result<Passport> {
@@ -91,11 +84,11 @@ pub fn from_raw(object: &Map<String, Value>) -> Passport {
             Role::Skip => {}
             Role::Block => match value {
                 Value::Object(fields) => {
-                    let rows: Vec<_> = fields.iter().filter_map(|(key, value)| Some((label(key), flat(value)?))).take(MAX_ROWS).collect();
+                    let rows: Vec<_> = fields.iter().filter_map(|(key, value)| Some((label(key), flat(value)?))).collect();
                     passport.sections.push(Section { key: key.clone(), title: label(key), rows });
                 }
                 Value::Array(items) => {
-                    let rows: Vec<_> = items.iter().filter_map(|item| Some((item_label(item), item_text(item)?))).take(MAX_ROWS).collect();
+                    let rows: Vec<_> = items.iter().filter_map(|item| Some((item_label(item), item_text(item)?))).collect();
                     passport.sections.push(Section { key: key.clone(), title: label(key), rows });
                 }
                 other => if let Some(text) = flat(other) { general.rows.push((label(key), text)); },
@@ -151,14 +144,9 @@ fn label(key: &str) -> String {
     known.to_string()
 }
 
-fn clip(text: String) -> String {
-    if text.chars().count() <= MAX_TEXT { return text; }
-    format!("{}…", text.chars().take(MAX_TEXT).collect::<String>().trim_end())
-}
-
 fn scalar(value: &Value) -> Option<String> {
     match value {
-        Value::String(text) => Some(clip(text.trim().to_string())),
+        Value::String(text) => Some(text.trim().to_string()),
         Value::Number(number) => Some(number.to_string()),
         Value::Bool(flag) => Some(if *flag { "да" } else { "нет" }.to_string()),
         _ => None,
@@ -174,7 +162,7 @@ fn flat(value: &Value) -> Option<String> {
             .collect::<Vec<_>>().join(" · "),
         other => scalar(other)?,
     };
-    (!text.is_empty()).then(|| clip(text))
+    (!text.is_empty()).then_some(text)
 }
 
 const NAMING: [&str; 6] = ["name", "kind", "type", "program", "id", "no"];
@@ -197,7 +185,7 @@ fn item_text(item: &Value) -> Option<String> {
         }))
         .collect::<Vec<_>>().join(" · ");
     // A named field still empty ("Шифр: ") stays, to be filled in.
-    (!text.is_empty() || named.is_some()).then(|| clip(text))
+    (!text.is_empty() || named.is_some()).then_some(text)
 }
 
 /// Warnings and journal entries: one line each, whatever their shape.
@@ -206,10 +194,10 @@ fn lines(value: &Value) -> Vec<String> {
         Value::Array(items) => items.iter().filter_map(|item| match item {
             Value::Object(fields) => {
                 let text = fields.values().filter_map(flat).collect::<Vec<_>>().join(" · ");
-                (!text.is_empty()).then(|| clip(text))
+                (!text.is_empty()).then_some(text)
             }
             other => flat(other),
-        }).take(MAX_ROWS).collect(),
+        }).collect(),
         other => flat(other).into_iter().collect(),
     }
 }
@@ -236,8 +224,13 @@ pub const GENERAL_KEY: &str = "Объект";
 
 /// The raw passport and when it was last written, for `write`.
 pub fn read_raw(path: &Path) -> io::Result<(Raw, Option<SystemTime>)> {
-    let modified = fs::metadata(path)?.modified().ok();
-    let bytes = fs::read(path)?;
+    let file = fs::File::open(path)?;
+    let modified = file.metadata()?.modified().ok();
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "файл паспорта слишком велик (не более 2 МиБ)"));
+    }
     let text = String::from_utf8_lossy(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes));
     match serde_json::from_str::<Value>(&text) {
         Ok(Value::Object(raw)) => Ok((raw, modified)),
@@ -305,6 +298,12 @@ fn block_end(raw: &Raw) -> usize {
 /// block that is new goes after the others.
 pub fn set_block(raw: &mut Raw, old_key: Option<&str>, title: &str, text: &str) {
     let title = title.trim();
+    // Merely opening a machine-written block must preserve its schema,
+    // nulls, numeric types and fields that the text view does not name.
+    if let Some(key) = old_key {
+        if from_raw(raw).sections.iter().any(|section| section.key == key
+            && section.title == title && block_text(section) == text) { return; }
+    }
     let mut position = None;
     match old_key {
         Some("") => {
@@ -343,6 +342,7 @@ pub fn remove_block(raw: &mut Raw, key: &str) {
 
 /// The warnings (one a line), under whatever key the file uses for them.
 pub fn set_warnings(raw: &mut Raw, text: &str) {
+    if from_raw(raw).warnings.join("\n") == text { return; }
     let key = key_of(raw, |key| matches!(role(key), Role::Warnings)).unwrap_or_else(|| "warnings".into());
     raw.insert(key, Value::Array(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| Value::String(l.into())).collect()));
 }
@@ -359,6 +359,7 @@ pub fn add_journal(raw: &mut Raw, date: &str, text: &str) {
 
 /// The whole journal as typed (one entry a line).
 pub fn set_journal(raw: &mut Raw, text: &str) {
+    if from_raw(raw).journal.join("\n") == text { return; }
     let key = key_of(raw, |key| matches!(role(key), Role::Journal)).unwrap_or_else(|| "journal".into());
     raw.insert(key, Value::Array(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| Value::String(l.into())).collect()));
 }
@@ -392,6 +393,9 @@ pub fn write(path: &Path, raw: &Raw, expected: Option<SystemTime>) -> io::Result
             "паспорт изменён в другом месте — он перечитан, повторите правку"));
     }
     let text = serde_json::to_string_pretty(raw).map_err(io::Error::other)?;
+    if text.len() as u64 > MAX_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "файл паспорта слишком велик (не более 2 МиБ)"));
+    }
     crate::path_utils::write_whole(path, text.as_bytes())?;
     Ok(fs::metadata(path)?.modified().ok())
 }
@@ -421,6 +425,65 @@ mod tests {
     }"#;
 
     #[test]
+    fn an_oversized_edit_leaves_the_existing_passport_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE_NAME);
+        let mut raw = template("Объект");
+        let stamp = write(&file, &raw, None).unwrap();
+        let before = fs::read(&file).unwrap();
+        raw.insert("notes".into(), Value::String("я".repeat(MAX_BYTES as usize)));
+        assert_eq!(write(&file, &raw, stamp).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn editing_keeps_all_rows_long_text_and_unchanged_machine_schema() {
+        let long = "я".repeat(1000);
+        let mut raw = template("Объект");
+        let text = (0..80).map(|i| format!("Модель {i}: {long}")).collect::<Vec<_>>().join("\n");
+        set_block(&mut raw, Some("Модели"), "Модели", &text);
+        let shown = from_raw(&raw);
+        let section = shown.sections.iter().find(|s| s.key == "Модели").unwrap();
+        assert_eq!(section.rows.len(), 80);
+        assert_eq!(block_text(section), text);
+        let edited = format!("{text}\nЕщё одна строка");
+        set_block(&mut raw, Some("Модели"), "Модели", &edited);
+        assert_eq!(from_raw(&raw).sections.iter().find(|s| s.key == "Модели").unwrap().rows.len(), 81);
+        raw.insert("geology".into(), serde_json::json!({"ige": 9, "units": {"stress": "kPa"}, "nullable": null}));
+        raw.insert("journal".into(), serde_json::json!([{"date":"19.11", "text":"Расчёт"}]));
+        let before = raw.clone();
+        let shown = from_raw(&raw);
+        let section = shown.sections.iter().find(|s| s.key == "geology").unwrap();
+        set_block(&mut raw, Some("geology"), &section.title, &block_text(section));
+        set_journal(&mut raw, &shown.journal.join("\n"));
+        assert_eq!(raw, before, "an unchanged text view preserves the original JSON");
+    }
+
+    #[test]
+    fn the_journal_keeps_its_newest_entries_after_sixty_and_round_trips() {
+        let mut raw = template("Объект");
+        for i in 0..100 { add_journal(&mut raw, "19.11", &format!("Запись {i}")); }
+        let shown = from_raw(&raw);
+        assert_eq!(shown.journal.len(), 100);
+        assert!(shown.journal.last().unwrap().ends_with("Запись 99"));
+        let text = format!("{}\nНовая запись", shown.journal.join("\n"));
+        set_journal(&mut raw, &text);
+        assert_eq!(from_raw(&raw).journal.len(), 101);
+        assert_eq!(from_raw(&raw).journal.last().unwrap(), "Новая запись");
+    }
+
+    #[test]
+    fn both_file_readers_refuse_oversized_input_and_accept_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE_NAME);
+        fs::write(&file, format!("\u{feff}{}", serde_json::json!({"name":"Объект"}))).unwrap();
+        assert_eq!(read_raw(&file).unwrap().0["name"], "Объект");
+        fs::write(&file, vec![b' '; MAX_BYTES as usize + 1]).unwrap();
+        assert_eq!(read_raw(&file).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(read(&file).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn known_blocks_go_to_their_places_and_the_rest_is_shown_as_it_is() {
         let passport = parse(SAMPLE).unwrap();
         assert_eq!(passport.title.as_deref(), Some("ЖК Остров"));
@@ -447,7 +510,7 @@ mod tests {
         assert!(parse("{ not json").unwrap_err().to_string().contains("JSON"));
         assert_eq!(parse("{}").unwrap(), Passport::default());
         let long = format!(r#"{{"note": "{}"}}"#, "я".repeat(1000));
-        assert!(parse(&long).unwrap().sections[0].rows[0].1.chars().count() <= MAX_TEXT + 1);
+        assert_eq!(parse(&long).unwrap().sections[0].rows[0].1.chars().count(), 1000);
     }
 
     #[test]

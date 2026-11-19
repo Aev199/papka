@@ -24,6 +24,16 @@ const CONTEXT: &str = "Filemanager";
 
 pub fn bind(cx: &mut App) {
     cx.bind_keys([
+        // The component only supplies document-edge shortcuts on macOS.
+        // Keep the standard Windows/Linux keys inside text inputs.
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-home", gpui_component::input::MoveToStart, Some("Input")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-end", gpui_component::input::MoveToEnd, Some("Input")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-home", gpui_component::input::SelectToStart, Some("Input")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-end", gpui_component::input::SelectToEnd, Some("Input")),
         KeyBinding::new("up", SelectPrev, Some("CommandPalette > Input")),
         KeyBinding::new("down", SelectNext, Some("CommandPalette > Input")),
         KeyBinding::new("enter", PaletteEnter, Some("CommandPalette > Input")),

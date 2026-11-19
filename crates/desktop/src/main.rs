@@ -1422,7 +1422,9 @@ impl Explorer {
                 }
                 this.transfers.copying = false;
                 this.transfers.control = None;
-                this.transfers.retry = (errors > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), true));
+                if errors > 0 && !zone.items().is_empty() {
+                    this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: true, keep_both, replace });
+                }
                 this.load_directory(target.clone(), true, cx);
                 this.finish_transfer("Скопировано", ok, cancelled, target, failures, cx);
                 if !created.is_empty() {
@@ -1482,7 +1484,9 @@ impl Explorer {
                 this.transfers.busy = false;
                 this.transfers.copying = false;
                 this.transfers.control = None;
-                this.transfers.retry = (failed > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), false));
+                if failed > 0 && !zone.items().is_empty() {
+                    this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: false, keep_both, replace });
+                }
                 this.load_directory(target.clone(), true, cx);
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
@@ -1744,6 +1748,15 @@ impl Explorer {
                 this.transfers.busy = false;
                 this.start_queued(cx);
                 this.follow_labels(&undone, true);
+                let removed = |path: &std::path::Path| undone.iter().any(|receipt| {
+                    matches!(receipt.action, Action::Copy | Action::Move | Action::Rename | Action::CreateFile | Action::CreateFolder)
+                        && receipt.destination.as_ref().is_some_and(|destination|
+                            filemanager_core::path_utils::same_path(path, destination)
+                            || filemanager_core::path_utils::is_inside(path, destination))
+                });
+                if this.selected.as_deref().is_some_and(&removed) { this.selected = None; this.selected_history_event = None; }
+                if this.anchor.as_deref().is_some_and(&removed) { this.anchor = None; }
+                this.marked.retain(|path| !removed(path));
                 // What came back (a move or rename undone, a deletion
                 // restored) lights up where it is again.
                 this.motion.flash(undone.iter()
@@ -1782,16 +1795,18 @@ impl Explorer {
     /// Runs the items that failed last time again, through the same safe
     /// copy or move; items that already arrived are not touched.
     pub(crate) fn retry_failed(&mut self, cx: &mut Context<Self>) {
-        let Some((items, target, copy)) = self.transfers.retry.take() else { return };
-        let mut zone = DropZone::default();
-        let missing = items.iter().filter(|path| zone.add(path).is_err()).count();
-        if zone.items().is_empty() {
-            self.status = "Сбойные файлы больше недоступны".into();
-            cx.notify();
-            return;
+        let retries = std::mem::take(&mut self.transfers.retries);
+        if let Some(id) = self.transfers.report.as_ref().map(|report| report.id) { self.transfers.dismiss(id); }
+        let mut missing = 0;
+        for retry in retries {
+            let mut zone = DropZone::default();
+            missing += retry.items.iter().filter(|path| zone.add(path).is_err()).count();
+            if zone.items().is_empty() { continue; }
+            self.request_transfer(Transfer { zone, target: retry.target, copy: retry.copy,
+                keep_both: retry.keep_both, replace: retry.replace, restore_failed: false }, cx);
         }
         if missing > 0 { self.status = format!("Недоступно и пропущено: {missing}"); }
-        self.request_transfer(Transfer { zone, target, copy, keep_both: false, replace: false, restore_failed: false }, cx);
+        cx.notify();
     }
 
     fn cancel_copy(&mut self, cx: &mut Context<Self>) {

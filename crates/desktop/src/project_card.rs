@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use filemanager_core::browser;
 use filemanager_core::history::{self, Event};
@@ -22,6 +23,11 @@ use gpui_component::tooltip::Tooltip;
 use crate::Explorer;
 use crate::theme::*;
 use crate::view::{ButtonKind, icon_button, small_icon, text_button};
+
+fn display_text(text: &str) -> String {
+    if text.chars().count() <= 400 { text.to_string() }
+    else { format!("{}…", text.chars().take(400).collect::<String>()) }
+}
 
 /// Changes are read this far back and this many are shown.
 const DAYS: i64 = 30;
@@ -68,6 +74,8 @@ pub(crate) struct Editing {
     target: Target,
     /// Just added: cancelling removes it again.
     fresh: bool,
+    original_title: String,
+    original_text: String,
 }
 
 pub(crate) struct OpenCard {
@@ -163,8 +171,8 @@ impl ProjectCards {
         ProjectCards {
             open: None,
             title_input,
-            // One line to start with, like the text it replaces.
-            text_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 30)
+            // Keep the editor inside a normal pane; longer text scrolls inside it.
+            text_input: cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 12)
                 .placeholder("Текст. «Метка: значение» станет полем, путь к папке или файлу — ссылкой")),
             folder_input,
             journal_input,
@@ -371,7 +379,7 @@ impl Explorer {
                     cx.notify();
                     return;
                 }
-                if let Some(open) = this.cards.open.as_mut() { open.adding_folder = false; }
+                if let Some(open) = this.cards.open.as_mut() { open.adding_folder = false; this.interface_focus_pending = true; }
                 this.add_folder_to_project(&name, path, cx);
             });
         }).detach();
@@ -488,7 +496,7 @@ impl Explorer {
     /// click on a tab must not lose a note.
     pub(crate) fn close_project_card(&mut self, cx: &mut Context<Self>) {
         if self.cards.open.as_ref().is_some_and(|open| open.editing.is_some()) { self.save_card_section(cx); }
-        if self.cards.open.take().is_some() { cx.notify(); }
+        if self.cards.open.take().is_some() { self.interface_focus_pending = true; cx.notify(); }
     }
 
     /// The pane moves on (another tab, another folder): its card closes.
@@ -501,7 +509,7 @@ impl Explorer {
     pub(crate) fn dismiss_project_card(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(open) = self.cards.open.as_mut() else { return false };
         if open.doomed.take().is_some() || open.doomed_entry.take().is_some() || open.doomed_block.take().is_some() { cx.notify(); return true; }
-        if std::mem::take(&mut open.adding_folder) { cx.notify(); return true; }
+        if std::mem::take(&mut open.adding_folder) { self.interface_focus_pending = true; cx.notify(); return true; }
         if open.editing.is_some() { self.save_card_section(cx); } else { self.close_project_card(cx); }
         true
     }
@@ -509,8 +517,9 @@ impl Explorer {
     /// «Отмена» while editing: the section goes back to what it was; a
     /// section just added goes away.
     fn cancel_card_edit(&mut self, cx: &mut Context<Self>) {
+        self.interface_focus_pending = true;
         let Some(open) = self.cards.open.as_mut() else { return };
-        if let Some(Editing { target: Target::Section(index), fresh: true }) = open.editing.take() {
+        if let Some(Editing { target: Target::Section(index), fresh: true, .. }) = open.editing.take() {
             open.card.remove(index);
         }
         cx.notify();
@@ -535,8 +544,9 @@ impl Explorer {
     fn begin_edit(&mut self, target: Target, fresh: bool, title: String, text: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.cards.open.as_ref().is_some_and(|open| open.editing.is_some()) { self.save_card_section(cx); }
         let Some(open) = self.cards.open.as_mut() else { return };
+        self.interface_focus_pending = false;
         let title_first = fresh || target.title_only();
-        open.editing = Some(Editing { target, fresh });
+        open.editing = Some(Editing { target, fresh, original_title: title.clone(), original_text: text.clone() });
         open.doomed = None;
         open.doomed_block = None;
         // The caret goes to the end, where one goes on writing.
@@ -569,6 +579,8 @@ impl Explorer {
         let text = self.cards.text_input.read(cx).value().to_string();
         let Some(open) = self.cards.open.as_mut() else { return };
         let Some(editing) = open.editing.take() else { return };
+        self.interface_focus_pending = true;
+        if !editing.fresh && title == editing.original_title && text == editing.original_text { cx.notify(); return; }
         match editing.target {
             Target::Section(index) => {
                 if editing.fresh && title.trim().is_empty() && text.trim().is_empty() {
@@ -985,7 +997,7 @@ impl Explorer {
                 body = body.child(div().flex().items_center().gap_2()
                     .child(div().flex_1().min_w_0().child(Input::new(&self.cards.folder_input)))
                     .child(text_button("card-folder-cancel", "Отмена", ButtonKind::Ghost)
-                        .on_click(cx.listener(|this, _, _, cx| { if let Some(open) = this.cards.open.as_mut() { open.adding_folder = false; } cx.notify(); })))
+                        .on_click(cx.listener(|this, _, _, cx| { if let Some(open) = this.cards.open.as_mut() { open.adding_folder = false; this.interface_focus_pending = true; } cx.notify(); })))
                     .child(text_button("card-folder-save", "Добавить", ButtonKind::Primary)
                         .on_click(cx.listener(|this, _, _, cx| this.add_typed_folder(cx)))));
             }
@@ -1042,13 +1054,15 @@ impl Explorer {
                     if target == Some(Target::PassportWarnings) {
                         body = body.child(self.edit_fields(Some("Предупреждения — одно в строке".into()), false, true, cx));
                     } else {
-                        for (index, warning) in passport.warnings.iter().enumerate() {
-                            let text = passport.warnings.join("\n");
+                        let warnings_text = Arc::new(passport.warnings.join("\n"));
+                        for (index, warning) in passport.warnings.iter().take(60).enumerate() {
+                            let text = warnings_text.clone();
                             body = body.child(div().id(("card-warning", index)).flex().items_start().gap_2().px_2().py_1().rounded(px(4.)).bg(rgb(ACCENT_SOFT)).cursor_text()
                                 .child(div().mt(px(3.)).child(small_icon("fm/alert.svg", DANGER)))
-                                .child(div().flex_1().min_w_0().text_size(px(12.)).child(warning.clone()))
-                                .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportWarnings, false, "Предупреждения".into(), text.clone(), window, cx))));
+                                .child(div().flex_1().min_w_0().text_size(px(12.)).child(display_text(warning)))
+                                .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportWarnings, false, "Предупреждения".into(), text.as_ref().clone(), window, cx))));
                         }
+                        if passport.warnings.len() > 60 { body = body.child(dim(format!("Ещё {} предупреждений — откройте редактор", passport.warnings.len() - 60))); }
                     }
                     let mut row_id = 0usize;
                     for section in &passport.sections {
@@ -1059,10 +1073,10 @@ impl Explorer {
                         }
                         let doomed = open.doomed_block.as_ref() == Some(&key);
                         let group_key = format!("card-pblock-{row_id}");
-                        let (title, text) = (section.title.clone(), passport::block_text(section));
+                        let (title, text) = (section.title.clone(), Arc::new(passport::block_text(section)));
                         let (edit_key, edit_title, edit_text, gone) = (key.clone(), title.clone(), text.clone(), key.clone());
                         let start = cx.listener(move |this, _, window, cx|
-                            this.begin_edit(Target::PassportBlock(edit_key.clone()), false, edit_title.clone(), edit_text.clone(), window, cx));
+                            this.begin_edit(Target::PassportBlock(edit_key.clone()), false, edit_title.clone(), edit_text.as_ref().clone(), window, cx));
                         let mut part = div().group(gpui::SharedString::from(group_key.clone())).flex().flex_col().gap_1()
                             .child(div().h(px(24.)).mt_1().flex().items_center().gap_1()
                                 .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(section.title.to_uppercase()))
@@ -1078,10 +1092,10 @@ impl Explorer {
                                 .child("Пусто — щёлкните, чтобы заполнить")
                                 .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportBlock(k.clone()), false, t.clone(), String::new(), window, cx))));
                         }
-                        for (label, value) in &section.rows {
+                        for (label, value) in section.rows.iter().take(60) {
                             row_id += 1;
                             let (k, t, x) = (key.clone(), title.clone(), text.clone());
-                            let edit = cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportBlock(k.clone()), false, t.clone(), x.clone(), window, cx));
+                            let edit = cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportBlock(k.clone()), false, t.clone(), x.as_ref().clone(), window, cx));
                             // A model or base file named in the passport opens like any link.
                             let value_view = match passport_link(file, value) {
                                 Some(path) => {
@@ -1094,12 +1108,13 @@ impl Explorer {
                                 // An empty field shows a dash to click and fill.
                                 None => div().id(("card-pvalue", row_id)).flex_1().min_w_0().cursor_text()
                                     .when(value.is_empty(), |cell| cell.text_color(rgb(TEXT_DIM)))
-                                    .child(if value.is_empty() { "—".to_string() } else { value.clone() }).on_click(edit).into_any_element(),
+                                    .child(if value.is_empty() { "—".to_string() } else { display_text(value) }).on_click(edit).into_any_element(),
                             };
                             part = part.child(div().flex().items_start().gap_3().text_size(px(12.))
                                 .child(div().w(px(150.)).flex_none().text_color(rgb(TEXT_MUTED)).child(label.clone()))
                                 .child(value_view));
                         }
+                        if section.rows.len() > 60 { part = part.child(dim(format!("Ещё {} строк — откройте редактор блока", section.rows.len() - 60))); }
                         row_id += 1;
                         body = body.child(part);
                     }
@@ -1114,11 +1129,11 @@ impl Explorer {
                     } else {
                         let shown = passport.journal.len().saturating_sub(12);
                         if shown > 0 { body = body.child(dim(format!("…ещё {shown} раньше"))); }
-                        let all = passport.journal.join("\n");
+                        let all = Arc::new(passport.journal.join("\n"));
                         for (index, line) in passport.journal.iter().enumerate().skip(shown) {
                             let all = all.clone();
-                            body = body.child(div().id(("card-journal", index)).text_size(px(12.)).cursor_text().child(line.clone())
-                                .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportJournal, false, "Журнал".into(), all.clone(), window, cx))));
+                            body = body.child(div().id(("card-journal", index)).text_size(px(12.)).cursor_text().child(display_text(line))
+                                .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportJournal, false, "Журнал".into(), all.as_ref().clone(), window, cx))));
                         }
                         body = body.child(div().text_size(px(12.)).child(Input::new(&self.cards.journal_input)));
                     }

@@ -19,6 +19,16 @@ pub(crate) struct Transfer {
     pub(crate) restore_failed: bool,
 }
 
+/// A failed job retains its own destination and conflict policy.
+#[derive(Clone, Debug)]
+pub(crate) struct Retry {
+    pub(crate) items: Vec<PathBuf>,
+    pub(crate) target: PathBuf,
+    pub(crate) copy: bool,
+    pub(crate) keep_both: bool,
+    pub(crate) replace: bool,
+}
+
 /// The running copy or move as its panel shows it.
 pub(crate) struct Live {
     /// «Копирование» or «Перемещение».
@@ -46,7 +56,7 @@ pub(crate) struct Failure {
 pub(crate) struct Report {
     pub(crate) id: u64,
     pub(crate) title: String,
-    pub(crate) target: PathBuf,
+    pub(crate) targets: Vec<PathBuf>,
     pub(crate) failures: Vec<Failure>,
 }
 
@@ -119,7 +129,7 @@ pub(crate) struct Transfers {
     pub(crate) control: Option<Arc<CopyControl>>,
     /// Items a transfer could not finish (e.g. the network dropped): their
     /// target and whether it was a copy, for «Повторить сбойные».
-    pub(crate) retry: Option<(Vec<PathBuf>, PathBuf, bool)>,
+    pub(crate) retries: Vec<Retry>,
     /// What the starting transfer left out («Пропущено — …»): said again
     /// when it ends, since its progress replaces the status meanwhile.
     pub(crate) skipped_note: Option<String>,
@@ -165,12 +175,13 @@ impl Transfers {
         let report = match self.report.take().filter(|unread| !unread.failures.is_empty()) {
             Some(mut unread) => {
                 if !failures.is_empty() {
+                    if !unread.targets.contains(&target) { unread.targets.push(target.clone()); }
                     unread.failures.extend(failures);
                     unread.title = format!("Ошибок в переносах: {}", unread.failures.len());
                 }
                 Report { id: self.reports, ..unread }
             }
-            None => Report { id: self.reports, title, target, failures },
+            None => Report { id: self.reports, title, targets: vec![target], failures },
         };
         let quiet = report.failures.is_empty();
         // Errors are shown even if the panel was folded away.
@@ -181,7 +192,11 @@ impl Transfers {
 
     /// Removes report `id` if it is still the one shown.
     pub(crate) fn dismiss(&mut self, id: u64) {
-        if self.report.as_ref().is_some_and(|report| report.id == id) { self.report = None; }
+        if self.report.as_ref().is_some_and(|report| report.id == id) { self.report = None; self.retries.clear(); }
+    }
+
+    pub(crate) fn retry_count(&self) -> usize {
+        self.retries.iter().map(|retry| retry.items.len()).sum()
     }
 
     pub(crate) fn panel_visible(&self) -> bool {
@@ -200,6 +215,30 @@ mod tests {
 
     fn transfer(target: &str) -> Transfer {
         Transfer { zone: DropZone::default(), target: target.into(), copy: true, keep_both: false, replace: false, restore_failed: false }
+    }
+
+    #[test]
+    fn failed_jobs_keep_their_targets_and_policy_across_later_results() {
+        let mut state = Transfers::default();
+        let failure = Failure { path: "a/file".into(), error: "нет доступа".into() };
+        state.retries.push(Retry { items: vec!["a/file".into()], target: "first".into(), copy: true, keep_both: true, replace: false });
+        state.finish("Ошибка".into(), "first".into(), vec![failure.clone()]);
+        state.begin("Перемещение", "second".into());
+        state.finish("Успешно".into(), "second".into(), Vec::new());
+        assert_eq!(state.retry_count(), 1);
+        assert_eq!(state.report.as_ref().unwrap().targets, [PathBuf::from("first")]);
+        state.retries.push(Retry { items: vec!["b/file".into()], target: "second".into(), copy: false, keep_both: false, replace: true });
+        state.finish("Ошибка".into(), "second".into(), vec![failure]);
+        assert_eq!(state.retry_count(), 2);
+        assert_eq!(state.report.as_ref().unwrap().targets.len(), 2);
+        let retry = std::mem::take(&mut state.retries);
+        let id = state.report.as_ref().unwrap().id;
+        state.dismiss(id);
+        assert_eq!(retry[0].target, PathBuf::from("first"));
+        assert!(retry[0].copy && retry[0].keep_both);
+        assert_eq!(retry[1].target, PathBuf::from("second"));
+        assert!(!retry[1].copy && retry[1].replace);
+        assert_eq!(state.retry_count(), 0);
     }
 
     #[test]
