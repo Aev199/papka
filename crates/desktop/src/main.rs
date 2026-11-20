@@ -2036,10 +2036,13 @@ impl Explorer {
                     // listing reappearing when the user navigates back.
                     let dirty = if changes.refresh_all { visible.clone() } else { changes.directories.into_iter().collect() };
                     for folder in dirty {
-                        this.dirs.cache.remove(&folder);
-                        this.folder_views.retain(|(_,path),_|path != &folder);
                         if visible.contains(&folder) && !this.search.active {
+                            // A refresh replaces the snapshot when ready; do not
+                            // briefly tear down the list (or its scroll layout).
                             this.load_directory(folder, true, cx);
+                        } else {
+                            this.dirs.cache.remove(&folder);
+                            this.folder_views.retain(|(_,path),_|path != &folder);
                         }
                     }
                     true

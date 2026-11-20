@@ -67,7 +67,7 @@ impl<L> DirectoryCache<L> {
         // A monotonically increasing request ID prevents a slower, outdated
         // result from replacing a user-requested refresh.
         self.request = self.request.wrapping_add(1);
-        if force { self.cache.remove(folder); }
+        // Keep the visible snapshot until its replacement is ready.
         self.errors.remove(folder);
         self.loading.insert(folder.to_path_buf(), self.request);
         Some(self.request)
@@ -92,7 +92,7 @@ impl<L> DirectoryCache<L> {
                 kept.append(&mut self.order);
                 self.order = kept;
             }
-            Err(error) => { self.errors.insert(folder.to_path_buf(), error); }
+            Err(error) => { self.cache.remove(folder); self.errors.insert(folder.to_path_buf(), error); }
         }
         Finished::Stored
     }
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(dirs.finish(a, first, Ok(1), &none()), Finished::Stored);
         assert_eq!(dirs.begin(a, false), None, "already known");
         assert!(dirs.begin(a, true).is_some());
-        assert!(!dirs.cache.contains_key(a), "a forced read drops the old listing");
+        assert_eq!(dirs.cache.get(a).map(|v| **v), Some(1), "refresh keeps the displayed snapshot");
     }
 
     #[test]
@@ -138,6 +138,25 @@ mod tests {
         let second = dirs.begin(a, true).unwrap();
         assert_eq!(dirs.finish(a, second, Ok(2), &none()), Finished::Stored);
         assert_eq!(dirs.cache.get(a).map(|listing| **listing), Some(2));
+    }
+
+    #[test]
+    fn refresh_keeps_rows_through_a_dirty_retry_and_replaces_them_together() {
+        let mut dirs = DirectoryCache::<u32>::default(); let a = Path::new("a");
+        let first = dirs.begin(a, false).unwrap(); dirs.finish(a, first, Ok(1), &none());
+        let shown = dirs.cache[a].clone();
+        let refresh = dirs.begin(a, true).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&shown, &dirs.cache[a]));
+        dirs.begin(a, true);
+        assert_eq!(dirs.finish(a, refresh, Ok(2), &none()), Finished::Reload);
+        assert!(std::sync::Arc::ptr_eq(&shown, &dirs.cache[a]));
+        let retry = dirs.begin(a, true).unwrap();
+        dirs.finish(a, retry, Ok(3), &none());
+        assert_eq!(*dirs.cache[a], 3);
+        let failed = dirs.begin(a, true).unwrap();
+        dirs.finish(a, failed, Err("нет доступа".into()), &none());
+        assert!(!dirs.cache.contains_key(a), "failure must not present stale rows as current");
+        assert_eq!(dirs.errors[a], "нет доступа");
     }
 
     #[test]
