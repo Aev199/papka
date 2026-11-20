@@ -102,6 +102,7 @@ pub(crate) struct OpenCard {
     /// The field for a folder's path is open under the folder list.
     adding_folder: bool,
     request: u64,
+    inbox_request: u64,
 }
 
 pub(crate) struct ProjectCards {
@@ -111,6 +112,8 @@ pub(crate) struct ProjectCards {
     folder_input: Entity<InputState>,
     journal_input: Entity<InputState>,
     requests: u64,
+    previews: crate::inbox_previews::InboxPreviews,
+    inbox_reading: Option<(String, PathBuf, u64)>,
     /// Enter in the title or the path field acts like its button.
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -177,6 +180,8 @@ impl ProjectCards {
             folder_input,
             journal_input,
             requests: 0,
+            previews: Default::default(),
+            inbox_reading: None,
             _subscriptions: subscriptions,
         }
     }
@@ -205,7 +210,8 @@ impl Explorer {
         let started = card.start_folders(tabs.iter().map(PathBuf::as_path));
         self.cards.open = Some(OpenCard { group, name, card, editing: None, doomed: None,
             doomed_block: None, passport: PassportState::Loading, changes: None, kinds: HashMap::new(), inbox: None, doomed_entry: None,
-            adding_folder: false, request: self.cards.requests });
+            adding_folder: false, request: self.cards.requests, inbox_request: 0 });
+        self.cards.inbox_reading = None;
         if started { self.store_card(); }
         self.context_menu = None;
         self.focus_group(group, cx);
@@ -213,6 +219,7 @@ impl Explorer {
         self.selected = None; self.marked.clear(); self.anchor = None; self.marquee = None;
         self.confirm_recycle = None; self.address_editing = None; self.filter_open = false;
         self.close_search();
+        self.read_project_inbox(cx); // Do not wait for the first four-second poll.
         self.reload_project_card(false, cx);
         self.watch_project_card(cx);
         cx.notify();
@@ -237,6 +244,11 @@ impl Explorer {
     fn read_project_inbox(&mut self, cx: &mut Context<Self>) {
         let Some(name) = self.cards.open.as_ref().map(|open| open.name.clone()) else { return };
         let Some(folder) = self.card_inbox() else { return };
+        if self.cards.inbox_reading.as_ref().is_some_and(|(n, f, _)| n == &name && f == &folder) { return; }
+        self.cards.requests = self.cards.requests.wrapping_add(1);
+        let request = self.cards.requests;
+        self.cards.open.as_mut().unwrap().inbox_request = request;
+        self.cards.inbox_reading = Some((name.clone(), folder.clone(), request));
         let task = cx.background_spawn(async move {
             match inbox::read(&folder) {
                 Ok(entries) => Ok(entries),
@@ -248,10 +260,35 @@ impl Explorer {
         cx.spawn(async move |this, cx| {
             let entries = task.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(open) = this.cards.open.as_mut().filter(|open| open.name == name) else { return };
+                if this.cards.inbox_reading.as_ref().is_some_and(|(_, _, id)| *id == request) { this.cards.inbox_reading = None; }
+                let Some(open) = this.cards.open.as_mut().filter(|open| open.name == name && open.inbox_request == request) else { return };
+                let keys = if open.card.is_hidden("inbox") { Vec::new() } else {
+                    entries.as_ref().ok().map(|entries| entries.iter().take(crate::inbox_previews::SHOWN)
+                        .filter_map(|entry| entry.image_key.clone()).collect()).unwrap_or_default()
+                };
                 if open.inbox.as_ref() != Some(&entries) { open.inbox = Some(entries); cx.notify(); }
+                this.cards.previews.select(keys);
+                this.pump_inbox_previews(cx);
             });
         }).detach();
+    }
+
+    fn pump_inbox_previews(&mut self, cx: &mut Context<Self>) {
+        while let Some(key) = self.cards.previews.next() {
+            let work = key.clone();
+            let task = cx.background_spawn(async move {
+                let cache = filemanager_core::thumbnail::cache_dir().join("inbox");
+                filemanager_core::inbox_preview::make(&work, &cache).map_err(|error| error.to_string())
+            });
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.cards.previews.finish(key, result);
+                    this.pump_inbox_previews(cx);
+                    cx.notify();
+                });
+            }).detach();
+        }
     }
 
     /// While the card is open it keeps itself up to date: the inbox every
@@ -496,7 +533,11 @@ impl Explorer {
     /// click on a tab must not lose a note.
     pub(crate) fn close_project_card(&mut self, cx: &mut Context<Self>) {
         if self.cards.open.as_ref().is_some_and(|open| open.editing.is_some()) { self.save_card_section(cx); }
-        if self.cards.open.take().is_some() { self.interface_focus_pending = true; cx.notify(); }
+        if self.cards.open.take().is_some() {
+            self.cards.previews.select(Vec::new());
+            self.cards.inbox_reading = None;
+            self.interface_focus_pending = true; cx.notify();
+        }
     }
 
     /// The pane moves on (another tab, another folder): its card closes.
@@ -856,7 +897,13 @@ impl Explorer {
         div().id(("card-inbox", index)).group(group.clone()).flex().items_start().gap_3().py_1()
             .when_some(entry.image.clone(), |row, picture| row.child(div().id(("card-inbox-image", index)).flex_none().w(px(140.)).h(px(84.))
                 .rounded(px(4.)).overflow_hidden().border_1().border_color(rgb(BORDER)).cursor_pointer()
-                .child(img(picture.clone()).size_full().object_fit(ObjectFit::Contain))
+                .child(match entry.image_key.as_ref().and_then(|key| self.cards.previews.get(key)) {
+                    Some(Ok(preview)) => img(preview.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                    Some(Err(_)) => div().size_full().flex().items_center().justify_center().text_size(px(11.))
+                        .text_color(rgb(TEXT_DIM)).child("Открыть снимок").into_any_element(),
+                    None => div().size_full().flex().items_center().justify_center().text_size(px(11.))
+                        .text_color(rgb(TEXT_DIM)).child("Загрузка…").into_any_element(),
+                })
                 .tooltip(|window, cx| Tooltip::new("Открыть снимок").build(window, cx))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_outside(&picture, cx)))))
             .child(text)
@@ -944,7 +991,7 @@ impl Explorer {
                 (Some(published), Some(Ok(entries))) if entries.is_empty() => body = body.child(dim(format!(
                     "Пока пусто. В Notch: снимок, текст или файл → «В проект…» → «{}». Записи попадут в {}.",
                     open.name, published.project.inbox.display()))),
-                (Some(_), Some(Ok(entries))) => for (index, entry) in entries.iter().take(40).enumerate() {
+                (Some(_), Some(Ok(entries))) => for (index, entry) in entries.iter().take(crate::inbox_previews::SHOWN).enumerate() {
                     body = body.child(self.inbox_row(index, entry, busy, cx));
                 },
             }

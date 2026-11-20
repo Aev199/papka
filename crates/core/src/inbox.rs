@@ -135,6 +135,8 @@ pub struct Entry {
     pub sidecar: Sidecar,
     /// The picture, if the entry has one and it is there.
     pub image: Option<PathBuf>,
+    /// Source identity for the preview cache, read with the entry off the UI thread.
+    pub image_key: Option<crate::inbox_preview::Key>,
 }
 
 impl Entry {
@@ -163,20 +165,21 @@ impl Entry {
 /// temporary files and broken `.json` are passed over.
 pub fn read(inbox: &Path) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    for item in fs::read_dir(inbox)? {
-        let path = item?.path();
-        let is_sidecar = path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
-        if !is_sidecar || path.metadata().map_or(true, |metadata| metadata.len() > MAX_SIDECAR) { continue; }
+    let mut paths = fs::read_dir(inbox)?.map(|item| item.map(|entry| entry.path())).collect::<io::Result<Vec<_>>>()?;
+    paths.retain(|path| path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("json")));
+    paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    for path in paths {
+        if path.metadata().map_or(true, |metadata| metadata.len() > MAX_SIDECAR) { continue; }
         let Ok(text) = fs::read_to_string(&path) else { continue };
         let Ok(sidecar) = serde_json::from_str::<Sidecar>(text.trim_start_matches('\u{feff}')) else { continue };
-        let image = sidecar.image.as_deref()
+        let image_key = sidecar.image.as_deref()
             .filter(|name| !name.contains(['/', '\\']) && !name.contains(".."))
-            .map(|name| inbox.join(name)).filter(|image| image.is_file());
-        entries.push(Entry { sidecar_path: path, sidecar, image });
+            .map(|name| inbox.join(name)).and_then(|path| crate::inbox_preview::Key::read(&path).ok());
+        let image = image_key.as_ref().map(|key| key.source.clone());
+        entries.push(Entry { sidecar_path: path, sidecar, image, image_key });
+        if entries.len() == MAX_ENTRIES { break; }
     }
-    // Names start with a sortable stamp; the newest first.
-    entries.sort_by(|a, b| b.sidecar_path.file_name().cmp(&a.sidecar_path.file_name()));
-    entries.truncate(MAX_ENTRIES);
+    // Only the newest valid entries are read; old sidecars need no I/O.
     Ok(entries)
 }
 
@@ -196,6 +199,18 @@ pub fn set_caption(sidecar: &Path, caption: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_a_picture_updates_its_preview_identity_without_reading_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("entry.json"), r#"{"image":"screen.png"}"#).unwrap();
+        fs::write(dir.path().join("screen.png"), b"not decoded by the inbox listing").unwrap();
+        let before = read(dir.path()).unwrap();
+        fs::write(dir.path().join("screen.png"), b"replacement").unwrap();
+        let after = read(dir.path()).unwrap();
+        assert_eq!(before[0].image, after[0].image);
+        assert_ne!(before[0].image_key, after[0].image_key);
+    }
 
     #[test]
     fn a_caption_is_written_and_everything_else_kept() {

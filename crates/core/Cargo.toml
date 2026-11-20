@@ -15,7 +15,7 @@ filetime = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
-image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg"] }
 zip = { version = "2", default-features = false, features = ["deflate", "deflate64"] }
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["ppmd", "deflate"] }
 calamine = { version = "0.30", features = ["dates"] }

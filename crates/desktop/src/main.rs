@@ -36,6 +36,7 @@ mod transfer_panel;
 mod shell_actions;
 mod project_card;
 mod inbox;
+mod inbox_previews;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
