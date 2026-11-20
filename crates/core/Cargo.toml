@@ -20,6 +20,8 @@ zip = { version = "2", default-features = false, features = ["deflate", "deflate
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["ppmd", "deflate"] }
 calamine = { version = "0.30", features = ["dates"] }
 encoding_rs = "0.8"
+cfb = "0.15"
+quick-xml = "0.37"
 
 # The Recycle Bin of Linux desktops; Windows uses the Shell (recycle_bin_windows).
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]

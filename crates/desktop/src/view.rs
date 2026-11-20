@@ -42,16 +42,6 @@ const LIST_GAP: f32 = 8.;
 const LIST_ICON: f32 = 24.;
 const LIST_RIGHT: f32 = 20.;
 
-/// Folder contents fade in this long; clicks and keys work meanwhile.
-const LIST_APPEAR_MS: u64 = 140;
-
-/// The fade-in of a folder's contents, coming from the side the pane went:
-/// from the right into a subfolder, from the left back up to a parent.
-/// `from`: the opacity it starts at (lower after a change of view).
-fn list_appear(way: f32, from: f32) -> impl Fn(gpui::Div, f32) -> gpui::Div {
-    move |list, delta| list.opacity(from + (1. - from) * delta).left(px(way * crate::motion::SLIDE * (1. - delta)))
-}
-
 /// What lies under a row or tile's content: the light of a new item and
 /// the fill of a folder about to open under dragged files.
 fn item_overlays(flash: Option<(crate::motion::Flash, f32)>, fill: Option<f32>) -> Vec<gpui::AnyElement> {
@@ -590,12 +580,19 @@ impl Explorer {
             QuickContent::Text(text) => div().id("quick-look-text").size_full().overflow_y_scroll().p_3()
                 .font_family("Consolas").text_size(px(12.)).line_height(px(18.)).text_color(rgb(TEXT))
                 .child(text.clone()).into_any_element(),
+            QuickContent::Word(preview) => div().id("quick-look-word").size_full().overflow_y_scroll().p_4()
+                .text_size(px(15.)).line_height(px(23.)).text_color(rgb(TEXT))
+                .child(if preview.text.is_empty() { "В документе нет доступного текста".into() } else { preview.text.clone() })
+                .into_any_element(),
             QuickContent::Message(message) => div().max_w(px(420.)).text_color(rgb(TEXT_MUTED)).child(message.clone()).into_any_element(),
             QuickContent::Pdf { image, .. } => zoomed(image),
             QuickContent::Table(table) => Self::quick_table(table),
         };
         // Under a PDF: pages; under a workbook: its sheets.
         let footer: AnyElement = match &look.content {
+            QuickContent::Word(preview) => div().child(if preview.truncated {
+                "Начало документа · без исходного оформления"
+            } else { "Текст документа · без исходного оформления" }).into_any_element(),
             QuickContent::Pdf { page, pages, .. } => div().flex().items_center().gap_2()
                 .child(icon_button("quick-look-prev", "fm/arrow-left.svg", "Предыдущая страница (← или PageUp)", false, *page > 0)
                     .on_click(cx.listener(|this,_,_,cx| this.quick_look_page(-1, cx))))
@@ -1420,6 +1417,8 @@ impl Explorer {
 
     fn column(&mut self, folder: PathBuf, side: GroupId, trail: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
         let list_mode = !self.miller(side);
+        let mode = if self.thumbs_view(side) { 't' } else if list_mode { 'l' } else { 'c' };
+        self.motion.list_location(side, &self.pane_path(side), mode);
         if list_mode { self.auto_folder_sizes(&folder, cx); }
         let mut column = div().size_full().min_h_0().flex().flex_col()
             .when(!list_mode, |this| this.border_r_1().border_color(rgb(BORDER)));
@@ -1479,21 +1478,8 @@ impl Explorer {
             let background_marquee_folder=folder.clone();
             // Dragging near the top or bottom edge scrolls the list.
             let edge_handle = handle.0.borrow().base_handle.clone();
-            // A folder's contents come in with a short fade, once per opening:
-            // refreshes keep the same key and stay still.
-            // Switching list, columns and tiles fades the contents in too.
-            let mode = if self.thumbs_view(side) { 't' } else if list_mode { 'l' } else { 'c' };
-            let appear_id = SharedString::from(format!("list-appear-{}-{mode}-{}", side.0, folder.display()));
-            // A column opened beside the current one (a folder's preview) comes from the right.
-            let pane_folder = self.pane_path(side);
-            let way = if folder == pane_folder { self.motion.went(side, &pane_folder) } else { 1. };
-            // Columns move sideways by themselves when the pane goes deeper
-            // or up: a slide of their own made them jump back and forth.
-            let way = if list_mode { way } else { 0. };
-            // A change of view (list, columns, tiles) fades in from further.
-            // Columns do not fade at all: each step through them would flash.
-            let changed = self.motion.view_changed(side, mode);
-            let from = if !list_mode { 1. } else if changed { 0.1 } else { 0.35 };
+            // A persistent clock survives a watcher dropping/replacing this list.
+            let (opacity, offset) = self.motion.list_appearance(side);
             let wheel = crate::smooth_scroll::layer(self.smooth.clone(), format!("list-{}-{}", side.0, folder.display()).into(), edge_handle.clone());
             let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {
@@ -1514,7 +1500,7 @@ impl Explorer {
                     .track_scroll(&handle)
                     .h_full()
                     .pt_2().pl_2().pr(px(12.))
-                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear(way, from))).into_any_element();
+                ).opacity(opacity).left(px(offset))).into_any_element();
             }
             column = column.child(
                 div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
@@ -1529,7 +1515,7 @@ impl Explorer {
                     .h_full()
                     .pl_1().pr(px(12.))
                     .on_mouse_down(MouseButton::Left,cx.listener({ let folder=background_marquee_folder.clone(); move |this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx) }))
-                ).with_animation(appear_id, motion(LIST_APPEAR_MS), list_appear(way, from))
+                ).opacity(opacity).left(px(offset))
             );
             if self.unwatched_folders.contains(&background_marquee_folder) {
                 column = column.child(
@@ -1676,8 +1662,9 @@ impl Explorer {
             let (top, bottom) = (at.max(position as f32), (at + 1.).min(position as f32 + 1.));
             (bottom > top).then_some((top - position as f32, bottom - top))
         });
-        let arriving = plate.is_some_and(|(_, to)| to == position);
-        let selected_bg = selected && !arriving;
+        let selected_bg = selected && plate.is_none();
+        let ink = plate.map_or(if selected { 1. } else { 0. }, |(at, _)| crate::motion::plate_ink(at, position));
+        let ink_color = |normal| crate::palette::mix(themed(normal), themed(SELECTION_TEXT), ink);
         let (icon_path, tint) = entry_icon(entry);
         let stack = self.stack_role(side, folder, &path);
         let bg = if selected_bg && focused_pane {
@@ -1692,10 +1679,9 @@ impl Explorer {
         let base = if striped { STRIPE } else { SURFACE };
         let right_target = is_dir && self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&path);
         let bg = if right_target && !selected { Some(ACCENT_SOFT) } else { bg };
-        // White text only on the selection's colour: not while it slides in.
-        let text = if selected_bg { SELECTION_TEXT } else if entry.hidden { TEXT_MUTED } else { TEXT };
-        let metadata_text = if selected_bg { SELECTION_TEXT } else { TEXT_MUTED };
-        let tint = if selected_bg { SELECTION_TEXT } else { tint };
+        let text = ink_color(if entry.hidden { TEXT_MUTED } else { TEXT });
+        let metadata_text = ink_color(TEXT_MUTED);
+        let tint = ink_color(tint);
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
             .w_full().h(px(row_height())).pl(px(6.)).pr_2().flex().items_center().gap_2()
             .border_l_2().border_color(rgb(bg.unwrap_or(base)))
@@ -1730,7 +1716,7 @@ impl Explorer {
                             // A halo in the row's colour keeps the star apart from the folder.
                             .child(svg().absolute().inset_0().path("fm/star-fill.svg").size(px(12.)).text_color(rgb(behind)))
                             .child(svg().absolute().top(px(2.)).left(px(2.)).path(if favorite { "fm/star-fill.svg" } else { "fm/star.svg" }).size(px(8.))
-                                .text_color(rgb(if favorite { FAVORITE } else if selected { SELECTION_TEXT } else { TEXT_MUTED })))
+                                .text_color(gpui::rgb(if favorite { themed(FAVORITE) } else { ink_color(TEXT_MUTED) })))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_favorite(&target, cx); })))
                         .into_any_element()
@@ -1753,7 +1739,7 @@ impl Explorer {
                 .child(Input::new(&self.rename_input).xsmall().h(px(20.)).w_full().text_size(px(13.))))
         } else {
             let badge = |text: String| div().flex_none().px_1p5().rounded_sm().text_size(px(11.))
-                .bg(rgb(if selected { SELECTED_BORDER } else { ACCENT_SOFT })).text_color(rgb(if selected { SELECTION_TEXT } else { TEXT_MUTED }))
+                .bg(rgb(crate::palette::mix(themed(ACCENT_SOFT), themed(SELECTED_BORDER), ink))).text_color(rgb(ink_color(TEXT_MUTED)))
                 .child(text);
             let name = name_cell().flex().items_center().gap_1p5()
                 .child(div().min_w_0().truncate().child(entry.name.clone()));
@@ -1765,7 +1751,7 @@ impl Explorer {
                         .flex_none().flex().items_center().gap_0p5().cursor_pointer()
                         .tooltip(move |window, cx| Tooltip::new(if expanded { "Скрыть прежние версии" } else { "Показать прежние версии" }).build(window, cx))
                         .child(badge(format!("{label} +{others}")))
-                        .child(small_icon(if expanded { "fm/chevron-down.svg" } else { "fm/chevron-right.svg" }, if selected { SELECTION_TEXT } else { TEXT_DIM }))
+                        .child(small_icon(if expanded { "fm/chevron-down.svg" } else { "fm/chevron-right.svg" }, ink_color(TEXT_DIM)))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -1784,7 +1770,7 @@ impl Explorer {
                     if list_mode {
                         name.child(div().flex_none().flex().items_center().gap_1()
                             .text_size(px(11.))
-                            .text_color(if selected { rgb(SELECTION_TEXT) } else { gpui::rgb(color) })
+                            .text_color(gpui::rgb(crate::palette::mix(color, themed(SELECTION_TEXT), ink)))
                             .child(dot).child(label.name()))
                     } else {
                         name.child(dot)
@@ -1807,7 +1793,7 @@ impl Explorer {
                     .child(div().min_w_0().truncate()
                         .child(if is_dir { self.folder_size_label(&entry.path) } else { format_size(entry.size) })));
         } else if is_dir {
-            row = row.child(small_icon("fm/chevron-right.svg", if selected { SELECTION_TEXT } else { TEXT_DIM }));
+            row = row.child(small_icon("fm/chevron-right.svg", ink_color(TEXT_DIM)));
         }
         if is_dir {
             let internal_target = path.clone();

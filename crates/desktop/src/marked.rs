@@ -44,6 +44,15 @@ impl Marked {
         }
     }
 
+    /// Ctrl-click keeps the focused selection inside the marked set. A
+    /// removed path must not remain selected through the single-item fallback.
+    pub(crate) fn toggle_selection(&mut self, selected: &mut Option<PathBuf>, path: &Path, order: &[PathBuf]) {
+        if self.is_empty() { self.extend(selected.clone()); }
+        self.toggle(path);
+        self.order_by(order);
+        *selected = if self.contains(path) { Some(path.to_path_buf()) } else { self.last().cloned() };
+    }
+
     /// Puts the list in the order of `order` (the folder as shown); paths
     /// not in it go last.
     pub(crate) fn order_by(&mut self, order: &[PathBuf]) {
@@ -94,5 +103,27 @@ mod tests {
         assert_eq!(marked[0], PathBuf::from("/a/3"));
         marked.clear();
         assert!(marked.is_empty() && !marked.contains(Path::new("/a/1")));
+    }
+
+    #[test]
+    fn ctrl_click_removes_only_the_pointed_item_including_the_last() {
+        let order: Vec<_> = ["a", "b", "c"].into_iter().map(PathBuf::from).collect();
+        let mut marked = Marked::default();
+        let mut selected = Some(order[0].clone());
+        marked.toggle_selection(&mut selected, &order[1], &order);
+        marked.toggle_selection(&mut selected, &order[2], &order);
+        assert_eq!(&*marked, &order);
+        for index in [1, 0, 2] {
+            let before = marked.to_vec();
+            marked.toggle_selection(&mut selected, &order[index], &order);
+            assert_eq!(marked.to_vec(), before.into_iter().filter(|p| p != &order[index]).collect::<Vec<_>>());
+            assert_ne!(selected.as_ref(), Some(&order[index]));
+            assert!(selected.as_ref().is_none_or(|p| marked.contains(p)));
+        }
+        assert!(selected.is_none() && marked.is_empty());
+        marked.toggle_selection(&mut selected, &order[1], &order);
+        assert_eq!(&*marked, &[order[1].clone()]);
+        marked.toggle_selection(&mut selected, &order[1], &order);
+        assert!(selected.is_none() && marked.is_empty());
     }
 }

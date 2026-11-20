@@ -236,6 +236,11 @@ impl Explorer {
     /// would count as a "triple" one. A double click is the second of a
     /// pair (an even count) on the item the first click of the pair hit.
     pub(crate) fn is_double_click(&mut self, event: &gpui::ClickEvent, path: &Path) -> bool {
+        let modifiers = event.modifiers();
+        if modifiers.control || modifiers.platform || modifiers.shift {
+            self.last_click = None;
+            return false;
+        }
         let count = event.click_count();
         let double = count >= 2 && count % 2 == 0 && self.last_click.as_deref() == Some(path);
         self.last_click = if double { None } else { Some(path.to_path_buf()) };
@@ -318,6 +323,7 @@ impl Explorer {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
+        self.motion.cancel_plate();
         let same_folder = self.anchor.as_deref().and_then(Path::parent) == Some(folder)
             && side == self.active_side();
         if modifiers.shift && same_folder {
@@ -326,14 +332,9 @@ impl Explorer {
             self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &path).into();
             self.selected = Some(path);
         } else if (modifiers.control || modifiers.platform) && same_folder {
-            if self.marked.is_empty() {
-                self.marked.extend(self.selected.clone());
-            }
-            self.marked.toggle(&path);
             // Keep display order for batch operations.
             let order = self.ordered_paths(folder);
-            self.marked.order_by(&order);
-            self.selected = Some(path.clone());
+            self.marked.toggle_selection(&mut self.selected, &path, &order);
             self.anchor = Some(path);
         } else {
             self.navigate_side(side, folder, Some(path), cx);

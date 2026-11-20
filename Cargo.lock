@@ -914,6 +914,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfb"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f13298d9178622b7916ec5d01d470425c04273c8ed07e87b1c38b34c4f4612b"
+dependencies = [
+ "fnv",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1859,11 +1870,13 @@ name = "filemanager-core"
 version = "0.1.0"
 dependencies = [
  "calamine",
+ "cfb",
  "chrono",
  "encoding_rs",
  "filetime",
  "image",
  "notify 8.2.0",
+ "quick-xml 0.37.5",
  "rusqlite",
  "serde",
  "serde_json",

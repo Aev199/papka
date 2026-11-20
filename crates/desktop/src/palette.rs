@@ -211,3 +211,33 @@ mod tests {
         assert_eq!(accent_scheme("unknown"), 0);
     }
 }
+
+/// Resolved RGB colours on the same continuous clock as the selection plate.
+pub fn mix(from: u32, to: u32, amount: f32) -> u32 {
+    let t = amount.clamp(0., 1.);
+    let channel = |shift: u32| {
+        let a = ((from >> shift) & 255u32) as f32;
+        let b = ((to >> shift) & 255u32) as f32;
+        (a + (b - a) * t).round() as u32
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+#[cfg(test)]
+mod selection_mix_tests {
+    use super::*;
+    #[test]
+    fn selection_ink_interpolates_in_both_themes() {
+        for light in [false, true] {
+            let from = resolve(light, TEXT);
+            let to = resolve(light, SELECTION_TEXT);
+            assert_eq!(mix(from, to, 0.), from);
+            assert_eq!(mix(from, to, 1.), to);
+            assert_eq!(mix(from, to, -1.), from);
+            for shift in [0, 8, 16] {
+                let half = (mix(from, to, 0.5) >> shift) & 255;
+                assert!(half >= (from >> shift) & 255 && half <= (to >> shift) & 255);
+            }
+        }
+    }
+}

@@ -91,20 +91,37 @@ pub(crate) struct Motion {
     tabs_drawn: RefCell<HashMap<GroupId, usize>>,
     /// The progress bar as drawn, and when.
     progress: Option<(f32, Instant)>,
-    /// Where each pane was, and which way it went last.
-    places: HashMap<GroupId, (PathBuf, f32)>,
+    /// Entrance clocks belong to the pane, not a temporary list element.
+    entrances: HashMap<GroupId, Entrance>,
     /// The active tab's line per pane: drawn x and width, their target, and
     /// when it was last drawn.
     pub(crate) tab_lines: Rc<RefCell<HashMap<GroupId, TabLine>>>,
     /// Pictures (thumbnails, the details panel's) and when each arrived.
     pictures: RefCell<HashMap<String, Instant>>,
-    /// Each pane's view (list, columns, tiles) and when it last changed.
-    views: RefCell<HashMap<GroupId, (char, Instant)>>,
     /// Set while drawing when something decided only then (the tab line's
     /// new place) still moves: the window asks for one more frame.
     pub(crate) late_frame: Rc<std::cell::Cell<bool>>,
     /// The selection sliding from row to row: pane, folder, from, to, start.
-    plate: Option<(GroupId, PathBuf, usize, usize, Instant)>,
+    plate: Option<(GroupId, PathBuf, f32, usize, Instant)>,
+}
+
+pub(crate) const LIST_APPEAR: Duration = Duration::from_millis(140);
+
+struct Entrance {
+    folder: PathBuf,
+    mode: char,
+    way: f32,
+    from: f32,
+    started: Option<Instant>,
+}
+
+/// Coverage of the row's text band by a selection at fractional row `at`.
+/// Both the row being left and the arriving row use this same clock.
+pub(crate) fn plate_ink(at: f32, row: usize) -> f32 {
+    let row = row as f32;
+    let covered = ((at + 1.).min(row + 0.8) - at.max(row + 0.2)).max(0.) / 0.6;
+    let t = covered.clamp(0., 1.);
+    t * t * (3. - 2. * t)
 }
 
 /// Where tab `index` lies in its strip (x from the strip's left, width),
@@ -212,21 +229,26 @@ impl Motion {
         Some(shown)
     }
 
-    /// Notes where `group` is; returns the way it went when that changed
-    /// (kept until the next change, for the fade-in of the new contents).
-    pub(crate) fn went(&mut self, group: GroupId, path: &Path) -> f32 {
-        match self.places.get_mut(&group) {
-            Some((old, way)) if old.as_path() != path => {
-                *way = direction(old, path);
-                *old = path.to_path_buf();
-                *way
-            }
-            Some((_, way)) => *way,
-            None => {
-                self.places.insert(group, (path.to_path_buf(), 0.));
-                0.
-            }
-        }
+    /// Observe navigation even while the listing is loading or empty. A
+    /// watcher/F5 may temporarily remove the list, but cannot reset this clock.
+    pub(crate) fn list_location(&mut self, group: GroupId, path: &Path, mode: char) {
+        if self.entrances.get(&group).is_some_and(|e| e.folder == path && e.mode == mode) { return; }
+        let old = self.entrances.get(&group);
+        let changed = old.is_some_and(|e| e.mode != mode);
+        let way = old.map_or(0., |e| direction(&e.folder, path));
+        self.entrances.insert(group, Entrance { folder: path.to_path_buf(), mode,
+            way: if mode == 'c' { 0. } else { way },
+            from: if changed { 0.1 } else { 0.35 }, started: None });
+    }
+
+    /// (opacity, horizontal offset), starting when the contents first arrive.
+    pub(crate) fn list_appearance(&mut self, group: GroupId) -> (f32, f32) {
+        let Some(e) = self.entrances.get_mut(&group) else { return (1., 0.); };
+        let started = *e.started.get_or_insert_with(Instant::now);
+        if !crate::theme::animations() || e.mode == 'c' { return (1., 0.); }
+        let t = ease_out(started.elapsed(), LIST_APPEAR);
+        if t < 1. { self.late_frame.set(true); }
+        (e.from + (1. - e.from) * t, e.way * SLIDE * (1. - t))
     }
 
     /// Notes that `group`'s strip is drawn with `count` tabs; true when it
@@ -259,17 +281,6 @@ impl Motion {
         (line.x, line.width)
     }
 
-    /// Notes `group`'s view (`mode`); true for a short while after it
-    /// changed, so the contents of the new view come in more visibly.
-    pub(crate) fn view_changed(&self, group: GroupId, mode: char) -> bool {
-        let mut views = self.views.borrow_mut();
-        match views.get_mut(&group) {
-            Some((old, at)) if *old != mode => { *old = mode; *at = Instant::now(); true }
-            Some((_, at)) => at.elapsed() < Duration::from_millis(300),
-            None => { views.insert(group, (mode, Instant::now() - Duration::from_secs(1))); false }
-        }
-    }
-
     /// A picture for `key` has just arrived: it comes in softly.
     pub(crate) fn picture_arrived(&self, key: String) {
         if !crate::theme::animations() { return; }
@@ -284,8 +295,12 @@ impl Motion {
     /// The selection moved by keys from row `from` to row `to` of `folder`.
     pub(crate) fn plate_moved(&mut self, group: GroupId, folder: &Path, from: usize, to: usize) {
         if !crate::theme::animations() || from == to || from.abs_diff(to) > 3 { self.plate = None; return; }
-        self.plate = Some((group, folder.to_path_buf(), from, to, Instant::now()));
+        // Repeated/reversed keys continue from the position actually drawn.
+        let shown = self.plate_at(group, folder).map_or(from as f32, |(at, _)| at);
+        self.plate = Some((group, folder.to_path_buf(), shown, to, Instant::now()));
     }
+
+    pub(crate) fn cancel_plate(&mut self) { self.plate = None; }
 
     /// Where the sliding selection is in `folder` of `group` (in rows), and
     /// the row it goes to; None once it is there.
@@ -293,7 +308,7 @@ impl Motion {
         let (g, f, from, to, start) = self.plate.as_ref()?;
         if *g != group || f != folder || start.elapsed() >= PLATE { return None; }
         let t = ease_out(start.elapsed(), PLATE);
-        Some((*from as f32 + (*to as f32 - *from as f32) * t, *to))
+        Some((*from + (*to as f32 - *from) * t, *to))
     }
 
     /// Whether something is moving and the next frame must be drawn. Also
@@ -319,7 +334,9 @@ impl Motion {
         let pictures_coming = pictures.values().any(|arrived| arrived.elapsed() < PICTURE_IN);
         drop(pictures);
         if self.plate.as_ref().is_some_and(|plate| plate.4.elapsed() >= PLATE) { self.plate = None; }
-        flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding || line_moving || pictures_coming || self.plate.is_some()
+        let entering = crate::theme::animations() && self.entrances.values().any(|e|
+            e.mode != 'c' && e.started.is_some_and(|at| at.elapsed() < LIST_APPEAR));
+        entering || flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding || line_moving || pictures_coming || self.plate.is_some()
     }
 
     /// Whether the progress bar still has a way to go to `fraction`.
@@ -372,13 +389,7 @@ mod tests {
         assert_eq!(direction(Path::new("/a"), Path::new("/a/b")), 1.);
         assert_eq!(direction(Path::new("/a/b"), Path::new("/a")), -1.);
         assert_eq!(direction(Path::new("/a/b"), Path::new("/c")), 0.);
-        let mut motion = Motion::default();
-        let group = GroupId(1);
-        assert_eq!(motion.went(group, Path::new("/a")), 0.);
-        assert_eq!(motion.went(group, Path::new("/a/b")), 1.);
-        // Redrawing the same folder keeps the way it came in.
-        assert_eq!(motion.went(group, Path::new("/a/b")), 1.);
-        assert_eq!(motion.went(group, Path::new("/a")), -1.);
+
     }
 
     #[test]
@@ -411,5 +422,47 @@ mod tests {
         assert_eq!(ease_out(Duration::ZERO, TAB_OPEN), 0.);
         assert_eq!(ease_out(TAB_OPEN, TAB_OPEN), 1.);
         assert!(ease_out(TAB_OPEN / 2, TAB_OPEN) > 0.5);
+    }
+
+    #[test]
+    fn rereading_a_listing_cannot_replay_its_entrance() {
+        let mut motion = Motion::default(); let g = GroupId(1);
+        motion.list_location(g, Path::new("/a"), 'l');
+        // Loading does not use up the clock; first appearance starts it.
+        assert!(motion.entrances[&g].started.is_none());
+        motion.list_appearance(g);
+        let finished = Instant::now() - LIST_APPEAR * 2;
+        motion.entrances.get_mut(&g).unwrap().started = Some(finished);
+        // No list element while refreshing; return with the same location.
+        motion.list_location(g, Path::new("/a"), 'l');
+        assert_eq!(motion.list_appearance(g), (1., 0.));
+        assert_eq!(motion.entrances[&g].started, Some(finished));
+        motion.list_location(g, Path::new("/a/empty"), 'l');
+        motion.list_location(g, Path::new("/a"), 'l');
+        assert!(motion.list_appearance(g).1 < 0., "return from an empty folder is a new opening");
+        motion.list_location(g, Path::new("/a"), 'c');
+        assert_eq!(motion.list_appearance(g), (1., 0.));
+    }
+
+    #[test]
+    fn selection_text_and_repeated_keys_follow_the_drawn_plate() {
+        assert_eq!(plate_ink(2., 2), 1.);
+        assert_eq!(plate_ink(2., 3), 0.);
+        assert!((plate_ink(2.5, 2) - 0.5).abs() < 0.001);
+        assert!((plate_ink(2.5, 3) - 0.5).abs() < 0.001);
+        let mut previous = 0.;
+        for step in 0..=100 {
+            let now = plate_ink(2. + step as f32 / 100., 3);
+            assert!(now >= previous && now - previous < 0.04);
+            previous = now;
+        }
+        let mut motion = Motion::default(); let g = GroupId(1); let f = Path::new("/a");
+        motion.plate_moved(g, f, 2, 3);
+        motion.plate.as_mut().unwrap().4 = Instant::now() - PLATE / 3;
+        let shown = motion.plate_at(g, f).unwrap().0;
+        motion.plate_moved(g, f, 3, 2);
+        let reversed = motion.plate_at(g, f).unwrap().0;
+        assert!((shown - reversed).abs() < 0.05);
+        motion.cancel_plate(); assert!(motion.plate_at(g, f).is_none());
     }
 }

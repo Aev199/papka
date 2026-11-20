@@ -14,6 +14,7 @@ pub(crate) enum QuickContent {
     Loading,
     Image(PathBuf),
     Text(String),
+    Word(Arc<filemanager_core::word_text::Preview>),
     Message(String),
     /// A CSV file or a sheet of a workbook.
     Table(Arc<filemanager_core::table::Table>),
@@ -151,6 +152,12 @@ fn load(path: &Path) -> QuickContent {
     }
     if extension(path) == "pdf" {
         return pdf_page(path, 0);
+    }
+    if filemanager_core::word_text::supports(path) {
+        return match filemanager_core::word_text::read(path) {
+            Ok(preview) => QuickContent::Word(Arc::new(preview)),
+            Err(error) => QuickContent::Message(format!("Текст документа прочитать не удалось: {error}. «Подробный предпросмотр» использует обработчик Windows.")),
+        };
     }
     if is_document(path) || matches!(extension(path).as_str(), "tif" | "tiff" | "heic" | "psd" | "svg" | "mp4" | "mov" | "avi" | "mkv") {
         return document_thumbnail(path);
