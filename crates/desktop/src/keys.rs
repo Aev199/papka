@@ -187,7 +187,7 @@ impl Explorer {
         let indices = Arc::new(indices);
         let motion_key=(group,folder.to_path_buf());
         let before=self.folder_views.get(&motion_key).filter(|v|Arc::ptr_eq(&v.listing,&listing) && v.stacks_rev==self.stacks_rev
-            && (v.spec!=spec || v.show_hidden!=self.show_hidden || v.filter!=filter || v.label_filter!=label_filter || v.kind_filter!=kind_filter))
+            && (v.spec!=spec || v.show_hidden!=self.show_hidden || v.filter!=filter || v.label_filter!=label_filter || v.labels_rev!=labels_rev || v.kind_filter!=kind_filter))
             .map(|v|v.indices.clone());
         if let Some(before)=before {
             self.motion.rows.remove(&motion_key);
@@ -1051,6 +1051,7 @@ impl Explorer {
         self.motion.grids.retain(|id,_| ids.contains(id));
         self.motion.rows.retain(|(id,_),_| ids.contains(id));
         self.motion.lists.retain(|(id,_),_| ids.contains(id));
+        self.motion.docks.retain(|id,_| ids.contains(id));
         self.motion.modes.retain(|id,_| ids.contains(id));
         self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));

@@ -575,10 +575,11 @@ impl Explorer {
         let name = browser::display_name(&path);
         // A picture or a page: the wheel enlarges it around the cursor, a
         // drag moves it, a double click switches between fitted and ×2.
-        let zoomed = |file: &std::path::PathBuf| -> AnyElement {
+        let zoomed = |file: &std::path::PathBuf, pose:(f32,gpui::Point<f32>)| -> AnyElement {
+            let (zoom,pan)=pose;
             let weak = cx.weak_entity();
             div().id("quick-look-frame").relative().size_full().overflow_hidden()
-                .when(look.zoom > 1., |frame| frame.cursor_grab())
+                .when(zoom > 1., |frame| frame.cursor_grab())
                 .on_prepaint(move |bounds, _, cx| {
                     let weak = weak.clone();
                     cx.defer(move |cx| { let _ = weak.update(cx, |this, _| {
@@ -613,13 +614,13 @@ impl Explorer {
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
                     if let Some(look) = this.quick_look.as_mut() { look.grab = None; }
                 }))
-                .child(img(file.clone()).absolute().left(px(look.pan.x)).top(px(look.pan.y))
-                    .w(gpui::relative(look.zoom)).h(gpui::relative(look.zoom)).object_fit(ObjectFit::Contain))
+                .child(img(file.clone()).absolute().left(px(pan.x)).top(px(pan.y))
+                    .w(gpui::relative(zoom)).h(gpui::relative(zoom)).object_fit(ObjectFit::Contain))
                 .into_any_element()
         };
-        let render_body = |content:&QuickContent| -> AnyElement { match content {
+        let render_body = |content:&QuickContent,pose:(f32,gpui::Point<f32>)| -> AnyElement { match content {
             QuickContent::Loading => div().text_color(rgb(TEXT_DIM)).child("Загрузка…").into_any_element(),
-            QuickContent::Image(file) => zoomed(file),
+            QuickContent::Image(file) => zoomed(file,pose),
             QuickContent::Text(text) => div().id("quick-look-text").size_full().overflow_y_scroll().p_3()
                 .font_family("Consolas").text_size(px(12.)).line_height(px(18.)).text_color(rgb(TEXT))
                 .child(text.clone()).into_any_element(),
@@ -628,13 +629,13 @@ impl Explorer {
                 .child(if preview.text.is_empty() { "В документе нет доступного текста".into() } else { preview.text.clone() })
                 .into_any_element(),
             QuickContent::Message(message) => div().max_w(px(420.)).text_color(rgb(TEXT_MUTED)).child(message.clone()).into_any_element(),
-            QuickContent::Pdf { image, .. } => zoomed(image),
+            QuickContent::Pdf { image, .. } => zoomed(image,pose),
             QuickContent::Table(table) => Self::quick_table(table),
         }
         };
         let body=div().relative().size_full()
-            .when_some(look.previous.as_ref(),|body,previous|body.child(div().absolute().inset_0().opacity(1.-content_alpha).child(render_body(previous))))
-            .child(div().absolute().inset_0().opacity(content_alpha).child(render_body(&look.content)));
+            .when_some(look.previous.as_ref(),|body,previous|body.child(div().absolute().inset_0().opacity(1.-content_alpha).child(render_body(previous,look.previous_pose))))
+            .child(div().absolute().inset_0().opacity(content_alpha).child(render_body(&look.content,(look.zoom,look.pan))));
         // Under a PDF: pages; under a workbook: its sheets.
         let footer: AnyElement = match &look.content {
             QuickContent::Word(preview) => div().child(if preview.truncated {
@@ -1324,6 +1325,10 @@ impl Explorer {
                 .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
         };
+        let target=self.dock_hover.filter(|(id,_)|*id==side).map(|(_,zone)|
+            if self.browser.groups.len()>=filemanager_core::panes::MAX_GROUPS {crate::layout::DockZone::Center}else{zone});
+        let (dock,dock_moving)=self.motion.docks.entry(side).or_default().sample(target,std::time::Instant::now(),crate::theme::animations());
+        if dock_moving {self.motion.late_frame.set(true);}
         let weak = cx.weak_entity();
         div().relative().size_full().flex().flex_col().overflow_hidden().bg(rgb(SURFACE))
             .on_prepaint(move |bounds, _, cx| {
@@ -1362,17 +1367,13 @@ impl Explorer {
                 }
                 cx.notify();
             }))
-            .when_some(self.dock_hover.filter(|(id,_)|*id==side).map(|(_,zone)|zone),|pane,zone| {
-                use crate::layout::DockZone::*;
-                let overlay=div().absolute().bg(crate::theme::accent_alpha(0x22)).border_1().border_color(rgb(ACCENT));
-                let overlay=match zone {
-                    Left=>overlay.left_0().top_0().bottom_0().w(gpui::relative(0.5)),
-                    Right=>overlay.right_0().top_0().bottom_0().w(gpui::relative(0.5)),
-                    Top=>overlay.top_0().left_0().right_0().h(gpui::relative(0.5)),
-                    Bottom=>overlay.bottom_0().left_0().right_0().h(gpui::relative(0.5)),
-                    Center=>overlay.inset_0(),
-                };
-                pane.child(overlay)
+            .when_some(dock,|pane,(rect,opacity,zone)| {
+                pane.child(div().absolute().left(gpui::relative(rect.x)).top(gpui::relative(rect.y))
+                    .w(gpui::relative(rect.w)).h(gpui::relative(rect.h)).opacity(opacity)
+                    .bg(crate::theme::accent_alpha(0x22)).border_1().border_color(rgb(ACCENT))
+                    .flex().items_center().justify_center()
+                    .child(div().px_3().py_1().rounded(px(4.)).bg(rgb(RAISED)).text_color(rgb(TEXT)).text_size(px(12.))
+                        .child(crate::dock_motion::label(zone))))
             })
             // Files from Explorer are copied into the pane's folder.
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
@@ -3572,6 +3573,7 @@ impl Render for Explorer {
                 .text_color(rgb(SELECTION_TEXT)).text_size(px(13.)).child(name));
         }
         self.follow_quick_look(cx);
+        self.prepare_quick_look(window,cx);
         if let Some(look)=self.quick_look.as_mut() {
             let (shell,content,loading,active,finished)=look.sample(std::time::Instant::now(),crate::theme::animations());
             if active {window.request_animation_frame();}

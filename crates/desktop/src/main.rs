@@ -25,6 +25,7 @@ mod disclosure_motion;
 mod grid_motion;
 mod row_motion;
 mod list_motion;
+mod dock_motion;
 mod mode_motion;
 mod kind_filter;
 mod search_panel;

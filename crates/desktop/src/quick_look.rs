@@ -42,6 +42,9 @@ pub(crate) struct QuickLook {
     transition: PreviewTransition,
     shell: crate::layout_motion::Tween,
     request_pending: bool,
+    pending_content: Option<QuickContent>,
+    closing: bool,
+    pub(crate) previous_pose: (f32,gpui::Point<f32>),
 }
 
 const PREVIEW_FADE: Duration = Duration::from_millis(150);
@@ -51,7 +54,6 @@ static NEXT_PREVIEW_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 enum PreviewTransition {
     Stable,
     FadeIn(Instant),
-    FadeOut,
 }
 
 /// `sample` is the render contract: use `shell_alpha` for backdrop/card,
@@ -78,10 +80,22 @@ impl QuickLook {
         (shell_alpha, content_alpha, self.request_pending, active, finished)
     }
 
-    fn closing(&self) -> bool { matches!(self.transition, PreviewTransition::FadeOut) }
+    fn closing(&self) -> bool { self.closing }
 
+    fn stage(&mut self,content:QuickContent) {
+        if image_path(&content).is_some() {self.pending_content=Some(content);self.request_pending=true;}
+        else {self.present(content,Instant::now());}
+    }
+    fn present(&mut self,content:QuickContent,now:Instant) {
+        self.previous=if matches!(self.content,QuickContent::Loading){None}else{Some(self.content.clone())};
+        self.previous_pose=(self.zoom,self.pan);
+        self.content=content;self.pending_content=None;self.request_pending=false;
+        self.zoom=1.;self.pan=gpui::point(0.,0.);self.grab=None;
+        self.transition=PreviewTransition::FadeIn(now);
+    }
     fn begin_load(&mut self) -> u64 {
         self.request_pending = true;
+        self.pending_content = None;
         self.next_request()
     }
 }
@@ -92,7 +106,8 @@ impl QuickLook {
         let transition = if loading { PreviewTransition::Stable } else { PreviewTransition::FadeIn(Instant::now()) };
         Self { path, content, previous: None, zoom: 1., pan: gpui::point(0., 0.), frame: gpui::Bounds::default(), grab: None,
             request_id: NEXT_PREVIEW_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed), transition,
-            request_pending: loading, shell:crate::layout_motion::Tween::default() }
+            request_pending: loading, shell:crate::layout_motion::Tween::default(), pending_content:None, closing:false,
+            previous_pose:(1.,gpui::point(0.,0.)) }
     }
 
     fn next_request(&mut self) -> u64 {
@@ -229,10 +244,27 @@ fn load(path: &Path) -> QuickContent {
     }
 }
 
+fn image_path(content:&QuickContent)->Option<&PathBuf> {
+    match content {QuickContent::Image(path)=>Some(path),QuickContent::Pdf{image,..}=>Some(image),_=>None}
+}
+
 impl Explorer {
+    /// Use the same async asset/cache as `img`: a path alone is not a ready picture.
+    pub(crate) fn prepare_quick_look(&mut self,window:&mut gpui::Window,cx:&mut Context<Self>) {
+        let Some(look)=self.quick_look.as_mut().filter(|look|!look.closing()) else{return};
+        let Some(path)=look.pending_content.as_ref().and_then(image_path) else{return};
+        let resource=gpui::Resource::Path(path.clone().into());
+        let Some(result)=window.use_asset::<gpui::ImgResourceLoader>(&resource,cx) else{return};
+        let content=match result {
+            Ok(_)=>look.pending_content.take().unwrap(),
+            Err(_)=>QuickContent::Message("Изображение прочитать не удалось: файл повреждён или недоступен.".into()),
+        };
+        look.present(content,Instant::now());
+    }
+
     /// Space: open the quick look for the selection, or close it.
     pub(crate) fn toggle_quick_look(&mut self, cx: &mut Context<Self>) {
-        if self.quick_look.is_some() { self.close_quick_look(cx); return; }
+        if self.quick_look.as_ref().is_some_and(|look|!look.closing()) { self.close_quick_look(cx); return; }
         if let Some(path) = self.selected.clone() { self.show_quick_look(path, cx); }
     }
 
@@ -242,7 +274,9 @@ impl Explorer {
         if let Some(look) = self.quick_look.as_mut() {
             if look.closing() { return; }
             look.next_request(); // invalidate any load still in flight
-            look.transition = PreviewTransition::FadeOut;
+            look.closing = true;
+            look.pending_content = None;
+            look.request_pending = false;
             cx.notify();
         }
     }
@@ -290,13 +324,7 @@ impl Explorer {
             let content = task.await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(look) = this.quick_look.as_mut().filter(|look| look.path == path && look.request_id == request_id) {
-                    look.previous = if matches!(&look.content, QuickContent::Loading) { None } else { Some(look.content.clone()) };
-                    look.content = content;
-                    look.request_pending = false;
-                    look.transition = PreviewTransition::FadeIn(Instant::now());
-                    // A new page starts fitted.
-                    look.zoom = 1.;
-                    look.pan = gpui::point(0., 0.);
+                    look.stage(content);
                     cx.notify();
                 }
             });
@@ -304,41 +332,26 @@ impl Explorer {
     }
 
     fn show_quick_look(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if is_picture(&path) {
-            let content = QuickContent::Image(path.clone());
-            if let Some(look) = self.quick_look.as_mut() {
-                look.path = path;
-                look.previous = if matches!(&look.content, QuickContent::Loading) { None } else { Some(look.content.clone()) };
-                look.content = content;
-                look.next_request();
-                look.transition = PreviewTransition::FadeIn(Instant::now());
-                look.request_pending = false;
-                look.zoom = 1.; look.pan = gpui::point(0., 0.); look.grab = None;
-            } else { self.quick_look = Some(QuickLook::new(path, content)); }
-            cx.notify();
-            return;
-        }
         let request_id = if let Some(look) = self.quick_look.as_mut() {
             look.path = path.clone();
-            // Keep the displayed preview until the next file has finished loading.
-            let id = look.begin_load();
-            look.transition = PreviewTransition::Stable; // retain the visible preview while loading
-            look.zoom = 1.; look.pan = gpui::point(0., 0.); look.grab = None;
-            id
+            look.closing = false;
+            // Neither pose nor the visible crossfade changes until replacement is ready.
+            look.begin_load()
         } else {
             self.quick_look = Some(QuickLook::new(path.clone(), QuickContent::Loading));
             self.quick_look.as_ref().unwrap().request_id
         };
+        if is_picture(&path) {
+            self.quick_look.as_mut().unwrap().stage(QuickContent::Image(path));
+            cx.notify();return;
+        }
         let target = path.clone();
         let task = cx.background_spawn(async move { load(&target) });
         cx.spawn(async move |this, cx| {
             let content = task.await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(look) = this.quick_look.as_mut().filter(|look| look.path == path && look.request_id == request_id) {
-                    look.previous = if matches!(&look.content, QuickContent::Loading) { None } else { Some(look.content.clone()) };
-                    look.content = content;
-                    look.request_pending = false;
-                    look.transition = PreviewTransition::FadeIn(Instant::now());
+                    look.stage(content);
                     cx.notify();
                 }
             });
@@ -353,9 +366,26 @@ impl Explorer {
         let mut look=QuickLook::new(PathBuf::from("a.txt"),QuickContent::Text("a".into()));let now=Instant::now();
         assert_eq!(look.sample(now,true).0,0.);
         let mid=now+Duration::from_millis(50);let before=look.sample(mid,true).0;
-        look.transition=PreviewTransition::FadeOut;assert_eq!(look.sample(mid,true).0,before);
+        look.closing=true;assert_eq!(look.sample(mid,true).0,before);
         let end=look.sample(mid+Duration::from_millis(150),true);assert_eq!(end.0,0.);assert!(end.4);
         assert!(look.sample(mid,false).4);
+    }
+    #[test]fn image_loading_keeps_visible_content_and_pose_until_ready(){
+        let mut look=QuickLook::new(PathBuf::from("a.txt"),QuickContent::Text("old".into()));
+        look.zoom=2.;look.pan=gpui::point(-40.,-30.);let now=Instant::now();
+        look.begin_load();look.stage(QuickContent::Image(PathBuf::from("large.png")));
+        assert!(matches!(&look.content,QuickContent::Text(t) if t=="old"));assert!(look.request_pending);
+        assert_eq!(look.zoom,2.);assert_eq!(look.pan,gpui::point(-40.,-30.));
+        let ready=look.pending_content.take().unwrap();look.present(ready,now);
+        assert_eq!(look.previous_pose,(2.,gpui::point(-40.,-30.)));assert_eq!(look.zoom,1.);assert!(!look.request_pending);
+        look.sample(now+PREVIEW_FADE,true);assert!(look.previous.is_none());
+    }
+    #[test]fn closing_does_not_interrupt_incoming_crossfade(){
+        let mut look=QuickLook::new(PathBuf::from("a.txt"),QuickContent::Text("old".into()));let now=Instant::now();
+        look.present(QuickContent::Text("new".into()),now);let mid=now+PREVIEW_FADE/2;
+        let before=look.sample(mid,true).1;look.closing=true;
+        assert_eq!(look.sample(mid,true).1,before);assert!(look.previous.is_some());
+        look.closing=false;assert!(!look.sample(mid,true).4);
     }
     #[test]fn previous_content_survives_incoming_fade_and_request_ids_are_unique(){
         let mut a=QuickLook::new(PathBuf::from("a.txt"),QuickContent::Text("a".into()));
