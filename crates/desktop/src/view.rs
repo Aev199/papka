@@ -14,7 +14,7 @@ use filemanager_core::labels::Label;
 use gpui::{
     anchored, deferred, div, img, rgb_to_hsla, ObjectFit, prelude::*, px, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
-    ExternalPaths, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Transformation, Window,
+    ExternalPaths, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Window,
 };
 use gpui_component::input::Input;
 use gpui_component::Sizable;
@@ -950,13 +950,8 @@ impl Explorer {
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED)).font_weight(gpui::FontWeight::SEMIBOLD)
             .hover(|style| style.text_color(rgb(TEXT)))
             .child(div().flex_1().child(key))
-            // A disclosure triangle: it turns rather than swaps.
-            .child(svg().path("fm/chevron-right.svg").size(px(12.))
-                .text_color(rgb(TEXT_DIM)).when(!folded, |chevron| chevron.invisible().group_hover("section", |style| style.visible()))
-                .with_animation(SharedString::from(format!("section-turn-{key}-{folded}")), motion(160), move |chevron, delta| {
-                    let open = if folded { 1. - delta } else { delta };
-                    chevron.with_transformation(Transformation::rotate(gpui::radians(open * std::f32::consts::FRAC_PI_2)))
-                }))
+            .child(crate::disclosure_motion::chevron(SharedString::from(format!("section-turn-{key}")).into(), !folded,
+                svg().path("fm/chevron-right.svg").size(px(12.)).text_color(rgb(TEXT_DIM))))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(key, cx)))
     }
 
@@ -969,24 +964,29 @@ impl Explorer {
             .child(self.section("Места", cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(|this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(None),cx))));
         let open = |key: &str| !self.collapsed.contains(key);
+        let height = 28. * self.places.len().max(1) as f32;
+        let mut body = div().flex_none().flex().flex_col();
         // Places are edited like favourites: right click hides, dragging reorders.
-        for (index, place) in self.places.iter().enumerate().filter(|_| open("Места")) {
+        for (index, place) in self.places.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
             let drag_name = place.label.clone();
-            side = side.child(self.place_row(("place", index), place, active, true, cx)
+            body = body.child(self.place_row(("place", index), place, active, true, cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(Some(index)),cx)))
                 .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview::new(drag_name.clone(),position,None)))
                 .drag_over::<PlaceDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &PlaceDrag,_,cx|this.move_place(data.index,index,cx))));
         }
-        if self.places.is_empty() && open("Места") {
-            side = side.child(self.sidebar_action("places-restore","fm/plus.svg","Вернуть стандартные места",
+        if self.places.is_empty() {
+            body = body.child(self.sidebar_action("places-restore","fm/plus.svg","Вернуть стандартные места",
                 cx.listener(|this,_,_,cx|this.show_all_places(cx))));
         }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Места".into(), open("Места"), height, body.into_any_element()));
         side = side.child(self.section("Избранное", cx));
-        for (index,path) in self.favorites.iter().enumerate().filter(|_| open("Избранное")) {
+        let height = 28. * (self.favorites.len() + usize::from(!self.favorites.contains(&current))) as f32;
+        let mut body = div().flex_none().flex().flex_col();
+        for (index,path) in self.favorites.iter().enumerate() {
             let target=path.clone();let tip=path.display().to_string();let name=browser::display_name(path);let drag_name=name.clone();
-            side=side.child(div().id(("favorite",index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
+            body=body.child(div().id(("favorite",index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
                 .rounded_sm().cursor_pointer().text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)))
                 .child(small_icon("fm/folder-fill.svg",FOLDER)).child(div().flex_1().min_w_0().truncate().child(name))
                 .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
@@ -996,16 +996,19 @@ impl Explorer {
                 .drag_over::<FavoriteDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &FavoriteDrag,_,cx|this.move_favorite(data.index,index,cx))));
         }
-        if !self.favorites.contains(&current) && open("Избранное") {
-            side=side.child(self.sidebar_action("favorite-add","fm/plus.svg","Добавить папку",
+        if !self.favorites.contains(&current) {
+            body=body.child(self.sidebar_action("favorite-add","fm/plus.svg","Добавить папку",
                 cx.listener(|this,_,_,cx| {let path=this.pane_path(this.active_side());this.toggle_favorite(&path,cx);})));
         }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Избранное".into(), open("Избранное"), height, body.into_any_element()));
         let recent = self.recent_rows();
         if !recent.is_empty() {
             side = side.child(self.section("Недавние", cx));
-            for (index, path) in recent.into_iter().enumerate().filter(|_| open("Недавние")) {
+        let height = 28. * recent.len() as f32;
+        let mut body = div().flex_none().flex().flex_col();
+            for (index, path) in recent.into_iter().enumerate() {
                 let target = path.clone(); let tip = path.display().to_string(); let menu_path = path.clone();
-                side = side.child(div().id(("recent", index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
+                body = body.child(div().id(("recent", index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
                     .rounded_sm().cursor_pointer().text_color(rgb(TEXT_MUTED)).hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                     .child(small_icon("fm/history.svg", TEXT_DIM))
                     .child(div().flex_1().min_w_0().truncate().child(browser::display_name(&path)))
@@ -1014,14 +1017,17 @@ impl Explorer {
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx|
                         this.open_menu(event.position, MenuTarget::Recent(menu_path.clone()), cx))));
             }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Недавние".into(), open("Недавние"), height, body.into_any_element()));
         }
         side = side.child(self.section("Диски", cx));
-        for (index, place) in self.drives.iter().enumerate().filter(|_| open("Диски")) {
+        let height = self.drives.iter().map(|p| if self.drive_space.contains_key(&p.path) {58.} else {28.}).sum::<f32>();
+        let mut body = div().flex_none().flex().flex_col();
+        for (index, place) in self.drives.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
             // The free space belongs to the drive: one highlighted block.
             let space = self.drive_space.get(&place.path).copied();
             let row = self.place_row(("drive", index), place, active, space.is_none(), cx);
-            side = side.child(match space {
+            body = body.child(match space {
                 Some((free, total)) => {
                     let used = 1. - free as f32 / total.max(1) as f32;
                     let color = if used > 0.9 { DANGER } else if active { ACCENT } else { TEXT_DIM };
@@ -1030,7 +1036,7 @@ impl Explorer {
                         .when(active, |block| block.bg(rgb(ACCENT_SOFT)).child(focus_mark()))
                         .when(!active, |block| block.hover(|style| style.bg(rgb(HOVER))))
                         .child(row.when(!active, |row| row.group_hover("drive-block", |style| style.text_color(rgb(TEXT)))))
-                        .child(div().id(("drive-space", index)).pl(px(32.)).pr_2().pb_1p5().flex().flex_col().gap_1().cursor_pointer()
+                        .child(div().id(("drive-space", index)).h(px(30.)).line_height(px(16.)).pl(px(32.)).pr_2().pb_1p5().flex().flex_col().gap_1().cursor_pointer()
                             .child(div().h(px(4.)).w_full().rounded_full().bg(rgb(BORDER))
                                 .child(div().h_full().rounded_full().bg(rgb(color)).w(gpui::relative(used.clamp(0., 1.)))))
                             .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
@@ -1044,14 +1050,17 @@ impl Explorer {
                 None => row.into_any_element(),
             });
         }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Диски".into(), open("Диски"), height, body.into_any_element()));
         side = side.child(div().mt_3().child(self.drop_zone(cx)));
         if !self.workspace_names.is_empty() {
             side = side.child(self.section("Проекты", cx));
         }
-        for (index, name) in self.workspace_names.iter().enumerate().filter(|_| open("Проекты")) {
+        let height = 28. * self.workspace_names.len() as f32;
+        let mut body = div().flex_none().flex().flex_col();
+        for (index, name) in self.workspace_names.iter().enumerate() {
             let open_name = name.clone();
             let delete_name = name.clone();
-            side = side.child(
+            body = body.child(
                 div().id(("workspace", index)).group("workspace").mx_2().h(px(28.)).px_2().flex().items_center()
                     .gap_2().rounded(px(4.)).cursor_pointer().text_color(rgb(TEXT_MUTED))
                     .when(self.browser.project_group(name).is_some(),|row|row.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
@@ -1070,6 +1079,7 @@ impl Explorer {
                     .on_click(cx.listener(move |this, _, _, cx| this.restore_workspace(&open_name, cx)))
             );
         }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Проекты".into(), open("Проекты"), height, body.into_any_element()));
         side = side
             .child(self.sidebar_action("save-workspace", "fm/plus.svg", "Создать проект…",
                 cx.listener(|this, _, window, cx| this.begin_save_workspace(window, cx))))
@@ -1506,13 +1516,20 @@ impl Explorer {
                 let per_row = crate::thumbs::columns(self.pane_width_for(side));
                 self.thumb_columns.insert(side, per_row);
                 let rows = count.div_ceil(per_row);
+                let list_id = SharedString::from(format!("{list_id}-grid-{per_row}-{}",crate::thumbs::size()));
+                let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some() || self.dragging_files(cx);
+                let moving = self.motion.grids.entry(side).or_default().prepare(&folder, &listing, indices.clone(), per_row,
+                    (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP, crate::thumbs::tile_height()+crate::thumbs::TILE_GAP), instant, std::time::Instant::now());
+                if moving {self.motion.late_frame.set(true);}
+
                 return column.child(div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
                     uniform_list(list_id, rows, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
                         range.map(|row| {
                             let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
-                                .map(|position| { let entry = listing.entries[indices[position]].clone(); this.tile(&entry, &folder, side, cx) })
+                                .map(|position| { let entry = listing.entries[indices[position]].clone(); let (x,y)=this.motion.grids.get(&side).map_or((0.,0.),|grid|grid.offset(&entry.path,std::time::Instant::now()));
+                                    this.tile(&entry, &folder, side, cx).absolute().left(px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x)).top(px(y)).into_any_element() })
                                 .collect::<Vec<_>>();
-                            div().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP)).flex().gap(px(crate::thumbs::TILE_GAP))
+                            div().relative().w_full().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP))
                                 .children(tiles).into_any_element()
                         }).collect::<Vec<_>>()
                     }}))
@@ -1572,7 +1589,7 @@ impl Explorer {
 
     /// A tile of the thumbnails view: the picture (or a large icon) and the
     /// name under it; clicks, drags and the menu work as on a list row.
-    fn tile(&mut self, entry: &Entry, folder: &Path, side: GroupId, cx: &mut Context<Self>) -> AnyElement {
+    fn tile(&mut self, entry: &Entry, folder: &Path, side: GroupId, cx: &mut Context<Self>) -> Stateful<Div> {
         let (picture_size, tile_h, tile_w) = (crate::thumbs::picture(), crate::thumbs::tile_height(), crate::thumbs::tile_width());
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
@@ -1591,7 +1608,7 @@ impl Explorer {
             .relative().overflow_hidden()
             .children(item_overlays(self.motion.flash_of(&path),
                 is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
-            .child(div().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
+            .child(div().relative().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
                 .child(match picture {
                     Some(file) => img(file).max_w(px(tile_w - 12.)).max_h(px(picture_size)).object_fit(ObjectFit::Contain)
                         // A file that only looks like a picture keeps its icon.
@@ -1612,7 +1629,7 @@ impl Explorer {
                 .child(div().min_w_0().text_center().line_clamp(2).line_height(px(16.)).child(entry.name.clone())))
         };
         if renaming {
-            return tile.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).into_any_element();
+            return tile.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         }
         if is_dir {
             let (internal_target, external_target, hover_target) = (path.clone(), path.clone(), path.clone());
@@ -1665,7 +1682,6 @@ impl Explorer {
                     this.click_entry(side, &column_folder, path.clone(), event.modifiers(), cx);
                 }
             }))
-            .into_any_element()
     }
 
     fn row(&self, entry: &Entry, folder: &Path, side: GroupId, position: usize, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1770,7 +1786,7 @@ impl Explorer {
                         .flex_none().flex().items_center().gap_0p5().cursor_pointer()
                         .tooltip(move |window, cx| Tooltip::new(if expanded { "Скрыть прежние версии" } else { "Показать прежние версии" }).build(window, cx))
                         .child(badge(format!("{label} +{others}")))
-                        .child(small_icon(if expanded { "fm/chevron-down.svg" } else { "fm/chevron-right.svg" }, ink_color(TEXT_DIM)))
+                        .child(crate::disclosure_motion::chevron(SharedString::from(format!("stack-turn-{}",path.display())).into(), expanded, small_icon("fm/chevron-right.svg", ink_color(TEXT_DIM))))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -2200,14 +2216,14 @@ impl Explorer {
         }
         let mut section = div().flex().flex_col().gap_0p5().pt_2().border_t_1().border_color(rgb(BORDER))
             .child(div().id("versions-toggle").h(px(28.)).flex().items_center().gap_1().cursor_pointer().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                .child(small_icon(if self.versions_expanded {"fm/chevron-down.svg"} else {"fm/chevron-right.svg"},TEXT_MUTED))
+                .child(crate::disclosure_motion::chevron("inspector-version-turn".into(), self.versions_expanded, small_icon("fm/chevron-right.svg",TEXT_MUTED)))
                 .child(format!("Версии · {}", self.inspector.versions.len()))
                 .on_click(cx.listener(|this,_,_,cx| {this.versions_expanded=!this.versions_expanded;cx.notify();})));
-        if !self.versions_expanded {return section.into_any_element();}
+        let mut body = div().flex_none().flex().flex_col().gap_0p5();
         for (index, member) in self.inspector.versions.iter().enumerate() {
             let current = self.selected.as_ref() == Some(&member.path);
             let path = member.path.clone();
-            section = section.child(
+            body = body.child(
                 div().id(("version", index)).h(px(24.)).px_2().rounded_sm().flex().items_center().gap_2()
                     .text_size(px(12.)).cursor_pointer()
                     .when(current, |row| row.bg(rgb(TRAIL)))
@@ -2223,6 +2239,8 @@ impl Explorer {
                     }))
             );
         }
+        section = section.child(crate::disclosure_motion::reveal("inspector-version-body".into(), self.versions_expanded,
+            self.inspector.versions.len() as f32 * 26. - 2., body.into_any_element()));
         section.into_any_element()
     }
 

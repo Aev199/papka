@@ -63,6 +63,7 @@ impl Explorer {
     /// Ctrl+1 list, Ctrl+2 columns, Ctrl+3 tiles, for the active pane.
     pub(crate) fn set_view(&mut self, miller: bool, tiles: bool, cx: &mut Context<Self>) {
         let side = self.active_side();
+        self.motion.grids.remove(&side);
         self.browser.active_group_mut().miller = miller;
         if tiles { self.thumbs.groups.insert(side); } else { self.thumbs.groups.remove(&side); }
         if let Some(store) = &self.workspaces {

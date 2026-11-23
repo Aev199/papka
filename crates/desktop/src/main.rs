@@ -21,6 +21,8 @@ mod marked;
 mod motion;
 mod layout_motion;
 mod button_motion;
+mod disclosure_motion;
+mod grid_motion;
 mod kind_filter;
 mod search_panel;
 mod updates;

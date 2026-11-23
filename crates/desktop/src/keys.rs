@@ -1004,6 +1004,7 @@ impl Explorer {
         self.pane_column_widths.retain(|id,_|ids.contains(id));
         self.column_scroll_handles.retain(|id,_|ids.contains(id));
         self.thumbs.groups.retain(|id| ids.contains(id));
+        self.motion.grids.retain(|id,_| ids.contains(id));
         self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));
