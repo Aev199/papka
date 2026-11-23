@@ -833,6 +833,7 @@ impl Explorer {
         if self.comparison.take().is_some() {cx.notify();return;}
         if self.tour.is_some() {self.close_tour(cx);return;}
         self.dock_hover=None;
+        self.motion.tab_reorder.clear();
         if cx.stop_active_drag(window) { cx.notify(); return; }
         if let Some(resize) = self.column_resize.take() {
             self.pane_column_widths.insert(resize.group, resize.start_width);
@@ -1051,6 +1052,7 @@ impl Explorer {
         self.motion.grids.retain(|id,_| ids.contains(id));
         self.motion.rows.retain(|(id,_),_| ids.contains(id));
         self.motion.lists.retain(|(id,_),_| ids.contains(id));
+        self.motion.tab_reorder.prune(&ids);
         self.motion.docks.retain(|id,_| ids.contains(id));
         self.motion.modes.retain(|id,_| ids.contains(id));
         self.list_scroll_handles.retain(|id,_|ids.contains(id));

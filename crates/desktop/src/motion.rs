@@ -81,6 +81,7 @@ fn flash_key(path: &Path) -> String {
 #[derive(Default)]
 pub(crate) struct Motion {
     pub(crate) layout: crate::layout_motion::LayoutMotion,
+    pub(crate) tab_reorder: crate::tab_reorder::TabReorder,
     pub(crate) grids: HashMap<GroupId, crate::grid_motion::GridMotion>,
     pub(crate) rows: HashMap<(GroupId,PathBuf),crate::row_motion::RowMotion>,
     pub(crate) lists: HashMap<(GroupId,PathBuf),crate::list_motion::ListMotion>,

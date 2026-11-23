@@ -221,6 +221,12 @@ impl Explorer {
         }
         let wheel = scroll.clone();
         let gap = self.motion.tab_gap(group);
+        let widths=(0..tabs.len()).map(|i|crate::motion::tab_place(&scroll,i).map_or(120.,|(_,w)|w)).collect::<Vec<_>>();
+        let (tab_offsets,extra_width,reordering)=self.motion.tab_reorder.sample(group,&widths,std::time::Instant::now(),crate::theme::animations());
+        if reordering {self.motion.late_frame.set(true);}
+        let preview=self.motion.tab_reorder.target.filter(|t|t.to==group);
+        let drag_scroll=scroll.clone();
+        let count=tabs.len();
         // The active tab's line slides from tab to tab. Where the tabs are is
         // known from the last frame's layout, kept by the strip's scroll
         // handle (GPUI hands a scrolled strip's children nowhere else); while
@@ -228,7 +234,7 @@ impl Explorer {
         // draws its own line in place.
         let focused_strip = group==self.browser.active && !self.cards.shown_in(group);
         let laid_out = self.motion.tabs_drawn(group, tabs.len());
-        let line = (focused_strip && gap.is_none() && laid_out)
+        let line = (focused_strip && gap.is_none() && laid_out && preview.is_none() && !reordering)
             .then(|| crate::motion::tab_place(&scroll, active_index)).flatten()
             .map(|(x, width)| self.motion.tab_line(group, x + 10., (width - 20.).max(0.)));
         let mut strip = div()
@@ -243,9 +249,22 @@ impl Explorer {
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,event: &MouseDownEvent,_,cx| {
                 if event.click_count==2 { this.focus_group(group,cx); this.add_tab(cx); }
             }))
+            .drag_over::<TabDrag>(|style,_,_,_|style)
+            .on_drag_move::<TabDrag>(cx.listener(move |this,event:&gpui::DragMoveEvent<TabDrag>,_,cx| {
+                if this.browser.group(group).is_none_or(|g|g.tabs.len()!=count) || this.motion.tab_gap(group).is_some() {return;}
+                let drag=event.drag(cx);
+                // Direct children are stationary layout slots; their contents can move.
+                let x=(event.event.position.x-event.bounds.origin.x-drag_scroll.offset().x)/px(1.);
+                let boundary=(0..count).find(|&i|crate::motion::tab_place(&drag_scroll,i).is_some_and(|(left,width)|x<left+width/2.)).unwrap_or(count);
+                let width=this.tab_scroll.get(&drag.group).and_then(|scroll|crate::motion::tab_place(scroll,drag.index)).map_or(120.,|(_,w)|w);
+                let target=crate::tab_reorder::Target{from:drag.group,index:drag.index,to:group,boundary,width};
+                if this.motion.tab_reorder.set_target(target) {cx.notify();}
+            }))
             .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {
-                let end=this.browser.group(group).map(|g|g.tabs.len()).unwrap_or(0);
-                this.move_tab_to(drag,group,end,cx);
+                cx.stop_propagation();
+                let count=this.browser.group(group).map(|g|g.tabs.len()).unwrap_or(0);
+                let index=this.motion.tab_reorder.destination(group,drag.group,drag.index,count).unwrap_or(count);
+                this.move_tab_to(drag,group,index,cx);
             }));
         let focused=group==self.browser.active;
         // With the project card open no tab is the current one: the card is.
@@ -258,9 +277,12 @@ impl Explorer {
             let active=index==active_index && !card_open;
             let closable=(tabs.len()>1 || self.browser.groups.len()>1) && !tab.pinned;
             let tip=tab.pane.path.display().to_string();
-            strip=strip.child(div().id(("tab",index)).group("tab").relative().flex_none().h(px(32.))
+            let offset=tab_offsets.get(index).copied().unwrap_or(0.);
+            let dragged=preview.is_some_and(|t|t.from==group && t.index==index);
+            let tab_element=div().id(("tab",index)).group("tab").relative().flex_none().h(px(32.))
                 .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
-                .rounded_t(px(4.)).cursor_pointer()
+                .rounded_t(px(4.)).cursor_pointer().left(px(offset))
+                .when(dragged,|tab|tab.opacity(0.3))
                 // Held under dragged files it fills up until it opens.
                 .children(item_overlays(None, self.spring_fill(&crate::spring::SpringTarget::Tab(group, index))))
                 // A new tab widens into its place.
@@ -284,17 +306,24 @@ impl Explorer {
                 .on_mouse_move(cx.listener(|this,_,_,cx| this.drag_over(crate::DropAt::Nothing,cx)))
                 .on_drag(TabDrag {group,index,title:titles[index].clone()},|drag: &TabDrag,position,_,cx|
                     cx.new(|_|FileDragPreview::new(drag.title.clone(),position,None)))
-                .drag_over::<TabDrag>(|style,_,_,_|style.border_l_2().border_color(rgb(ACCENT)))
-                .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {cx.stop_propagation();this.move_tab_to(drag,group,index,cx);} ))
                 .on_mouse_down(MouseButton::Middle,cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);} ))
                 .on_mouse_down(MouseButton::Left,cx.listener(|_,_,_,cx|cx.stop_propagation()))
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx| {
                     this.focus_group(group,cx);
                     this.open_menu(event.position,MenuTarget::Tab(group,index),cx);
-                })));
+                }));
+            strip=strip.child(div().id(("tab-slot",index)).relative().flex_none().h(px(32.)).child(tab_element));
         }
+        if extra_width>0.01 {strip=strip.child(div().flex_none().h(px(32.)).w(px(extra_width)));}
         if let Some((_, width)) = gap.filter(|(at, _)| *at >= tabs.len()) {
             strip = strip.child(div().flex_none().h(px(32.)).w(px(width)));
+        }
+        if let Some(target)=preview.filter(|t|t.from!=group) {
+            let boundary=target.boundary.min(tabs.len());
+            let x=crate::motion::tab_place(&scroll,boundary).map(|(x,_)|x)
+                .or_else(||tabs.len().checked_sub(1).and_then(|i|crate::motion::tab_place(&scroll,i)).map(|(x,w)|x+w+4.)).unwrap_or(4.);
+            strip=strip.relative().child(div().absolute().left(px(x)).bottom_0().w(px(target.width)).h(px(30.))
+                .rounded_t(px(4.)).bg(crate::theme::accent_alpha(0x18)).border_1().border_color(rgb(ACCENT)));
         }
         if let Some((x, width)) = line {
             strip = strip.relative().child(div().absolute().bottom_0().left(px(x)).w(px(width)).h(px(2.)).rounded(px(1.)).bg(rgb(ACCENT)));
@@ -343,6 +372,7 @@ impl Explorer {
     }
 
     fn move_tab_to(&mut self, drag: &TabDrag, group: GroupId, index: usize, cx: &mut Context<Self>) {
+        self.motion.tab_reorder.reset();
         if let Err(error)=self.browser.move_tab(drag.group,drag.index,group,index) {self.status=error.to_string();}
         self.prune_group_state(); self.selected=None; self.marked.clear(); self.anchor=None;
         self.marquee=None; self.context_menu=None; self.clear_filter=!self.filter.is_empty(); self.close_search(); cx.notify();
@@ -3359,6 +3389,9 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,_: &keys::SettingsApply,_,cx|this.apply_settings(cx)))
             .on_drag_move::<TabDrag>(cx.listener(|this,event: &gpui::DragMoveEvent<TabDrag>,_,cx| {
                 this.file_drag = false;
+                if this.motion.tab_reorder.target.is_some_and(|target|this.tab_scroll.get(&target.to).is_none_or(|scroll|!scroll.bounds().contains(&event.event.position))) {
+                    if this.motion.tab_reorder.clear() {cx.notify();}
+                }
                 if !this.pane_bounds.values().any(|bounds|bounds.contains(&event.event.position)) && this.dock_hover.take().is_some() {cx.notify();}
             }))
             // Leaving the window hands the files to Windows for other programs.
@@ -3432,8 +3465,8 @@ impl Render for Explorer {
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.motion.tab_reorder.clear();this.file_drag=false;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.motion.tab_reorder.clear();this.file_drag=false;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,window,cx| {
                 let Some(drag)=this.right_drag.take() else {return};
                 if !drag.active && event.modifiers.shift {
