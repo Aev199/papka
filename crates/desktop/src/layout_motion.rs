@@ -53,6 +53,8 @@ pub(crate) enum Drag { Inspector {start:f32,width:f32}, Split {path:Vec<bool>,ax
 #[derive(Default)]
 pub(crate) struct LayoutMotion {
     pub inspector:Tween,
+    pub sidebar:Tween,
+    pub sidebar_initialized:bool,
     pub closing:Option<GroupId>,
     close_observed:bool,
     pub inspector_width:f32,

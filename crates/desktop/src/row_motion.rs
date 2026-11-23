@@ -4,7 +4,7 @@ use filemanager_core::{browser::Listing,versions::Stacked};
 const SPAN:Duration=Duration::from_millis(180);
 const LIMIT:usize=20_000;
 #[derive(Clone,Copy,Debug)]
-pub(crate) struct Row {pub index:usize,pub top:f32,pub height:f32,pub position:Option<usize>}
+pub(crate) struct Row {pub index:usize,pub top:f32,pub height:f32,pub opacity:f32,pub position:Option<usize>}
 pub(crate) struct RowMotion {
     pub listing:Arc<Listing>,pub roles:Arc<HashMap<PathBuf,Stacked>>,
     order:Vec<usize>,from:HashMap<usize,f32>,target:HashMap<usize,usize>,started:Instant,
@@ -38,7 +38,7 @@ impl RowMotion {
     }
     /// Content coordinates in rows; only a viewport worth of elements is built by the caller.
     pub fn geometry(&self,now:Instant)->(Vec<Row>,f32){
-        let mut top=0.;let rows=self.order.iter().map(|&index|{let height=self.height(index,now);let r=Row{index,top,height,position:self.target.get(&index).copied()};top+=height;r}).collect();(rows,top)
+        let mut top=0.;let rows=self.order.iter().map(|&index|{let height=self.height(index,now);let r=Row{index,top,height,opacity:height,position:self.target.get(&index).copied()};top+=height;r}).collect();(rows,top)
     }
 }
 #[cfg(test)]mod tests{

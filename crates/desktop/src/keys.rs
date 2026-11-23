@@ -185,6 +185,20 @@ impl Explorer {
             (indices, std::collections::HashMap::new())
         };
         let indices = Arc::new(indices);
+        let motion_key=(group,folder.to_path_buf());
+        let before=self.folder_views.get(&motion_key).filter(|v|Arc::ptr_eq(&v.listing,&listing) && v.stacks_rev==self.stacks_rev
+            && (v.spec!=spec || v.show_hidden!=self.show_hidden || v.filter!=filter || v.label_filter!=label_filter || v.kind_filter!=kind_filter))
+            .map(|v|v.indices.clone());
+        if let Some(before)=before {
+            self.motion.rows.remove(&motion_key);
+            let old=self.motion.lists.remove(&motion_key);
+            self.motion.lists.retain(|(id,_),_|*id!=group);
+            if crate::theme::animations() && !self.miller(group) && !self.thumbs_view(group) && !self.renaming && !self.file_drag && self.marquee.is_none() {
+                if let Some(motion)=crate::list_motion::ListMotion::new(listing.clone(),&before,&indices,old.as_ref(),std::time::Instant::now()) {
+                    self.motion.lists.insert(motion_key,motion);
+                }
+            }
+        }
         self.folder_views.insert((group,folder.to_path_buf()), FolderView {
             listing: Arc::clone(&listing),
             spec,
@@ -230,7 +244,7 @@ impl Explorer {
         let now=std::time::Instant::now();
         for(side,listing,order,roles)in before {
             let Some((_,after))=self.folder_view(side,folder)else{continue};
-            let id=(side,folder.to_path_buf());let old=self.motion.rows.remove(&id);
+            let id=(side,folder.to_path_buf());self.motion.lists.remove(&id);let old=self.motion.rows.remove(&id);
             let mut roles=(*roles).clone();
             if let Some(view)=self.folder_views.get(&(side,folder.to_path_buf())) {roles.extend(view.stacks.iter().map(|(p,r)|(p.clone(),r.clone())));}
             let roles=Arc::new(roles);
@@ -402,7 +416,7 @@ impl Explorer {
     /// the list there, as the wheel does, instead of a cut; near moves and a
     /// list not laid out yet scroll at once. True when it glides.
     fn glide_to_row(&self, side: GroupId, folder: &Path, handle: &gpui::UniformListScrollHandle, item: usize) -> bool {
-        if !crate::theme::animations() || self.motion.rows.contains_key(&(side,folder.to_path_buf())) { return false; }
+        if !crate::theme::animations() || (self.motion.rows.contains_key(&(side,folder.to_path_buf())) || self.motion.lists.contains_key(&(side,folder.to_path_buf()))) { return false; }
         let state = handle.0.borrow();
         // GPUI's `last_item_size.item` is the list's visible area, not a row.
         let Some(size) = state.last_item_size else { return false };
@@ -489,7 +503,7 @@ impl Explorer {
         let path = listing.entries[indices[position]].path.clone();
         // A step of a few rows slides the selection there (not in tiles,
         // nor with several items marked).
-        match current.filter(|_| !self.thumbs_view(side) && self.marked.len() <= 1 && !self.motion.rows.contains_key(&(side,folder.clone()))) {
+        match current.filter(|_| !self.thumbs_view(side) && self.marked.len() <= 1 && !self.motion.rows.contains_key(&(side,folder.clone())) && !self.motion.lists.contains_key(&(side,folder.clone()))) {
             Some(from) => self.motion.plate_moved(side, &folder, from, position),
             None => self.motion.plate_moved(side, &folder, position, position),
         }
@@ -815,7 +829,7 @@ impl Explorer {
             cx.notify();
             return;
         }
-        if self.quick_look.take().is_some() {cx.notify();return;}
+        if self.quick_look.is_some() {self.close_quick_look(cx);return;}
         if self.comparison.take().is_some() {cx.notify();return;}
         if self.tour.is_some() {self.close_tour(cx);return;}
         self.dock_hover=None;
@@ -1036,6 +1050,7 @@ impl Explorer {
         self.thumbs.groups.retain(|id| ids.contains(id));
         self.motion.grids.retain(|id,_| ids.contains(id));
         self.motion.rows.retain(|(id,_),_| ids.contains(id));
+        self.motion.lists.retain(|(id,_),_| ids.contains(id));
         self.motion.modes.retain(|id,_| ids.contains(id));
         self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));

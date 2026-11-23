@@ -568,7 +568,7 @@ impl Explorer {
             .into_any_element()
     }
 
-    fn quick_look_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn quick_look_view(&self, shell_alpha:f32, content_alpha:f32, loading:bool, cx: &mut Context<Self>) -> AnyElement {
         use crate::quick_look::QuickContent;
         let look = self.quick_look.as_ref().unwrap();
         let path = look.path.clone();
@@ -617,7 +617,7 @@ impl Explorer {
                     .w(gpui::relative(look.zoom)).h(gpui::relative(look.zoom)).object_fit(ObjectFit::Contain))
                 .into_any_element()
         };
-        let body: AnyElement = match &look.content {
+        let render_body = |content:&QuickContent| -> AnyElement { match content {
             QuickContent::Loading => div().text_color(rgb(TEXT_DIM)).child("Загрузка…").into_any_element(),
             QuickContent::Image(file) => zoomed(file),
             QuickContent::Text(text) => div().id("quick-look-text").size_full().overflow_y_scroll().p_3()
@@ -630,7 +630,11 @@ impl Explorer {
             QuickContent::Message(message) => div().max_w(px(420.)).text_color(rgb(TEXT_MUTED)).child(message.clone()).into_any_element(),
             QuickContent::Pdf { image, .. } => zoomed(image),
             QuickContent::Table(table) => Self::quick_table(table),
+        }
         };
+        let body=div().relative().size_full()
+            .when_some(look.previous.as_ref(),|body,previous|body.child(div().absolute().inset_0().opacity(1.-content_alpha).child(render_body(previous))))
+            .child(div().absolute().inset_0().opacity(content_alpha).child(render_body(&look.content)));
         // Under a PDF: pages; under a workbook: its sheets.
         let footer: AnyElement = match &look.content {
             QuickContent::Word(preview) => div().child(if preview.truncated {
@@ -672,10 +676,11 @@ impl Explorer {
                         this.open_entry(open.clone(), open.is_dir(), side, cx);
                     })))
                 .child(icon_button("quick-look-close","fm/x.svg","Закрыть (Пробел, Esc)",false,true)
-                    .on_click(cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))))
+                    .on_click(cx.listener(|this,_,_,cx| {this.close_quick_look(cx);}))))
             .child(div().flex_1().min_h_0().p_2().flex().items_center().justify_center().child(body))
             .child(div().h(px(30.)).flex_none().px_3().flex().items_center().gap_3().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                 .child(div().flex_1().min_w_0().child(footer))
+                .when(loading,|bar|bar.child("Загрузка…"))
                 .child(div().flex_none().child(if look.zoomable() {
                     "Колесо — крупнее · двойной щелчок — ×2 · ↑ ↓ — соседние файлы · Пробел, Esc — закрыть"
                 } else {
@@ -683,10 +688,10 @@ impl Explorer {
                 })));
         div().id("quick-look-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x00000080))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.close_quick_look(cx);}))
             // Like Quick Look on a Mac: the window rises a little as it fades in.
-            .child(card.with_animation("quick-look-card", motion(180), |card, delta| card.mt(px(16. * (1. - delta)))))
-            .with_animation("quick-look-appear", motion(140), |this, delta| this.opacity(delta))
+            .child(card.mt(px(16. * (1.-shell_alpha))))
+            .opacity(shell_alpha)
             .into_any_element()
     }
 
@@ -1514,6 +1519,10 @@ impl Explorer {
                 || !crate::theme::animations() || self.renaming || self.marquee.is_some() || self.dragging_files(cx) {
                 self.motion.rows.remove(&motion_key);
             }
+            if self.motion.lists.get(&motion_key).is_some_and(|m|!m.active(now)||!m.matches(&indices)||!std::sync::Arc::ptr_eq(&m.listing,&listing))
+                || !crate::theme::animations() || self.renaming || self.marquee.is_some() || self.dragging_files(cx) {
+                self.motion.lists.remove(&motion_key);
+            }
             if indices.is_empty() {
                 return column.child(
                     div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
@@ -1567,8 +1576,10 @@ impl Explorer {
                     .pt_2().pl_2().pr(px(12.))
                 ).opacity(opacity).left(px(offset))).into_any_element();
             }
-            if let Some(motion)=self.motion.rows.get(&(side,folder.clone())) {
-                let (geometry,total)=motion.geometry(std::time::Instant::now());let row_h=row_height();
+            let geometry=self.motion.rows.get(&motion_key).map(|m|m.geometry(now))
+                .or_else(||self.motion.lists.get(&motion_key).map(|m|m.geometry(now)));
+            if let Some((geometry,total))=geometry {
+                let row_h=row_height();
                 let base=handle.0.borrow().base_handle.clone();let viewport=base.bounds().size.height/px(1.);
                 // Keyboard requests use the same logical order, but animated content coordinates.
                 if let Some(request)=handle.0.borrow_mut().deferred_scroll_to_item.take() {
@@ -1585,7 +1596,7 @@ impl Explorer {
                     let body=self.row(entry,&folder,side,row.position.unwrap_or(0),on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx);
                     let mut slot=div().id(SharedString::from(format!("disclosing-{}",entry.path.display())))
                         .absolute().left_0().right_0().top(px(row.top*row_h)).h(px(row.height*row_h)).overflow_hidden()
-                        .opacity(row.height).child(body);
+                        .opacity(row.opacity).child(body);
                     if row.position.is_none() {
                         slot=slot.child(div().absolute().inset_0().occlude()
                             .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
@@ -1754,7 +1765,7 @@ impl Explorer {
         // The selection sliding to this row: the part of it over each row
         // it passes is drawn under the row's text; the row it goes to shows
         // its own colour only once it is there.
-        let plate = self.motion.plate_at(side, folder).filter(|_| focused_pane && !self.motion.rows.contains_key(&(side,folder.to_path_buf())));
+        let plate = self.motion.plate_at(side, folder).filter(|_| focused_pane && !self.motion.rows.contains_key(&(side,folder.to_path_buf())) && !self.motion.lists.contains_key(&(side,folder.to_path_buf())));
         let plate_part = plate.and_then(|(at, _)| {
             let (top, bottom) = (at.max(position as f32), (at + 1.).min(position as f32 + 1.));
             (bottom > top).then_some((top - position as f32, bottom - top))
@@ -1931,7 +1942,9 @@ impl Explorer {
         // Dragging a selected row carries the whole selection.
         let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
         let target = self.drag_target.clone();
-        row.on_drag(FileDragInfo { paths: drag_paths }, move |info: &FileDragInfo, position, _, cx| {
+        row.when(self.motion.rows.contains_key(&(side,folder.to_path_buf())) || self.motion.lists.contains_key(&(side,folder.to_path_buf())),
+                |row|row.on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation()))
+            .on_drag(FileDragInfo { paths: drag_paths }, move |info: &FileDragInfo, position, _, cx| {
                 let name = match info.paths.as_slice() {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
@@ -3295,13 +3308,18 @@ impl Render for Explorer {
         }
 
         let window_width=window.viewport_size().width/px(1.);
-        let sidebar_width=if self.show_sidebar {SIDEBAR_WIDTH} else {0.};
+
         let desired=if self.motion.layout.inspector_width>0. {self.motion.layout.inspector_width}else{300.};
-        let desired=desired.min((window_width-sidebar_width-240.).max(0.));
+
         let viewport=(window_width as u32,(window.viewport_size().height/px(1.)) as u32);
         let resizing=self.motion.layout.drag.is_some();
         let window_changed=self.motion.layout.window_changed(viewport);
         let instant=!crate::theme::animations() || window_changed || resizing || self.file_drag || self.renaming || self.marquee.is_some();
+        let (sidebar_width,sidebar_moving)=self.motion.layout.sidebar.sample(if self.show_sidebar {SIDEBAR_WIDTH}else{0.},
+            instant || !self.motion.layout.sidebar_initialized,std::time::Instant::now(),180);
+        self.motion.layout.sidebar_initialized=true;
+        if sidebar_moving {window.request_animation_frame();}
+        let desired=desired.min((window_width-sidebar_width-240.).max(0.));
         let (inspector_width,panel_moving)=self.motion.layout.inspector.sample(if self.show_inspector {desired}else{0.},instant,
             std::time::Instant::now(),160);
         if panel_moving {window.request_animation_frame();}
@@ -3526,7 +3544,9 @@ impl Render for Explorer {
             // Atlas: the sidebar runs the full height; tabs, navigation,
             // panes and the bottom bar sit to its right.
             .child(div().flex_1().min_h_0().w_full().flex()
-                .when(self.show_sidebar, |row| row.child(self.sidebar(cx)))
+                .when(self.show_sidebar || sidebar_moving, |row| row.child(
+                    div().id("sidebar-shell").w(px(sidebar_width)).flex_none().h_full().overflow_hidden()
+                        .child(self.sidebar(cx))))
                 .child(div().flex_1().min_w_0().h_full().flex().flex_col()
                     .child(self.title_bar(window,cx))
                         .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
@@ -3552,7 +3572,11 @@ impl Render for Explorer {
                 .text_color(rgb(SELECTION_TEXT)).text_size(px(13.)).child(name));
         }
         self.follow_quick_look(cx);
-        if self.quick_look.is_some() { root=root.child(self.quick_look_view(cx)); }
+        if let Some(look)=self.quick_look.as_mut() {
+            let (shell,content,loading,active,finished)=look.sample(std::time::Instant::now(),crate::theme::animations());
+            if active {window.request_animation_frame();}
+            if finished {self.quick_look=None;} else {root=root.child(self.quick_look_view(shell,content,loading,cx));}
+        }
         if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
         if self.about_open { root=root.child(self.about_panel(cx)); }
         if let Some(panel)=self.transfer_panel(cx) { root=root.child(panel); }
