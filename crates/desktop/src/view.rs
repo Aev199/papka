@@ -349,6 +349,18 @@ impl Explorer {
     }
 
     fn group_view(&mut self, group: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        let now=std::time::Instant::now();
+        let (opacity,commit)=self.motion.modes.get_mut(&group).map_or((1.,None),|m|{
+            let (opacity,_,commit)=m.transition.sample(now,crate::theme::animations());
+            if m.transition.active(){self.motion.late_frame.set(true);} (opacity,commit)
+        });
+        let reveal=commit.and_then(|mode|{
+            let current=self.pane_path(group);
+            let saved=self.motion.modes.get(&group).and_then(|m|(m.folder==current).then(||m.anchor.clone()).flatten());
+            let anchor=if group==self.active_side(){self.selected.clone().filter(|p|p.parent()==Some(current.as_path())).or(saved)}else{saved};
+            self.commit_view(group,mode);anchor.map(|anchor|(current,anchor))
+        });
+        let weak=cx.weak_entity();
         let tabs=self.tab_strip(group,cx);
         // The project card takes the pane's place: no address row, no list.
         let card=self.cards.shown_in(group);
@@ -358,7 +370,19 @@ impl Explorer {
             .flex().flex_col().overflow_hidden().border_1()
             .border_color(rgb(if group==self.browser.active && self.browser.leaves().len()>1 {ACTIVE_PANE} else {BORDER}))
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx|this.focus_group(group,cx)))
-            .child(tabs).child(navigation).child(div().flex_1().min_h_0().child(body)).into_any_element()
+            .child(tabs).child(navigation).child(div().flex_1().min_h_0().opacity(opacity).child(body))
+            .when_some(reveal,move|root,(folder,anchor)|root.on_prepaint(move|_,_,cx|cx.defer(move|cx|{
+                let _=weak.update(cx,|this,cx|{
+                    if this.pane_path(group)!=folder{return;}
+                    if let Some((listing,order))=this.folder_view(group,&folder){
+                        if let Some(position)=order.iter().position(|&i|listing.entries[i].path==anchor){
+                            let columns=if this.thumbs_view(group){this.thumb_columns.get(&group).copied().unwrap_or(1).max(1)}else{1};
+                            this.scroll_handle(group,&folder).scroll_to_item(position/columns,gpui::ScrollStrategy::Nearest);cx.notify();
+                        }
+                    }
+                });
+            })))
+            .into_any_element()
     }
 
     fn layout_view(&mut self, node: &Node, viewport:(u32,u32), instant:bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1485,6 +1509,11 @@ impl Explorer {
             .when(right_target, |column| column.bg(rgb(ACCENT_SOFT)));
 
         if let Some((listing, indices)) = self.folder_view(side, &folder) {
+            let motion_key=(side,folder.clone());let now=std::time::Instant::now();
+            if self.motion.rows.get(&motion_key).is_some_and(|m|!m.active(now)||!m.matches(&indices)||!std::sync::Arc::ptr_eq(&m.listing,&listing))
+                || !crate::theme::animations() || self.renaming || self.marquee.is_some() || self.dragging_files(cx) {
+                self.motion.rows.remove(&motion_key);
+            }
             if indices.is_empty() {
                 return column.child(
                     div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
@@ -1537,6 +1566,39 @@ impl Explorer {
                     .h_full()
                     .pt_2().pl_2().pr(px(12.))
                 ).opacity(opacity).left(px(offset))).into_any_element();
+            }
+            if let Some(motion)=self.motion.rows.get(&(side,folder.clone())) {
+                let (geometry,total)=motion.geometry(std::time::Instant::now());let row_h=row_height();
+                let base=handle.0.borrow().base_handle.clone();let viewport=base.bounds().size.height/px(1.);
+                // Keyboard requests use the same logical order, but animated content coordinates.
+                if let Some(request)=handle.0.borrow_mut().deferred_scroll_to_item.take() {
+                    if let Some(row)=geometry.iter().find(|r|r.position==Some(request.item_index)) {
+                        let offset=base.offset();let top=row.top*row_h;let bottom=top+row.height*row_h;
+                        let y=if top < -offset.y/px(1.) {-top} else if bottom > -offset.y/px(1.)+viewport {viewport-bottom} else {offset.y/px(1.)};
+                        base.set_offset(gpui::point(offset.x,px(y.min(0.))));
+                    }
+                }
+                let start=-base.offset().y/px(1.);let end=start+viewport.max(row_h*2.);
+                let mut content=div().relative().w_full().h(px(total*row_h)).flex_none();
+                for row in geometry.into_iter().filter(|r|r.height>0.001 && (r.top+r.height)*row_h>=start-row_h && r.top*row_h<=end+row_h) {
+                    let entry=&listing.entries[row.index];let on_trail=trail.as_ref()==Some(&entry.path);
+                    let body=self.row(entry,&folder,side,row.position.unwrap_or(0),on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx);
+                    let mut slot=div().id(SharedString::from(format!("disclosing-{}",entry.path.display())))
+                        .absolute().left_0().right_0().top(px(row.top*row_h)).h(px(row.height*row_h)).overflow_hidden()
+                        .opacity(row.height).child(body);
+                    if row.position.is_none() {
+                        slot=slot.child(div().absolute().inset_0().occlude()
+                            .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
+                            .on_mouse_down(MouseButton::Right,|_,_,cx|cx.stop_propagation()));
+                    }
+                    content=content.child(slot);
+                }
+                self.motion.late_frame.set(true);
+                return column.child(div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
+                    div().id(list_id).relative().h_full().w_full().overflow_y_scroll().track_scroll(&base).pl_1().pr(px(12.))
+                        .child(content)
+                        .on_mouse_down(MouseButton::Left,cx.listener({let folder=background_marquee_folder.clone();move|this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx)}))
+                )).into_any_element();
             }
             column = column.child(
                 div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
@@ -1692,7 +1754,7 @@ impl Explorer {
         // The selection sliding to this row: the part of it over each row
         // it passes is drawn under the row's text; the row it goes to shows
         // its own colour only once it is there.
-        let plate = self.motion.plate_at(side, folder).filter(|_| focused_pane);
+        let plate = self.motion.plate_at(side, folder).filter(|_| focused_pane && !self.motion.rows.contains_key(&(side,folder.to_path_buf())));
         let plate_part = plate.and_then(|(at, _)| {
             let (top, bottom) = (at.max(position as f32), (at + 1.).min(position as f32 + 1.));
             (bottom > top).then_some((top - position as f32, bottom - top))
@@ -1701,7 +1763,7 @@ impl Explorer {
         let ink = plate.map_or(if selected { 1. } else { 0. }, |(at, _)| crate::motion::plate_ink(at, position));
         let ink_color = |normal| crate::palette::mix(themed(normal), themed(SELECTION_TEXT), ink);
         let (icon_path, tint) = entry_icon(entry);
-        let stack = self.stack_role(side, folder, &path);
+        let stack = self.stack_role(side, folder, &path).or_else(||self.motion.rows.get(&(side,folder.to_path_buf())).and_then(|m|m.roles.get(&path).cloned()));
         let bg = if selected_bg && focused_pane {
             Some(SELECTED)
         } else if selected_bg {
@@ -1786,7 +1848,10 @@ impl Explorer {
                         .flex_none().flex().items_center().gap_0p5().cursor_pointer()
                         .tooltip(move |window, cx| Tooltip::new(if expanded { "Скрыть прежние версии" } else { "Показать прежние версии" }).build(window, cx))
                         .child(badge(format!("{label} +{others}")))
-                        .child(crate::disclosure_motion::chevron(SharedString::from(format!("stack-turn-{}",path.display())).into(), expanded, small_icon("fm/chevron-right.svg", ink_color(TEXT_DIM))))
+                        .child(match self.motion.rows.get(&(side,folder.to_path_buf())).and_then(|m|m.openness(&key,std::time::Instant::now())) {
+                            Some(open)=>small_icon("fm/chevron-right.svg",ink_color(TEXT_DIM)).with_transformation(gpui::Transformation::rotate(gpui::radians(open*std::f32::consts::FRAC_PI_2))).into_any_element(),
+                            None=>crate::disclosure_motion::chevron(SharedString::from(format!("stack-turn-{}",path.display())).into(),expanded,small_icon("fm/chevron-right.svg",ink_color(TEXT_DIM))).into_any_element(),
+                        })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();

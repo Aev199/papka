@@ -62,15 +62,35 @@ impl Explorer {
 
     /// Ctrl+1 list, Ctrl+2 columns, Ctrl+3 tiles, for the active pane.
     pub(crate) fn set_view(&mut self, miller: bool, tiles: bool, cx: &mut Context<Self>) {
-        let side = self.active_side();
-        self.motion.grids.remove(&side);
-        self.browser.active_group_mut().miller = miller;
-        if tiles { self.thumbs.groups.insert(side); } else { self.thumbs.groups.remove(&side); }
+        use crate::mode_motion::{Mode,ModeMotion,PaneMotion};
+        let side = self.active_side();let folder=self.pane_path(side);
+        let current=if self.miller(side){Mode::Columns}else if self.thumbs_view(side){Mode::Thumbnails}else{Mode::List};
+        let target=if miller{Mode::Columns}else if tiles{Mode::Thumbnails}else{Mode::List};
+        let selected=self.selected.clone().filter(|p|p.parent()==Some(folder.as_path()));
+        let anchor=selected.or_else(||{
+            let columns=if self.thumbs_view(side){self.thumb_columns.get(&side).copied().unwrap_or(1)}else{1};
+            let top=self.scroll_handles.get(&(side,folder.clone())).map_or(0,|h|{
+                let state=h.0.borrow();let height=if self.thumbs_view(side){tile_height()+TILE_GAP}else{crate::layout::row_height()};
+                ((-state.base_handle.offset().y/gpui::px(1.)).max(0.)/height).floor()as usize*columns
+            });
+            self.folder_view(side,&folder).and_then(|(listing,order)|order.get(top).map(|&i|listing.entries[i].path.clone()))
+        });
+        let motion=self.motion.modes.entry(side).or_insert_with(||PaneMotion{transition:ModeMotion::new(current),folder:folder.clone(),anchor:anchor.clone()});
+        motion.folder=folder;motion.anchor=anchor;
+        motion.transition.begin(current,target,std::time::Instant::now(),crate::theme::animations());
+        cx.notify();
+    }
+
+    pub(crate) fn commit_view(&mut self,side:GroupId,mode:crate::mode_motion::Mode) {
+        use crate::mode_motion::Mode;
+        self.motion.grids.remove(&side);self.motion.rows.retain(|(id,_),_|*id!=side);
+        self.column_reveal_keys.remove(&side);
+        let Some(group)=self.browser.group_mut(side)else{return;};group.miller=mode==Mode::Columns;
+        if mode==Mode::Thumbnails {self.thumbs.groups.insert(side);}else{self.thumbs.groups.remove(&side);}
         if let Some(store) = &self.workspaces {
             let ids: Vec<String> = self.thumbs.groups.iter().map(|id| id.0.to_string()).collect();
             let _ = store.set_value(GROUPS_KEY, &ids.join(","));
         }
-        cx.notify();
     }
 
     /// The picture of a tile, once made; asks for it otherwise. Only kinds

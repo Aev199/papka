@@ -53,6 +53,15 @@ impl Marked {
         *selected = if self.contains(path) { Some(path.to_path_buf()) } else { self.last().cloned() };
     }
 
+    /// A folded family exposes only its head; hidden children cannot stay marked for operations.
+    pub(crate) fn collapse_to_head(&mut self, selected:&mut Option<PathBuf>, anchor:&mut Option<PathBuf>, hidden:&HashSet<PathBuf>, head:&Path) {
+        let replaced=self.list.iter().any(|p|hidden.contains(p));
+        self.retain(|p|!hidden.contains(p));
+        if replaced {self.extend([head.to_path_buf()]);}
+        if selected.as_ref().is_some_and(|p|hidden.contains(p)){*selected=Some(head.to_path_buf());}
+        if anchor.as_ref().is_some_and(|p|hidden.contains(p)){*anchor=Some(head.to_path_buf());}
+    }
+
     /// Puts the list in the order of `order` (the folder as shown); paths
     /// not in it go last.
     pub(crate) fn order_by(&mut self, order: &[PathBuf]) {
@@ -125,5 +134,21 @@ mod tests {
         assert_eq!(&*marked, &[order[1].clone()]);
         marked.toggle_selection(&mut selected, &order[1], &order);
         assert!(selected.is_none() && marked.is_empty());
+    }
+}
+
+#[cfg(test)]mod fold_tests{
+    use super::*;
+    #[test]fn folding_a_marked_family_preserves_other_files_and_replaces_hidden_children(){
+        let mut m:Marked=vec![PathBuf::from("child"),PathBuf::from("other")].into();
+        let mut selected=Some(PathBuf::from("other"));let mut anchor=Some(PathBuf::from("child"));
+        m.collapse_to_head(&mut selected,&mut anchor,&[PathBuf::from("child")].into(),Path::new("head"));
+        assert!(!m.contains(Path::new("child")));assert!(m.contains(Path::new("head")));assert!(m.contains(Path::new("other")));
+        assert_eq!(selected,Some(PathBuf::from("other")));assert_eq!(anchor,Some(PathBuf::from("head")));
+    }
+    #[test]fn folding_a_single_selected_child_keeps_the_single_selection_fallback(){
+        let mut m=Marked::default();let mut selected=Some(PathBuf::from("child"));let mut anchor=selected.clone();
+        m.collapse_to_head(&mut selected,&mut anchor,&[PathBuf::from("child")].into(),Path::new("head"));
+        assert!(m.is_empty());assert_eq!(selected,Some(PathBuf::from("head")));
     }
 }

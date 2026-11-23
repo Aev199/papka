@@ -82,6 +82,8 @@ fn flash_key(path: &Path) -> String {
 pub(crate) struct Motion {
     pub(crate) layout: crate::layout_motion::LayoutMotion,
     pub(crate) grids: HashMap<GroupId, crate::grid_motion::GridMotion>,
+    pub(crate) rows: HashMap<(GroupId,PathBuf),crate::row_motion::RowMotion>,
+    pub(crate) modes: HashMap<GroupId,crate::mode_motion::PaneMotion>,
     /// New items and when each came on screen (`None`: not drawn yet).
     flashes: RefCell<HashMap<String, (Flash, Instant, Option<Instant>)>>,
     opened_tab: Option<(GroupId, usize, Instant)>,
@@ -237,10 +239,11 @@ impl Motion {
         if self.entrances.get(&group).is_some_and(|e| e.folder == path && e.mode == mode) { return; }
         let old = self.entrances.get(&group);
         let changed = old.is_some_and(|e| e.mode != mode);
+        let switch = changed && old.is_some_and(|e|e.folder==path);
         let way = old.map_or(0., |e| direction(&e.folder, path));
         self.entrances.insert(group, Entrance { folder: path.to_path_buf(), mode,
             way: if mode == 'c' { 0. } else { way },
-            from: if changed { 0.1 } else { 0.35 }, started: None });
+            from: if switch {1.} else if changed { 0.1 } else { 0.35 }, started: switch.then(||Instant::now()-LIST_APPEAR) });
     }
 
     /// (opacity, horizontal offset), starting when the contents first arrive.
@@ -466,5 +469,16 @@ mod tests {
         let reversed = motion.plate_at(g, f).unwrap().0;
         assert!((shown - reversed).abs() < 0.05);
         motion.cancel_plate(); assert!(motion.plate_at(g, f).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mode_entrance_tests {
+    use super::*;
+    #[test] fn switching_modes_in_place_does_not_start_another_folder_entrance() {
+        let mut motion=Motion::default();let id=GroupId(1);let path=Path::new("/same");
+        motion.list_location(id,path,'l');motion.list_appearance(id);
+        motion.list_location(id,path,'t');assert_eq!(motion.list_appearance(id),(1.,0.));
+        motion.list_location(id,path,'c');assert_eq!(motion.list_appearance(id),(1.,0.));
     }
 }
