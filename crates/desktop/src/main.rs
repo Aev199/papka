@@ -19,6 +19,8 @@ mod edge_scroll;
 mod smooth_scroll;
 mod marked;
 mod motion;
+mod layout_motion;
+mod button_motion;
 mod kind_filter;
 mod search_panel;
 mod updates;

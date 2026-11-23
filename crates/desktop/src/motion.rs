@@ -80,6 +80,7 @@ fn flash_key(path: &Path) -> String {
 
 #[derive(Default)]
 pub(crate) struct Motion {
+    pub(crate) layout: crate::layout_motion::LayoutMotion,
     /// New items and when each came on screen (`None`: not drawn yet).
     flashes: RefCell<HashMap<String, (Flash, Instant, Option<Instant>)>>,
     opened_tab: Option<(GroupId, usize, Instant)>,

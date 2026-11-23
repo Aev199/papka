@@ -555,6 +555,23 @@ impl Explorer {
             return;
         }
         let group = self.browser.active;
+        if self.motion.layout.closing.is_some() {return;}
+        if crate::theme::animations() && self.browser.groups.len()>1 && self.browser.active_group().tabs.len()==1 {
+            self.motion.layout.begin_close(group);
+            if let Some(next)=self.browser.leaves().into_iter().find(|id|*id!=group){self.browser.focus(next);}
+            self.selected=None;self.marked.clear();self.anchor=None;self.context_menu=None;
+            cx.spawn(async move|this,cx|{
+                for tick in 0..64 {
+                    cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                    let done=this.update(cx,|this,cx|{
+                        if !this.motion.layout.close_finished() && !this.search.active && tick<63 {return false;}
+                        this.browser.close_group(group);this.motion.layout.finish_close();this.prune_group_state();cx.notify();true
+                    }).unwrap_or(true);
+                    if done {break;}
+                }
+            }).detach();
+            cx.notify();return;
+        }
         let width = self.tab_scroll.get(&group).and_then(|scroll| scroll.bounds_for_item(index)).map_or(120., |tab| f32::from(tab.size.width));
         self.motion.tab_closed(group, index, width);
         self.browser.close_tab(self.browser.active, index);

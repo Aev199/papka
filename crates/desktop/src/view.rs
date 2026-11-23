@@ -18,7 +18,6 @@ use gpui::{
 };
 use gpui_component::input::Input;
 use gpui_component::Sizable;
-use gpui_component::resizable::{h_resizable, v_resizable, resizable_panel};
 use filemanager_core::panes::{Node, Axis, Edge, tab_titles};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::Theme;
@@ -137,25 +136,28 @@ pub(crate) fn icon_button(
     active: bool,
     enabled: bool,
 ) -> Stateful<Div> {
+    let id=id.into();
     let color = if !enabled { TEXT_DIM } else if active { ACCENT } else { TEXT_MUTED };
-    div().id(id).flex_none().size(px(30.)).rounded(px(4.)).flex().items_center().justify_center()
+    div().id(id.clone()).relative().overflow_hidden().flex_none().size(px(30.)).rounded(px(4.)).flex().items_center().justify_center()
         .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
-        .when(enabled, |this| this.cursor_pointer()
-            .hover(|style| style.bg(rgb(HOVER)))
-            .active(|style| style.bg(rgb(PRESSED))))
-        .child(icon(icon_path, color))
+        .when(enabled, |this| this.cursor_pointer().on_hover(|_,window,_|window.refresh())
+            .active(|style| style.opacity(0.75)))
+        .when(enabled,|this|this.child(div().absolute().inset_0().child(crate::button_motion::background(id, if active {Some(themed(ACCENT_SOFT))}else{None}, themed(HOVER)))))
+        .child(icon(icon_path, color).relative())
         .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
 }
 
 /// Text button for dialogs and panels.
 /// Small icon button of the bottom bar, like the corner icons in Atlas.
 fn bar_button(id: &'static str, path: &'static str, tip: &'static str, active: bool) -> Stateful<Div> {
-    div().id(id).flex_none().size(px(24.)).rounded_sm().flex().items_center().justify_center()
+    div().id(id).relative().overflow_hidden().flex_none().size(px(24.)).rounded_sm().flex().items_center().justify_center()
         .cursor_pointer()
         .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
-        .hover(|style| style.bg(rgb(HOVER)))
+        .on_hover(|_,window,_|window.refresh())
+        .active(|style|style.opacity(0.75))
+        .child(div().absolute().inset_0().child(crate::button_motion::background(id.into(),if active {Some(themed(ACCENT_SOFT))}else{None},themed(HOVER))))
         .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
-        .child(svg().path(path).size(px(14.)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
+        .child(svg().relative().path(path).size(px(14.)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
 }
 
 /// «Версия 1.6», or «Исходный» for the file without a suffix.
@@ -168,12 +170,15 @@ pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
         ButtonKind::Danger => (0x9E3A43, 0xB8454F, 0xFFFFFF, 0x9E3A43),
         ButtonKind::Ghost => (RAISED, HOVER, TEXT, BORDER_STRONG),
     };
-    div().id(id).flex_none().h(px(28.)).px_3().rounded(px(4.)).flex().items_center()
+    let id=id.into();
+    div().id(id.clone()).relative().overflow_hidden().flex_none().h(px(28.)).px_3().rounded(px(4.)).flex().items_center()
         .justify_center().bg(rgb(bg)).border_1().border_color(rgb(frame)).text_color(rgb(fg)).cursor_pointer()
-        .hover(move |style| style.bg(rgb(hover)))
+        .on_hover(|_,window,_|window.refresh())
+        .active(|style|style.opacity(0.8))
+        .child(div().absolute().inset_0().child(crate::button_motion::background(id,Some(themed(bg)),themed(hover))))
         // A label longer than its button ends in "…" instead of running
         // out of both edges.
-        .child(div().min_w_0().truncate().child(label.into()))
+        .child(div().relative().min_w_0().truncate().child(label.into()))
 }
 
 #[derive(Clone, Copy)]
@@ -356,31 +361,45 @@ impl Explorer {
             .child(tabs).child(navigation).child(div().flex_1().min_h_0().child(body)).into_any_element()
     }
 
-    fn layout_view(&mut self, node: &Node, path: Vec<bool>, width: f32, height: f32, cx: &mut Context<Self>) -> AnyElement {
-        match node {
-            Node::Leaf(id)=>self.group_view(*id,cx),
-            Node::Split {axis,ratio,first,second}=>{
-                let horizontal=*axis==Axis::Horizontal;
-                let mut a=path.clone();a.push(false);let mut b=path.clone();b.push(true);
-                let one=self.layout_view(first,a,if horizontal {width*ratio} else {width},if horizontal {height} else {height*ratio},cx);
-                let two=self.layout_view(second,b,if horizontal {width*(1.-ratio)} else {width},if horizontal {height} else {height*(1.-ratio)},cx);
-                let key=SharedString::from(format!("split-{}-{:?}",self.browser.signature(),path));
-                // Each pane draws its own frame. The divider's built-in line
-                // would cover the left or top edge of the active pane's frame,
-                // so it paints nothing; dragging still works.
-                let group=if horizontal {h_resizable(key)} else {v_resizable(key)}
-                    .with_handle_appearance(std::rc::Rc::new(|_,_,_| Some(div().into_any_element())));
-                let available=if horizontal {width} else {height};
-                group.child(resizable_panel().size(px(available*ratio)).size_range(px(240.)..px(10000.)).child(one))
-                    .child(resizable_panel().size(px(available*(1.-ratio))).size_range(px(240.)..px(10000.)).child(two))
-                    .on_resize(cx.listener(move |this,state: &gpui::Entity<gpui_component::resizable::ResizableState>,_,cx| {
-                        let sizes=state.read(cx).sizes();
-                        if sizes.len()==2 && sizes[0]+sizes[1]>px(0.) {
-                            this.browser.set_ratio(&path,sizes[0]/(sizes[0]+sizes[1])); cx.notify();
-                        }
-                    })).into_any_element()
+    fn layout_view(&mut self, node: &Node, viewport:(u32,u32), instant:bool, cx: &mut Context<Self>) -> AnyElement {
+        let (rects,moving)=self.motion.layout.sample(node,viewport,instant,std::time::Instant::now());
+        if moving {self.motion.late_frame.set(true);}
+        let weak=cx.weak_entity();
+        let mut scene=div().id("pane-scene").relative().size_full().min_w_0().min_h_0().overflow_hidden()
+            .bg(rgb(SURFACE)).on_prepaint(move |bounds,_,cx| {
+                let weak=weak.clone();cx.defer(move |cx|{let _=weak.update(cx,|this,_|this.motion.layout.bounds=Some(bounds));});
+            });
+        for id in self.browser.leaves() {
+            let Some(r)=rects.get(&id) else {continue};
+            scene=scene.child(div().id(SharedString::from(format!("pane-slot-{}",id.0))).absolute()
+                .left(gpui::relative(r.x)).top(gpui::relative(r.y)).w(gpui::relative(r.w)).h(gpui::relative(r.h))
+                .overflow_hidden().child(self.group_view(id,cx))
+                .when(self.motion.layout.closing==Some(id),|v|v.child(div().absolute().inset_0().occlude()
+                    .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right,|_,_,cx|cx.stop_propagation()))));
+        }
+        // Dividers use the same live geometry; while panels are travelling a
+        // drag first settles them, then resizes directly without easing.
+        if !moving && self.motion.layout.closing.is_none() {
+            for d in crate::layout_motion::geometry(node).1 {
+                let horizontal=d.axis==Axis::Horizontal;let r=d.rect;
+                let handle=div().id(SharedString::from(format!("pane-divider-{:?}",d.path))).absolute()
+                    .when(horizontal,|v|v.left(gpui::relative(r.x+r.w*d.ratio)).top(gpui::relative(r.y))
+                        .ml(px(-3.)).w(px(6.)).h(gpui::relative(r.h)).cursor_col_resize())
+                    .when(!horizontal,|v|v.top(gpui::relative(r.y+r.h*d.ratio)).left(gpui::relative(r.x))
+                        .mt(px(-3.)).h(px(6.)).w(gpui::relative(r.w)).cursor_row_resize())
+                    .hover(|v|v.bg(rgb(BORDER_STRONG)))
+                    .on_mouse_down(MouseButton::Left,cx.listener(move|this,event:&MouseDownEvent,_,cx|{
+                        cx.stop_propagation();if this.interface_modal(){return;}
+                        let Some(bounds)=this.motion.layout.bounds else{return};
+                        let span=if horizontal {bounds.size.width/px(1.)*r.w}else{bounds.size.height/px(1.)*r.h};
+                        this.motion.layout.drag=Some(crate::layout_motion::Drag::Split{path:d.path.clone(),axis:d.axis,
+                            start:if horizontal {event.position.x/px(1.)}else{event.position.y/px(1.)},ratio:d.ratio,span});
+                    }));
+                scene=scene.child(handle);
             }
         }
+        scene.into_any_element()
     }
 
     /// Ends a list column drag and keeps the widths for the next start.
@@ -3194,19 +3213,33 @@ impl Render for Explorer {
 
         let window_width=window.viewport_size().width/px(1.);
         let sidebar_width=if self.show_sidebar {SIDEBAR_WIDTH} else {0.};
-        let inspector_width=if self.show_inspector {300.} else {0.};
+        let desired=if self.motion.layout.inspector_width>0. {self.motion.layout.inspector_width}else{300.};
+        let desired=desired.min((window_width-sidebar_width-240.).max(0.));
+        let viewport=(window_width as u32,(window.viewport_size().height/px(1.)) as u32);
+        let resizing=self.motion.layout.drag.is_some();
+        let window_changed=self.motion.layout.window_changed(viewport);
+        let instant=!crate::theme::animations() || window_changed || resizing || self.file_drag || self.renaming || self.marquee.is_some();
+        let (inspector_width,panel_moving)=self.motion.layout.inspector.sample(if self.show_inspector {desired}else{0.},instant,
+            std::time::Instant::now(),160);
+        if panel_moving {window.request_animation_frame();}
         let pane_width=(window_width-sidebar_width-inspector_width).max(240.);
         self.pane_width=pane_width/self.browser.groups.len() as f32;
-        let height=(window.viewport_size().height/px(1.)-64.).max(240.);
-        let group_id=format!("main-{}-{}-{}",self.browser.signature(),self.show_inspector,self.search.active);
-        let mut panels=h_resizable(SharedString::from(group_id));
         let body=if self.search.active {self.search_results(cx).into_any_element()} else {
-            self.layout_view(&self.browser.root.clone(),Vec::new(),pane_width,height,cx)
+            self.layout_view(&self.browser.root.clone(),viewport,instant,cx)
         };
-        panels=panels.child(resizable_panel().size(px(pane_width)).size_range(px(240.)..px(10000.)).child(body));
-        if self.show_inspector {
-            panels = panels.child(resizable_panel().size(px(inspector_width)).size_range(px(220.)..px(520.))
-                .child(self.inspector(cx)));
+        let mut panels=div().id("workspace-panels").size_full().flex().min_w_0().min_h_0()
+            .child(div().id("workspace-body").flex_1().min_w_0().min_h_0().overflow_hidden().child(body));
+        if self.show_inspector || panel_moving {
+            let opacity=if desired>0. {(inspector_width/desired).clamp(0.,1.)}else{1.};
+            let inspector=self.inspector(cx);
+            panels=panels.child(div().id("inspector-shell").relative().w(px(inspector_width)).flex_none().h_full().overflow_hidden()
+                .child(div().w(px(desired)).h_full().opacity(opacity).child(inspector))
+                .child(div().id("inspector-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
+                    .hover(|v|v.bg(rgb(BORDER_STRONG)))
+                    .on_mouse_down(MouseButton::Left,cx.listener(move|this,event:&MouseDownEvent,_,cx|{
+                        cx.stop_propagation();if this.interface_modal(){return;}
+                        this.motion.layout.drag=Some(crate::layout_motion::Drag::Inspector{start:event.position.x/px(1.),width:desired});
+                    }))));
         }
 
         // Something that learnt only while drawing that it moves (the tab
@@ -3265,6 +3298,19 @@ impl Render for Explorer {
                         return;
                     }
                 }
+                if let Some(drag)=&this.motion.layout.drag {
+                    if !event.dragging() {this.motion.layout.drag=None;return;}
+                    match drag {
+                        crate::layout_motion::Drag::Inspector{start,width}=>{
+                            this.motion.layout.inspector_width=(*width+*start-event.position.x/px(1.)).clamp(220.,520.);
+                        }
+                        crate::layout_motion::Drag::Split{path,axis,start,ratio,span}=>{
+                            let at=if *axis==Axis::Horizontal{event.position.x/px(1.)}else{event.position.y/px(1.)};
+                            this.browser.set_ratio(path,(*ratio+(at-*start)/span.max(1.)).clamp(0.15,0.85));
+                        }
+                    }
+                    cx.notify();return;
+                }
                 if let Some((side, index, start, width)) = this.list_resize {
                     if !event.dragging() { this.finish_list_resize(); return; }
                     let mut widths = this.list_widths_for(side);
@@ -3284,8 +3330,8 @@ impl Render for Explorer {
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,window,cx| {
                 let Some(drag)=this.right_drag.take() else {return};
                 if !drag.active && event.modifiers.shift {
