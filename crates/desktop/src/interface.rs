@@ -84,6 +84,31 @@ pub(crate) struct Settings {
     pub error: Option<String>,
 }
 
+/// Move among available commands without wrapping or activating a disabled one.
+fn next_enabled(enabled:&[bool], selected:usize, delta:isize)->Option<usize>{
+    if enabled.is_empty() {return None;}
+    let start=selected.min(enabled.len()-1);
+    let found=if delta<0 {(0..start).rev().find(|&i|enabled[i])}
+        else {(start+1..enabled.len()).find(|&i|enabled[i])};
+    found.or_else(||enabled[start].then_some(start))
+        .or_else(||enabled.iter().position(|&on|on))
+}
+
+#[cfg(test)]
+mod palette_cursor_tests {
+    use super::*;
+    #[test]
+    fn skips_disabled_commands_and_stays_at_boundaries(){
+        let available=[false,true,false,true,false];
+        assert_eq!(next_enabled(&available,1,1),Some(3));
+        assert_eq!(next_enabled(&available,3,-1),Some(1));
+        assert_eq!(next_enabled(&available,3,1),Some(3));
+        assert_eq!(next_enabled(&available,1,-1),Some(1));
+        assert_eq!(next_enabled(&[false,false],0,1),None);
+        assert_eq!(next_enabled(&[],0,1),None);
+    }
+}
+
 impl Explorer {
     pub(crate) fn interface_modal(&self) -> bool {
         self.palette.is_some() || self.settings.is_some() || self.close_error.is_some() || self.tour.is_some() || self.comparison.is_some()
@@ -110,9 +135,14 @@ impl Explorer {
             window,
             |this, input, event, window, cx| match event {
                 gpui_component::input::InputEvent::Change => {
+                    let query = input.read(cx).value().to_string();
+                    let selected = if this.palette.as_ref().is_some_and(|p|p.folders.is_none()) {
+                        commands(&query).iter().position(|c|this.command_enabled(c)).unwrap_or(0)
+                    } else {0};
                     if let Some(palette) = this.palette.as_mut() {
-                        palette.query = input.read(cx).value().to_string();
-                        palette.selected = 0;
+                        palette.query = query;
+                        palette.selected = selected;
+                        palette.scroll.scroll_to_item(0);
                     }
                     cx.notify();
                 }
@@ -124,10 +154,11 @@ impl Explorer {
         )
         .detach();
         window.focus(&input.focus_handle(cx), cx);
+        let selected = if folders.is_none() {commands("").iter().position(|c|self.command_enabled(c)).unwrap_or(0)}else{0};
         self.palette = Some(Palette {
             input,
             query: String::new(),
-            selected: 0,
+            selected,
             scroll: gpui::ScrollHandle::new(),
             folders,
         });
@@ -144,12 +175,12 @@ impl Explorer {
             cx.notify();
             return;
         }
-        if let Some(palette) = self.palette.as_mut() {
+        if let Some(palette) = self.palette.as_ref() {
             let results = commands(&palette.query);
-            palette.selected = palette
-                .selected
-                .saturating_add_signed(delta)
-                .min(results.len().saturating_sub(1));
+            let enabled: Vec<_> = results.iter().map(|c|self.command_enabled(c)).collect();
+            let Some(selected) = next_enabled(&enabled,palette.selected,delta) else {return;};
+            let Some(palette) = self.palette.as_mut() else {return;};
+            palette.selected = selected;
             // The list also holds one header per section before its commands.
             let mut headers = 0;
             let mut group = "";
@@ -374,9 +405,10 @@ impl Explorer {
         .detach();
         cx.notify();
     }
-    pub(crate) fn interface_overlay(&self, palette:Option<&Palette>, settings:Option<&Settings>, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn interface_overlay(&self, palette:Option<&Palette>, settings:Option<&Settings>, phase:crate::popup_motion::Phase, window:&Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (top,available,list_height) = ui::palette_geometry(window.viewport_size().height / px(1.));
         let body = if let Some(palette) = palette.filter(|palette| palette.folders.is_some()) {
-            let (list, footer) = self.jump_list(palette, cx);
+            let (list, footer) = self.jump_list(palette, list_height, cx);
             div().flex().flex_col().p_0()
                 .child(div().h(px(ui::PALETTE_HEADER_HEIGHT)).px_2().flex().items_center().border_b_1().border_color(rgb(BORDER))
                     .child(crate::jump::field(palette)))
@@ -392,7 +424,7 @@ impl Explorer {
             // Atlas: search field on top, commands in sections with icons
             // and shortcut keys, key hints at the bottom.
             let results = commands(&palette.query);
-            let mut list = div().id("palette-list").max_h(px(380.)).overflow_y_scroll().py_1()
+            let mut list = div().id("palette-list").min_h_0().max_h(px(list_height)).overflow_y_scroll().py_1()
                 .track_scroll(&palette.scroll);
             if results.is_empty() {
                 list = list.child(div().px_4().py_3().text_color(rgb(TEXT_MUTED)).child("Команды не найдены"));
@@ -423,7 +455,7 @@ impl Explorer {
                         // A quiet highlight with the accent mark, not a filled bar.
                         .when(chosen, |row| row.bg(rgb(ACCENT_SOFT)).child(crate::view::focus_mark()))
                         .text_color(rgb(fg))
-                        .when(!enabled, |row| row.opacity(0.4))
+                        .when(!enabled, |row| row.text_color(rgb(TEXT_DIM)))
                         .when(enabled, |row| {
                             row.cursor_pointer().when(!chosen, |row| row.hover(|s| s.bg(rgb(HOVER))))
                         })
@@ -435,9 +467,9 @@ impl Explorer {
                                 .text_size(px(ui::CAPTION_TEXT))
                                 .text_color(rgb(TEXT_MUTED))
                                 .child(command.shortcut)))
-                        .on_click(cx.listener(move |this, _, window, cx| {
+                        .when(enabled, |row|row.on_click(cx.listener(move |this, _, window, cx| {
                             this.execute_command(command, window, cx)
-                        })),
+                        }))),
                 );
             }
             div()
@@ -590,7 +622,7 @@ impl Explorer {
                 .flex()
                 .items_start()
                 .justify_center()
-                .pt(px(64.))
+                .pt(px(top)).px(px(ui::POPUP_MARGIN))
                 .bg(gpui::rgba(0x00000088)).opacity(phase.alpha)
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -604,8 +636,8 @@ impl Explorer {
                     body.id("interface-body").w(px(if palette.is_some() { 560. } else { 520. }))
                         .max_w_full()
                         // The settings scroll on a small screen.
-                        .when(palette.is_none(), |body| body.p_4().max_h(gpui::relative(0.82)).flex().flex_col())
-                        .when(palette.is_some(), |body| body.overflow_hidden())
+                        .when(palette.is_none(), |body| body.p_4().max_h(px(available)).flex().flex_col())
+                        .when(palette.is_some(), |body| body.max_h(px(available)).overflow_hidden())
                         .rounded(px(ui::PANEL_RADIUS))
                         .bg(rgb(RAISED))
                         .border_1()

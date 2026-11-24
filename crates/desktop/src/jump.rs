@@ -170,10 +170,10 @@ impl Explorer {
     }
 
     /// The window's list in jump mode.
-    pub(crate) fn jump_list(&self, palette: &Palette, cx: &mut Context<Self>) -> (AnyElement, String) {
+    pub(crate) fn jump_list(&self, palette: &Palette, list_height:f32, cx: &mut Context<Self>) -> (AnyElement, String) {
         let results = self.jump_results();
         let reading = palette.folders.as_ref().is_some_and(|folders| folders.reading);
-        let mut list = gpui::div().id("jump-list").max_h(px(380.)).overflow_y_scroll().py_1().track_scroll(&palette.scroll);
+        let mut list = gpui::div().id("jump-list").min_h_0().max_h(px(list_height)).overflow_y_scroll().py_1().track_scroll(&palette.scroll);
         if results.is_empty() {
             list = list.child(gpui::div().px_4().py_3().text_color(rgb(TEXT_MUTED))
                 .child(if reading { "Читаем вложенные папки…" } else { "Папки не найдены" }));
@@ -184,8 +184,8 @@ impl Explorer {
             let name = filemanager_core::browser::display_name(&path);
             let parent = path.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
             let target = path.clone();
-            list = list.child(gpui::div().id(("jump-folder", index)).mx_1().h(px(40.)).px_3().flex().items_center().gap_3()
-                .rounded(px(4.)).cursor_pointer()
+            list = list.child(gpui::div().id(("jump-folder", index)).mx_1().h(px(crate::ui_tokens::JUMP_ROW_HEIGHT)).px_3().flex().items_center().gap_3()
+                .rounded(px(crate::ui_tokens::CONTROL_RADIUS)).cursor_pointer()
                 .when(chosen, |row| row.bg(rgb(SELECTED)))
                 .when(!chosen, |row| row.hover(|style| style.bg(rgb(HOVER))))
                 .child(gpui::svg().path("fm/folder-fill.svg").size(px(16.)).flex_none()

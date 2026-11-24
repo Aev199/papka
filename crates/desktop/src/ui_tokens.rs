@@ -28,6 +28,19 @@ pub(crate) const CHECKBOX_SIZE: f32 = 16.;
 pub(crate) const CHECKMARK_SIZE: f32 = 12.;
 pub(crate) const INSPECTOR_LABEL_WIDTH: f32 = 84.;
 pub(crate) const INSPECTOR_PREVIEW_HEIGHT: f32 = 240.;
+pub(crate) const JUMP_ROW_HEIGHT: f32 = 40.;
+pub(crate) const POPUP_MARGIN: f32 = 8.;
+
+/// Top inset and available content height in logical pixels. Cap the list
+/// height but never assume a large monitor.
+pub(crate) fn palette_geometry(viewport_height: f32) -> (f32,f32,f32) {
+    let viewport = viewport_height.max(0.);
+    let top = (viewport * 0.12).min(64.);
+    let available = (viewport - top - POPUP_MARGIN).max(0.);
+    let list = (available - PALETTE_HEADER_HEIGHT - PALETTE_FOOTER_HEIGHT - 2.).clamp(0.,380.);
+    (top,available,list)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -51,6 +64,17 @@ mod tests {
         assert!(MENU_ROW_HEIGHT >= BODY_TEXT + 8.);
         assert!(PALETTE_ROW_HEIGHT >= BODY_TEXT + 8.);
         assert!(PALETTE_HEADER_HEIGHT > PALETTE_FOOTER_HEIGHT);
+    }
+
+    #[test]
+    fn popup_geometry_respects_small_viewports() {
+        for height in [100.,240.,400.,720.,1080.] {
+            let (top,available,list) = palette_geometry(height);
+            assert!(top+available <= height);
+            assert!(list <= 380. && list >= 0.);
+            assert!(list <= available);
+        }
+        assert_eq!(palette_geometry(1080.).2,380.);
     }
 
     #[test]

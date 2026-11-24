@@ -121,3 +121,11 @@ success, and request/path guards prevent stale results; failure is shown once
 per request. Reset readiness on selection/refresh. Add file kind subtitle and
 align inspector metadata labels. No new disk access in rendering; reduced-motion
 pictures snap. Text-preview layout and full visual comparison remain pending.
+
+## Stage 8 — menus, palette and dialogs (first slice)
+Palette and folder jump lists fit the actual viewport height and use shared
+geometry; context menu width and height are bounded. Keyboard navigation in
+command mode skips disabled commands, query changes select the first available
+command, disabled rows no longer attach click handlers. Prompt uses shared
+panel/title tokens. Added pure viewport and keyboard selection tests.
+Remaining: full small-window visual review, menu presence and content polish.

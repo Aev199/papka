@@ -2841,8 +2841,9 @@ impl Explorer {
     fn context_menu_view(&self, menu: &ContextMenu, phase:crate::popup_motion::Phase, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         // Never taller than the window: a long menu scrolls instead of
         // running past the bottom edge.
-        let max_height = window.viewport_size().height - px(16.);
-        let mut list = div().id(("context-menu", menu.serial as usize)).occlude().w(px(300.)).max_h(max_height)
+        let max_height = (window.viewport_size().height - px(ui::POPUP_MARGIN*2.)).max(px(0.));
+        let max_width = (window.viewport_size().width - px(ui::POPUP_MARGIN*2.)).max(px(0.));
+        let mut list = div().id(("context-menu", menu.serial as usize)).occlude().w(px(300.).min(max_width)).max_h(max_height)
             .overflow_y_scroll().p_1().flex().flex_col()
             .rounded(px(ui::PANEL_RADIUS)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -3384,11 +3385,11 @@ impl Explorer {
                     .child(div().text_size(px(12.)).text_color(rgb(if *permanent==0{TEXT_MUTED}else{DANGER})).child(note)).into_any_element(),confirm,ButtonKind::Danger)
             }
         };
-        let dialog=div().id("dialog").w(px(420.)).p_4().flex().flex_col().gap_3()
-            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
+        let dialog=div().id("dialog").w(px(420.)).max_w_full().p_4().flex().flex_col().gap_3()
+            .rounded(px(ui::PANEL_RADIUS)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .mt(px(6.*(1.-phase.alpha)))
             .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
-            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+            .child(div().text_size(px(ui::DIALOG_TITLE_TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(body)
             .child(div().flex().justify_end().gap_2()
                 .child(text_button("dialog-cancel","Отмена",ButtonKind::Ghost)
@@ -3792,7 +3793,7 @@ impl Render for Explorer {
             if phase.active {window.request_animation_frame();}
             let palette=self.palette.as_ref().or(self.motion.surfaces.palette.as_ref());
             let settings=self.settings.as_ref().or(self.motion.surfaces.settings.as_ref());
-            if let Some(overlay)=self.interface_overlay(palette,settings,phase,cx) {root=root.child(overlay);}
+            if let Some(overlay)=self.interface_overlay(palette,settings,phase,window,cx) {root=root.child(overlay);}
         } else {self.motion.surfaces.palette=None;self.motion.surfaces.settings=None;}
         if let Some((state,phase))=self.motion.surfaces.versions.sample(self.version_editing.clone(),now,animate) {
             if phase.active {window.request_animation_frame();}root=root.child(self.version_rules_dialog(&state,phase,cx));
