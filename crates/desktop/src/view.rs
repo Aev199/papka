@@ -71,7 +71,7 @@ fn manual_gap(height: f32) -> Div {
 }
 
 /// Keep the logical slot in the virtual list while its visible content moves.
-fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElement, width: Option<f32>, height: f32) -> Div {
+fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElement, width: Option<f32>, height: f32, directory:bool) -> Div {
     use crate::spatial_motion::{Geometry, Position};
     let pose = frame.pose(path, std::time::Instant::now());
     let record = frame.clone();
@@ -87,11 +87,29 @@ fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElem
     div().relative().h(px(height)).when_some(width, |slot, width| slot.w(px(width)))
         .when(width.is_none(), |slot| slot.w_full()).child(content)
         .on_prepaint(move |bounds, _, _| {
-            record.record(path.clone(), Geometry {
+            record.record_kind(path.clone(), Geometry {
                 origin: Position { x: bounds.origin.x / px(1.), y: bounds.origin.y / px(1.) },
                 size: Position { x: bounds.size.width / px(1.), y: bounds.size.height / px(1.) },
-            }, pose);
+            }, pose,directory);
         })
+}
+
+/// Lightweight icon/name silhouette with no input listeners or image assets.
+fn spatial_ghost(ghost: crate::spatial_motion::Ghost) -> Div {
+    let r=ghost.geometry;
+    let (glyph,tint)=if ghost.directory {("fm/folder-fill.svg",FOLDER)}
+        else {file_icon(ghost.path.extension().and_then(|v|v.to_str()))};
+    let name=browser::display_name(&ghost.path);
+    let tile=r.size.y>48.;
+    let item=div().absolute().left(px(r.origin.x)).top(px(r.origin.y))
+        .w(px(r.size.x)).h(px(r.size.y)).opacity(ghost.alpha).overflow_hidden()
+        .rounded(px(ui::CONTROL_RADIUS)).bg(rgb(SURFACE)).px_2().flex().items_center().gap_1();
+    if tile {
+        item.flex_col().justify_center().child(svg().path(glyph).size(px((r.size.y*0.35).clamp(16.,48.))).text_color(rgb(tint)))
+            .child(div().w_full().text_center().truncate().text_size(px(ui::SECONDARY_TEXT)).child(name))
+    } else {
+        item.child(icon(glyph,tint)).child(div().flex_1().min_w_0().truncate().text_size(px(ui::BODY_TEXT)).child(name))
+    }
 }
 
 fn column_scroll_area<I: Into<gpui::ElementId>>(id: I, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<I> {
@@ -447,11 +465,21 @@ impl Explorer {
         let navigation=if card {div().into_any_element()} else {self.nav_row(group,cx).into_any_element()};
         if card {self.motion.spatial.remove(&group);}
         let body=if card {self.project_card_view(cx)} else {self.pane(group,cx)};
+        let spatial=self.motion.spatial.get(&group).cloned();
+        let ghosts=spatial.as_ref().map_or_else(Vec::new,|m|m.ghosts(&self.pane_path(group),now));
+        let body=div().relative().flex_1().min_h_0().overflow_hidden()
+            .child(div().size_full().opacity(opacity).child(body))
+            .children(ghosts.into_iter().map(spatial_ghost))
+            .when_some(spatial,|body,spatial|body.on_prepaint(move|bounds,_,_| {
+                use crate::spatial_motion::{Geometry,Position};
+                spatial.viewport(Geometry{origin:Position{x:bounds.origin.x/px(1.),y:bounds.origin.y/px(1.)},
+                    size:Position{x:bounds.size.width/px(1.),y:bounds.size.height/px(1.)}});
+            }));
         div().id(SharedString::from(format!("group-{}",group.0))).size_full().min_w_0().min_h_0()
             .flex().flex_col().overflow_hidden().border_1()
             .border_color(rgb(if group==self.browser.active && self.browser.leaves().len()>1 {ACTIVE_PANE} else {BORDER}))
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx|this.focus_group(group,cx)))
-            .child(tabs).child(navigation).child(div().flex_1().min_h_0().opacity(opacity).child(body))
+            .child(tabs).child(navigation).child(body)
             .when_some(reveal,move|root,(folder,anchor)|root.on_prepaint(move|_,_,cx|cx.defer(move|cx|{
                 let _=weak.update(cx,|this,cx|{
                     if this.pane_path(group)!=folder{return;}
@@ -1708,7 +1736,7 @@ impl Explorer {
                                     let (alpha,dy)=entry_clock.map_or((1.,0.),|at|crate::motion_policy::entry_appearance(at.elapsed(),position));
                                     let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
                                     if let Some(frame)=&spatial_frame {
-                                        spatial_slot(frame,&entry.path,tile,Some(crate::thumbs::tile_width()),crate::thumbs::tile_height())
+                                        spatial_slot(frame,&entry.path,tile,Some(crate::thumbs::tile_width()),crate::thumbs::tile_height(),entry.is_directory)
                                             .absolute().left(left).top(px(y)).into_any_element()
                                     }else{div().absolute().left(left).top(px(y+dy)).w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).opacity(alpha).child(tile).into_any_element()} })
                                 .collect::<Vec<_>>();
@@ -1768,7 +1796,7 @@ impl Explorer {
                             let row=if manual_hidden.contains(&entry.path){manual_gap(row_height()).into_any_element()}
                                 else{this.row(entry, &folder, side, logical, on_trail, list_mode, list_mode && position % 2 == 1, cx)};
                             if let Some(frame)=&spatial_frame {
-                                spatial_slot(frame,&entry.path,row,None,row_height()).into_any_element()
+                                spatial_slot(frame,&entry.path,row,None,row_height(),entry.is_directory).into_any_element()
                             }else{row}
                         }).collect::<Vec<_>>()
                     }}))

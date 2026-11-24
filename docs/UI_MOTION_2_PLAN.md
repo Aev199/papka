@@ -145,3 +145,10 @@ stagger during explicit folder entrance only. The tail ends inside the
 existing 140 ms clock; no extra animation frame requests. Same-folder mode
 changes, watcher refresh, rename, marquee, file drag and spatial transitions
 skip the stagger. Test that delay and end time are bounded.
+
+### Stage 3 follow-up — noninteractive departures
+After destination measurement, unmatched visible source items fade as clipped
+generic icon/name silhouettes (at most 48). No retained live rows, handlers,
+thumbnail assets or filesystem reads. Same-folder scope, matching identity,
+viewport size guard. These are approximations, not GPU screenshots. Exact
+shared icon morph and first-destination-frame continuity remain to be refined.
