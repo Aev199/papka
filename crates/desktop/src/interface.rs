@@ -4,7 +4,7 @@ use crate::{
     theme::{self, *},
 };
 use filemanager_core::interface::{CommandId, CommandSpec, Preferences, commands};
-use gpui::{AnimationExt, AnyElement, Context, Entity, Focusable, Window, div, prelude::*, px};
+use gpui::{ AnyElement, Context, Entity, Focusable, Window, div, prelude::*, px};
 use gpui_component::input::{Input, InputState};
 
 pub(crate) struct Palette {
@@ -202,7 +202,7 @@ impl Explorer {
         if !self.command_enabled(&command) {
             return;
         }
-        self.palette = None;
+        self.motion.surfaces.retire_interface(self.palette.take(),None);
         window.focus(&self.focus_handle, cx);
         use CommandId::*;
         match command.id {
@@ -297,8 +297,8 @@ impl Explorer {
         if self.settings.as_ref().is_some_and(|s| s.saving) {
             return true;
         }
-        self.palette = None;
-        self.settings = None;
+        self.motion.surfaces.retire_interface(self.palette.take(),None);
+        self.motion.surfaces.retire_interface(None,self.settings.take());
         window.focus(&self.focus_handle, cx);
         cx.notify();
         true
@@ -363,7 +363,7 @@ impl Explorer {
                     this.light_preference = prefs.light;
                     this.set_look(look);
                     this.apply_theme(cx);
-                    this.settings = None;
+                    this.motion.surfaces.retire_interface(None,this.settings.take());
                     this.interface_focus_pending = true;
                     this.status = "Настройки сохранены".into();
                 }
@@ -373,8 +373,8 @@ impl Explorer {
         .detach();
         cx.notify();
     }
-    pub(crate) fn interface_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let body = if let Some(palette) = self.palette.as_ref().filter(|palette| palette.folders.is_some()) {
+    pub(crate) fn interface_overlay(&self, palette:Option<&Palette>, settings:Option<&Settings>, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let body = if let Some(palette) = palette.filter(|palette| palette.folders.is_some()) {
             let (list, footer) = self.jump_list(palette, cx);
             div().flex().flex_col().p_0()
                 .child(div().h(px(44.)).px_2().flex().items_center().border_b_1().border_color(rgb(BORDER))
@@ -387,7 +387,7 @@ impl Explorer {
                     .child("Enter перейти")
                     .child("Ctrl+щелчок — в новой вкладке")
                     .child("Esc закрыть"))
-        } else if let Some(palette) = self.palette.as_ref() {
+        } else if let Some(palette) = palette {
             // Atlas: search field on top, commands in sections with icons
             // and shortcut keys, key hints at the bottom.
             let results = commands(&palette.query);
@@ -457,7 +457,7 @@ impl Explorer {
                         .child("Enter выполнить")
                         .child("Esc закрыть"),
                 )
-        } else if let Some(settings) = self.settings.as_ref() {
+        } else if let Some(settings) = settings {
             // A check box row; arrows walk them, Space toggles.
             let check = |index: usize, cx: &mut Context<Self>| {
                 let on = flag_value(settings, index);
@@ -585,12 +585,12 @@ impl Explorer {
         Some(
             div()
                 .id("interface-overlay")
-                .key_context(if self.palette.is_some() {
+                .key_context(if palette.is_some() {
                     "CommandPalette"
                 } else {
                     "SettingsOverlay"
                 })
-                .when_some(self.settings.as_ref(), |overlay, s| {
+                .when_some(settings, |overlay, s| {
                     overlay.track_focus(&s.focus)
                 })
                 .absolute()
@@ -599,7 +599,7 @@ impl Explorer {
                 .items_start()
                 .justify_center()
                 .pt(px(64.))
-                .bg(gpui::rgba(0x00000088))
+                .bg(gpui::rgba(0x00000088)).opacity(phase.alpha)
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -609,23 +609,18 @@ impl Explorer {
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),
                 )
                 .child(
-                    body.id("interface-body").w(px(if self.palette.is_some() { 560. } else { 520. }))
+                    body.id("interface-body").w(px(if palette.is_some() { 560. } else { 520. }))
                         .max_w_full()
                         // The settings scroll on a small screen.
-                        .when(self.palette.is_none(), |body| body.p_4().max_h(gpui::relative(0.82)).flex().flex_col())
-                        .when(self.palette.is_some(), |body| body.overflow_hidden())
+                        .when(palette.is_none(), |body| body.p_4().max_h(gpui::relative(0.82)).flex().flex_col())
+                        .when(palette.is_some(), |body| body.overflow_hidden())
                         .rounded(px(6.))
                         .bg(rgb(RAISED))
                         .border_1()
                         .border_color(rgb(BORDER_STRONG))
-                        // Atlas fades and lifts its popups in about 120 ms;
-                        // navigation itself stays instant.
-                        .with_animation(
-                            if self.palette.is_some() { "palette-appear" } else { "settings-appear" },
-                            crate::theme::motion(120),
-                            |body, delta| body.opacity(delta).mt(px(-6. * (1. - delta))),
-                        ),
+                        .mt(px(-6.*(1.-phase.alpha))),
                 )
+                .when(phase.closing,|overlay|overlay.child(crate::popup_motion::shield()))
                 .into_any_element(),
         )
     }

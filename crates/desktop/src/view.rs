@@ -250,8 +250,9 @@ impl Explorer {
                 if event.click_count==2 { this.focus_group(group,cx); this.add_tab(cx); }
             }))
             .drag_over::<TabDrag>(|style,_,_,_|style)
-            .on_drag_move::<TabDrag>(cx.listener(move |this,event:&gpui::DragMoveEvent<TabDrag>,_,cx| {
-                if this.browser.group(group).is_none_or(|g|g.tabs.len()!=count) || this.motion.tab_gap(group).is_some() {return;}
+            .on_drag_move::<TabDrag>(cx.listener(move |this,event:&gpui::DragMoveEvent<TabDrag>,window,cx| {
+                if this.browser.group(group).is_none_or(|g|g.tabs.len()!=count) {this.motion.tab_reorder.reset();cx.stop_active_drag(window);return;}
+                if this.motion.tab_gap(group).is_some() {return;}
                 let drag=event.drag(cx);
                 // Direct children are stationary layout slots; their contents can move.
                 let x=(event.event.position.x-event.bounds.origin.x-drag_scroll.offset().x)/px(1.);
@@ -757,7 +758,7 @@ impl Explorer {
 
     /// «О программе» under its titlebar button, as in SoilStiffness:
     /// a click elsewhere or Esc closes it.
-    fn about_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn about_panel(&self, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         let data = filemanager_core::path_utils::app_data_dir().display().to_string();
         div().id("about-backdrop").absolute().inset_0()
             .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.about_open=false;cx.notify();}))
@@ -787,7 +788,8 @@ impl Explorer {
                     .when(crate::updates::Updates::previous_exists(), |row| row.child(text_button("about-rollback", "Вернуть предыдущую версию", ButtonKind::Ghost)
                         .on_click(cx.listener(|this,_,_,cx| {this.about_open=false;this.rollback_update(cx);})))))
                 .when_some(self.updates.note.clone(), |panel, note| panel.child(div().text_color(rgb(TEXT)).child(note))))
-            .with_animation("about-appear", motion(130), |this, delta| this.opacity(delta).mt(px(-6. * (1. - delta))))
+            .mt(px(-6.*(1.-phase.alpha)))
+            .opacity(phase.alpha).when(phase.closing,|surface|surface.child(crate::popup_motion::shield()))
             .into_any_element()
     }
 
@@ -2694,7 +2696,7 @@ impl Explorer {
         row
     }
 
-    fn context_menu_view(&self, menu: &ContextMenu, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn context_menu_view(&self, menu: &ContextMenu, phase:crate::popup_motion::Phase, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         // Never taller than the window: a long menu scrolls instead of
         // running past the bottom edge.
         let max_height = window.viewport_size().height - px(16.);
@@ -3104,11 +3106,8 @@ impl Explorer {
                         }))));
             }
         }
-        let animated = list.with_animation(
-            ("menu-appear", menu.serial as usize),
-            motion(130),
-            |this, delta| this.opacity(delta).mt(px(-6. * (1. - delta))),
-        );
+        let animated=list.relative().opacity(phase.alpha).mt(px(-6.*(1.-phase.alpha)))
+            .when(phase.closing,|list|list.child(crate::popup_motion::shield()));
         deferred(anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(animated))
             .with_priority(1)
             .into_any_element()
@@ -3223,83 +3222,61 @@ impl Explorer {
         )
     }
 
-    fn dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (title, body, confirm, kind): (&str, AnyElement, &str, ButtonKind) = if let Some(error)=&self.close_error {
-            ("Сеанс не сохранён", div().flex().flex_col().gap_2()
+    fn dialog_content(&self)->Option<crate::popup_motion::Prompt> {
+        use crate::popup_motion::Prompt::*;
+        if let Some(error)=&self.close_error {Some(CloseError(error.clone()))}
+        else if self.creating_folder {Some(NewItem{file:self.creating_file,path:self.pane_path(self.active_side()).display().to_string()})}
+        else if self.saving_workspace {Some(Project{count:self.browser.active_group().tabs.len(),error:self.project_error.clone()})}
+        else {self.confirm_recycle.as_ref().map(|plans|Delete{
+            what:match plans.as_slice(){[(path,_) ]=>format!("«{}»",browser::display_name(path)),many=>format!("Элементов: {} («{}» и другие)",many.len(),many.first().map(|(p,_)|browser::display_name(p)).unwrap_or_default())},
+            permanent:plans.iter().filter(|(_,plan)|plan.action==filemanager_core::operations::Action::Delete).count(),total:plans.len(),
+        })}
+    }
+
+    fn dialog(&self,state:&crate::popup_motion::Prompt,phase:crate::popup_motion::Phase,cx:&mut Context<Self>)->AnyElement {
+        use crate::popup_motion::Prompt::*;
+        let (title,body,confirm,kind):(&str,AnyElement,&str,ButtonKind)=match state {
+            CloseError(error)=>("Сеанс не сохранён",div().flex().flex_col().gap_2()
                 .child("Остаться и повторить сохранение или закрыть окно без сохранения последних изменений?")
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(error.clone()))
-                .into_any_element(), "Закрыть без сохранения", ButtonKind::Danger)
-        } else if self.creating_folder {
-            (if self.creating_file { "Новый файл" } else { "Новая папка" }, div().flex().flex_col().gap_2()
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(format!("В папке: {}", self.pane_path(self.active_side()).display())))
-                .child(Input::new(&self.folder_input)).into_any_element(), "Создать", ButtonKind::Primary)
-        } else if self.saving_workspace {
-            ("Создать проект", div().flex().flex_col().gap_2()
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(format!("Вкладки активной панели: {}", self.browser.active_group().tabs.len())))
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(error.clone())).into_any_element(),"Закрыть без сохранения",ButtonKind::Danger),
+            NewItem{file,path}=>(if *file{"Новый файл"}else{"Новая папка"},div().flex().flex_col().gap_2()
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("В папке: {path}")))
+                .child(Input::new(&self.folder_input)).into_any_element(),"Создать",ButtonKind::Primary),
+            Project{count,error}=>("Создать проект",div().flex().flex_col().gap_2()
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("Вкладки активной панели: {count}")))
                 .child(Input::new(&self.workspace_input))
-                .when_some(self.project_error.clone(), |body,error|body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error)))
-                .into_any_element(), "Сохранить", ButtonKind::Primary)
-        } else if let Some(plans) = &self.confirm_recycle {
-            let what = match plans.as_slice() {
-                [(path, _)] => format!("«{}»", browser::display_name(path)),
-                many => format!("Элементов: {} («{}» и другие)", many.len(),
-                    many.first().map(|(p, _)| browser::display_name(p)).unwrap_or_default()),
-            };
-            let permanent = plans.iter().filter(|(_, plan)| plan.action == filemanager_core::operations::Action::Delete).count();
-            let (title, note, confirm) = if permanent == 0 {
-                ("Удалить в Корзину?", "Объект можно будет восстановить из Корзины Windows.".to_owned(), "В Корзину")
-            } else if permanent == plans.len() {
-                ("Удалить безвозвратно?", "Здесь нет Корзины Windows (сетевая папка или съёмный диск). \
-                    Удалённое нельзя будет восстановить, Ctrl+Z не поможет.".to_owned(), "Удалить навсегда")
-            } else {
-                ("Удалить?", format!("{permanent} из {} — в папках без Корзины Windows: они будут удалены \
-                    безвозвратно. Остальные — в Корзину.", plans.len()), "Удалить")
-            };
-            (title, div().flex().flex_col().gap_1().text_size(px(13.))
-                .child(div().text_color(rgb(TEXT)).child(what))
-                .child(div().text_size(px(12.)).text_color(rgb(if permanent == 0 { TEXT_MUTED } else { DANGER })).child(note))
-                .into_any_element(), confirm, ButtonKind::Danger)
-        } else {
-            return None;
+                .when_some(error.clone(),|body,error|body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error)))
+                .into_any_element(),"Сохранить",ButtonKind::Primary),
+            Delete{what,permanent,total}=>{
+                let (title,note,confirm)=if *permanent==0 {("Удалить в Корзину?","Объект можно будет восстановить из Корзины Windows.".to_owned(),"В Корзину")}
+                    else if permanent==total {("Удалить безвозвратно?","Здесь нет Корзины Windows (сетевая папка или съёмный диск). Удалённое нельзя будет восстановить, Ctrl+Z не поможет.".to_owned(),"Удалить навсегда")}
+                    else {("Удалить?",format!("{permanent} из {total} — в папках без Корзины Windows: они будут удалены безвозвратно. Остальные — в Корзину."),"Удалить")};
+                (title,div().flex().flex_col().gap_1().text_size(px(13.))
+                    .child(div().text_color(rgb(TEXT)).child(what.clone()))
+                    .child(div().text_size(px(12.)).text_color(rgb(if *permanent==0{TEXT_MUTED}else{DANGER})).child(note)).into_any_element(),confirm,ButtonKind::Danger)
+            }
         };
-        let dialog = div().id("dialog").w(px(420.)).p_4().flex().flex_col().gap_3()
+        let dialog=div().id("dialog").w(px(420.)).p_4().flex().flex_col().gap_3()
             .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .mt(px(6.*(1.-phase.alpha)))
+            .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
             .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(body)
             .child(div().flex().justify_end().gap_2()
-                .child(text_button("dialog-cancel", "Отмена", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.key_dismiss(&keys::DismissOverlay, window, cx);
-                    })))
-                .child(text_button("dialog-confirm", confirm, kind)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.close_error.take().is_some() {
-                            this.close_document_preview(cx);window.remove_window();return;
-                        } else if this.saving_workspace {
-                            this.save_named_workspace(cx);
-                        } else if this.creating_folder {
-                            this.create_folder(cx);
-                        } else {
-                            this.recycle(cx);
-                        }
-                        let handle = this.focus_handle.clone();
-                        window.focus(&handle, cx);
-                    }))))
-            .with_animation("dialog-appear",
-                motion(150),
-                |this, delta| this.opacity(delta).mt(px(12. * (1. - delta))));
-        Some(
-            div().id("dialog-backdrop").absolute().inset_0().flex().items_center().justify_center()
-                .bg(rgba(0x0000008C))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                    this.key_dismiss(&keys::DismissOverlay, window, cx);
-                }))
-                .child(dialog)
-                .into_any_element()
-        )
+                .child(text_button("dialog-cancel","Отмена",ButtonKind::Ghost)
+                    .on_click(cx.listener(|this,_,window,cx|this.key_dismiss(&keys::DismissOverlay,window,cx))))
+                .child(text_button("dialog-confirm",confirm,kind)
+                    .on_click(cx.listener(|this,_,window,cx|{
+                        if this.close_error.take().is_some(){this.close_document_preview(cx);window.remove_window();return;}
+                        else if this.saving_workspace{this.save_named_workspace(cx);}
+                        else if this.creating_folder{this.create_folder(cx);}
+                        else{this.recycle(cx);}
+                        window.focus(&this.focus_handle,cx);
+                    }))));
+        div().id("dialog-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C)).opacity(phase.alpha)
+            .on_mouse_down(MouseButton::Left,cx.listener(|this,_,window,cx|this.key_dismiss(&keys::DismissOverlay,window,cx)))
+            .child(dialog).when(phase.closing,|surface|surface.child(crate::popup_motion::shield())).into_any_element()
     }
 }
 
@@ -3308,6 +3285,8 @@ impl Render for Explorer {
         #[cfg(windows)]
         if self.hwnd.is_none() { self.hwnd = crate::window_hwnd(window); }
         if self.interface_focus_pending {self.interface_focus_pending=false;window.focus(&self.focus_handle,cx);}
+        let tab_counts=self.browser.groups.iter().map(|g|(g.id,g.tabs.len())).collect::<Vec<_>>();
+        if self.motion.tab_reorder.invalidate_changed_counts(&tab_counts) {cx.stop_active_drag(window);}
         self.validate_marquee(cx);
         self.motion.progress(self.transfers.fraction);
         let edge_moving = self.edge_scroll_frame(cx);
@@ -3383,6 +3362,14 @@ impl Render for Explorer {
             .child(late_frame)
             .text_color(rgb(TEXT)).text_size(px(13.))
             .key_context("Filemanager")
+            .capture_key_down(cx.listener(|this,event:&gpui::KeyDownEvent,_,cx|{
+                let replacement=this.palette.is_some() || this.settings.is_some() || this.tour.is_some() || this.comparison.is_some() || this.dialog_content().is_some();
+                let closing=!replacement && (this.motion.surfaces.interface.closing || this.motion.surfaces.palette.is_some() || this.motion.surfaces.settings.is_some() || this.motion.surfaces.prompt.retained()
+                    || (!this.about_open && this.motion.surfaces.about.retained())
+                    || (this.context_menu.is_none() && this.motion.surfaces.menu.retained()));
+                let reopen=event.keystroke.modifiers.control && matches!(event.keystroke.key.as_str(),"k"|"p"|",");
+                if closing && !reopen {cx.stop_propagation();}
+            }))
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this,_: &keys::PaletteEnter,window,cx|this.palette_enter(window,cx)))
             .on_action(cx.listener(|this,_: &keys::SettingsToggle,_,cx|this.settings_toggle(cx)))
@@ -3585,11 +3572,18 @@ impl Render for Explorer {
                     .child(self.title_bar(window,cx))
                         .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
                     .child(self.status_bar(cx))));
-        if let Some(menu) = self.context_menu.clone() {
-            root = root.child(self.context_menu_view(&menu, window, cx));
+        let now=std::time::Instant::now();let animate=crate::theme::animations();
+        if self.context_menu.is_none() && (self.palette.is_some() || self.settings.is_some() || self.dialog_content().is_some() || self.tour.is_some() || self.comparison.is_some() || self.about_open) {
+            self.motion.surfaces.menu=Default::default();
         }
-        if let Some(dialog) = self.dialog(cx) {
-            root = root.child(dialog);
+        if let Some((menu,phase))=self.motion.surfaces.menu.sample_identity(self.context_menu.clone().map(|menu|(menu.serial,menu)),now,animate) {
+            if phase.active {window.request_animation_frame();}
+            root=root.child(self.context_menu_view(&menu,phase,window,cx));
+        }
+        let prompt=self.dialog_content();
+        if let Some((state,phase))=self.motion.surfaces.prompt.sample(prompt,now,animate) {
+            if phase.active {window.request_animation_frame();}
+            root=root.child(self.dialog(&state,phase,cx));
         }
         if let Some(dialog) = self.conflict_dialog(cx) {
             root = root.child(dialog);
@@ -3613,11 +3607,23 @@ impl Render for Explorer {
             if finished {self.quick_look=None;} else {root=root.child(self.quick_look_view(shell,content,loading,cx));}
         }
         if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
-        if self.about_open { root=root.child(self.about_panel(cx)); }
+        if let Some((_,phase))=self.motion.surfaces.about.sample(self.about_open.then_some(()),now,animate) {
+            if phase.active {window.request_animation_frame();}
+            root=root.child(self.about_panel(phase,cx));
+        }
         if let Some(panel)=self.transfer_panel(cx) { root=root.child(panel); }
         if let Some(dialog)=self.update_dialog(cx) { root=root.child(dialog); }
         if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
-        if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
+        let live_interface=self.palette.is_some() || self.settings.is_some();
+        let replaced=self.about_open || self.tour.is_some() || self.comparison.is_some() || self.creating_folder || self.saving_workspace || self.confirm_recycle.is_some();
+        if live_interface || replaced {self.motion.surfaces.palette=None;self.motion.surfaces.settings=None;}
+        if replaced {self.motion.surfaces.interface=Default::default();}
+        if let Some(phase)=self.motion.surfaces.interface.sample(live_interface,now,animate) {
+            if phase.active {window.request_animation_frame();}
+            let palette=self.palette.as_ref().or(self.motion.surfaces.palette.as_ref());
+            let settings=self.settings.as_ref().or(self.motion.surfaces.settings.as_ref());
+            if let Some(overlay)=self.interface_overlay(palette,settings,phase,cx) {root=root.child(overlay);}
+        } else {self.motion.surfaces.palette=None;self.motion.surfaces.settings=None;}
         if let Some(dialog)=self.version_rules_dialog(cx) { root=root.child(dialog); }
         root
     }

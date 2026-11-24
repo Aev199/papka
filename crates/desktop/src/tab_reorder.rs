@@ -58,6 +58,18 @@ impl TabReorder {
         }
     }
 
+    /// Invalidate a pending preview when either participating pane changed
+    /// size since its last sampled layout. The caller can then stop the drag.
+    pub fn invalidate_changed_counts(&mut self, current: &[(GroupId, usize)]) -> bool {
+        let Some(target) = self.target else { return false; };
+        let count_for = |group: GroupId| current.iter().find(|(id, _)| *id == group).map(|(_, count)| *count);
+        let changed = [target.from, target.to].into_iter().any(|group| {
+            count_for(group).is_none_or(|count| self.counts.get(&group) != Some(&count))
+        }) || count_for(target.from).is_some_and(|count| target.index >= count);
+        if changed { self.reset(); }
+        changed
+    }
+
     /// Sample horizontal offsets for each tab and an optional trailing spacer.
     /// The strip owns the 4 px flex gap, so trailing width excludes that gap.
     pub fn sample(
@@ -235,6 +247,34 @@ mod tests {
         assert_eq!(extra, 45.);
         reorder.set_target(target(id(1), 7, id(2), 0, 45.));
         assert_eq!(reorder.destination(id(2), id(1), 7, 3), Some(0));
+    }
+
+    #[test]
+    fn changed_source_or_destination_counts_cancel_the_drag() {
+        let now=Instant::now();let mut reorder=TabReorder::default();
+        reorder.sample(id(1),&[30.,40.],now,false);
+        reorder.sample(id(2),&[50.],now,false);
+        reorder.set_target(target(id(1),1,id(2),0,40.));
+        assert!(!reorder.invalidate_changed_counts(&[(id(1),2),(id(2),1),(id(3),9)]));
+        assert!(reorder.invalidate_changed_counts(&[(id(1),3),(id(2),1)]));
+        assert!(reorder.target.is_none());
+        reorder.sample(id(1),&[30.,40.],now,false);
+        reorder.sample(id(2),&[50.],now,false);
+        reorder.set_target(target(id(1),1,id(2),0,40.));
+        assert!(reorder.invalidate_changed_counts(&[(id(1),2),(id(2),2)]));
+    }
+
+    #[test]
+    fn missing_panes_and_invalid_sources_cancel_but_idle_changes_do_not() {
+        let now=Instant::now();let mut reorder=TabReorder::default();
+        assert!(!reorder.invalidate_changed_counts(&[(id(1),1)]));
+        reorder.sample(id(1),&[30.],now,false);
+        reorder.sample(id(2),&[40.],now,false);
+        reorder.set_target(target(id(1),0,id(2),0,30.));
+        assert!(reorder.invalidate_changed_counts(&[(id(1),1)]));
+        reorder.sample(id(1),&[30.],now,false);
+        reorder.set_target(target(id(1),2,id(1),0,30.));
+        assert!(reorder.invalidate_changed_counts(&[(id(1),1)]));
     }
 
     #[test]

@@ -70,7 +70,7 @@ impl Explorer {
     pub(crate) fn open_jump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             // Ctrl+P again closes it, as a toggle.
-            self.palette = None;
+            self.motion.surfaces.retire_interface(self.palette.take(),None);
             window.focus(&self.focus_handle, cx);
             cx.notify();
             return;
@@ -153,7 +153,7 @@ impl Explorer {
     }
 
     pub(crate) fn jump_to(&mut self, path: PathBuf, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
+        self.motion.surfaces.retire_interface(self.palette.take(),None);
         window.focus(&self.focus_handle, cx);
         if !path.is_dir() {
             self.status = format!("Папка недоступна: {}", path.display());
