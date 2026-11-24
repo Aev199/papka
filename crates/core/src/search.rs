@@ -98,9 +98,17 @@ pub fn preview(path: &Path, max_bytes: u64) -> io::Result<Preview> {
     if bytes.contains(&0) {
         return Ok(Preview { kind: "binary", description: format!("Двоичный файл · {} байт", meta.len()) });
     }
+    // A byte-limited read may end inside a valid UTF-8 character. Do not
+    // classify a Russian text file as binary just because of that boundary.
+    let truncated = meta.len() > bytes.len() as u64;
+    if truncated {
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            if error.error_len().is_none() { bytes.truncate(error.valid_up_to()); }
+        }
+    }
     match String::from_utf8(bytes) {
         Ok(mut text) => {
-            if meta.len() > max_bytes.min(16 * 1024) { text.push_str("\n… (показано начало файла)"); }
+            if truncated { text.push_str("\n… (показано начало файла)"); }
             Ok(Preview { kind: "text", description: text })
         }
         Err(_) => Ok(Preview { kind: "binary", description: format!("Двоичный файл или не UTF-8 · {} байт", meta.len()) }),
@@ -110,6 +118,18 @@ pub fn preview(path: &Path, max_bytes: u64) -> io::Result<Preview> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_does_not_misclassify_a_split_utf8_character() {
+        let temp=tempfile::tempdir().unwrap();
+        let path=temp.path().join("test.txt");
+        fs::write(&path,"Привет").unwrap();
+        let result=preview(&path,3).unwrap();
+        assert_eq!(result.kind,"text");
+        assert!(result.description.starts_with("П\n"));
+        fs::write(&path,[0xff,0x80,0x41]).unwrap();
+        assert_eq!(preview(&path,2).unwrap().kind,"binary");
+    }
+
     #[test]
     fn fuzzy_and_bounded_preview() {
         assert!(subsequence_score("foundation_model.xlsx", "fmdl").is_some());

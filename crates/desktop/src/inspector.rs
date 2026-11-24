@@ -22,7 +22,7 @@ pub(crate) struct InspectorState {
 
 impl Explorer {
     pub(crate) fn load_selected_thumbnail(&mut self, cx: &mut Context<Self>) {
-        if self.inspector.thumbnail_busy || self.inspector.thumbnail.is_some() || self.inspector.thumbnail_failed {
+        if self.inspector.path != self.selected || self.inspector.thumbnail_busy || self.inspector.thumbnail.is_some() || self.inspector.thumbnail_failed {
             return;
         }
         let Some(path) = self.selected.clone().filter(|p| wants_shell_thumbnail(p) && !filemanager_core::archive::is_inside(p)) else {

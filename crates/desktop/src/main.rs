@@ -826,6 +826,9 @@ impl Explorer {
             return;
         };
         self.inspector.loading = true;
+        // Thumbnail and metadata use separate bounded worker slots; slow
+        // version enumeration should not delay an available preview.
+        self.load_selected_thumbnail(cx);
         if self.inspector.details_busy { return; }
         self.inspector.details_busy = true;
         let history_journal = self.journal.clone();

@@ -28,6 +28,7 @@ pub(crate) const CHECKBOX_SIZE: f32 = 16.;
 pub(crate) const CHECKMARK_SIZE: f32 = 12.;
 pub(crate) const INSPECTOR_LABEL_WIDTH: f32 = 84.;
 pub(crate) const INSPECTOR_PREVIEW_HEIGHT: f32 = 240.;
+pub(crate) const INSPECTOR_TEXT_HEIGHT: f32 = 220.;
 pub(crate) const JUMP_ROW_HEIGHT: f32 = 40.;
 pub(crate) const POPUP_MARGIN: f32 = 8.;
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 32.;

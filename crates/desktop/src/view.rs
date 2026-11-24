@@ -2382,8 +2382,9 @@ impl Explorer {
             let mut bytes = 0u64;
             if let Some(folder) = self.marked[0].parent().map(Path::to_path_buf) {
                 if let Some((listing, _)) = self.folder_view(self.browser.active, &folder) {
-                    for entry in listing.entries.iter().filter(|e| self.marked.contains(&e.path)) {
-                        if entry.is_directory { folders += 1 } else { files += 1; bytes += entry.size; }
+                    let marked:std::collections::HashSet<_>=self.marked.iter().collect();
+                    for entry in listing.entries.iter().filter(|e| marked.contains(&e.path)) {
+                        if entry.is_directory { folders += 1 } else { files += 1; bytes = bytes.saturating_add(entry.size); }
                     }
                 }
             }
@@ -2558,24 +2559,42 @@ impl Explorer {
                 .child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child("Предпросмотр"))
                 .child(frame).into_any_element();
         }
+        if !current || entry.is_directory { return div().into_any_element(); }
+        // Text is only a bounded snippet, not an editor. Give it its own
+        // scroll identity so another selected file opens at the start.
+        let expected_text=entry.extension().is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(),
+            "txt"|"md"|"csv"|"log"|"ini"|"json"|"xml"|"yaml"|"yml"|"toml"|"rs"|"py"|"js"|"ts"|"html"|"css"));
+        let text=self.inspector.preview.as_ref().filter(|(kind,_)|kind=="text");
+        if text.is_some() || (expected_text && self.inspector.loading) {
+            let mut frame=div().relative().h(px(ui::INSPECTOR_TEXT_HEIGHT)).min_w_0().flex_none()
+                .rounded(px(ui::PANEL_RADIUS)).bg(rgb(SURFACE)).border_1().border_color(rgb(BORDER)).overflow_hidden();
+            if let Some((_,description))=text {
+                frame=frame.child(div().id(SharedString::from(format!("preview-text:{}",entry.path.display())))
+                    .size_full().p_2().overflow_scrollbar().font_family("monospace").text_size(px(ui::SECONDARY_TEXT))
+                    .text_color(rgb(TEXT))
+                    .child(div().flex().flex_col().children(description.split('\n').enumerate().map(|(index,line)|
+                        div().flex().items_start().gap_2().flex_none()
+                            .child(div().w(px(28.)).flex_none().text_color(rgb(TEXT_DIM)).child((index+1).to_string()))
+                            .child(div().whitespace_nowrap().flex_none().child(if line.is_empty() {" ".to_owned()}else{line.to_owned()}))))));
+            } else {
+                frame=frame.child(div().size_full().flex().items_center().justify_center()
+                    .text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child("Загрузка текста…"));
+            }
+            return div().flex().flex_col().gap_1()
+                .child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child("Начало файла"))
+                .child(frame).into_any_element();
+        }
+        if let Some((kind,description))=&self.inspector.preview {
+            if kind=="Файл недоступен" {
+                return div().flex().flex_col().gap_1().p_2().rounded(px(ui::CONTROL_RADIUS)).bg(rgb(DANGER_SOFT))
+                    .text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(DANGER))
+                    .child("Файл недоступен").child(description.clone()).into_any_element();
+            }
+        }
         if self.inspector.loading {
-            return div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Загрузка предпросмотра…").into_any_element();
+            return div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_DIM)).child("Загрузка сведений…").into_any_element();
         }
-        match &self.inspector.preview {
-            // Other kinds only restate the type and size shown above.
-            Some((kind, description)) if self.inspector.path == self.selected
-                && matches!(kind.as_str(), "text" | "Файл недоступен") => div().flex().flex_col().gap_1()
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(match kind.as_str() {
-                    "Файл недоступен" => "Файл недоступен",
-                    _ => "Предпросмотр",
-                }))
-                .child(div().id("preview-text").h(px(260.)).min_w_0().overflow_scrollbar()
-                    .text_size(px(12.)).font_family("monospace").text_color(rgb(TEXT_MUTED))
-                    .child(div().flex().flex_col().children(description.lines().enumerate().map(|(index,line)|
-                        div().id(("preview-line",index)).whitespace_nowrap().flex_none().child(if line.is_empty() {" ".to_owned()} else {line.to_owned()})))))
-                .into_any_element(),
-            _ => div().into_any_element(),
-        }
+        div().into_any_element()
     }
 
     /// What changed in the current folder and its subfolders: newest first,

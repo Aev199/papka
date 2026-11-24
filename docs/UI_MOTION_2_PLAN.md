@@ -181,3 +181,13 @@ presence retargets from the sampled opacity when an opening column immediately
 closes or a departing column returns; no stale ghost on project-card cover.
 Keyboard selection plate respects reduced motion even if disabled mid-flight.
 Added width and interrupted-presence regression tests.
+
+### Stage 7 follow-up — text preview and concurrent readiness
+Text snippets use a framed, independently scrolling area with line numbers,
+path-specific scroll identity, and stable loading height for common text types.
+Read errors use the theme-aware danger surface rather than a code viewport.
+Fix a UTF-8 snippet truncated in the middle of a multibyte character; preserve
+binary detection for invalid bytes. Thumbnail work starts independently of
+metadata/version enumeration, still one worker and guarded by request/path.
+Multi-selection counts use a HashSet rather than repeated linear membership.
+No filesystem reads added to paint. Visual verification remains deferred.
