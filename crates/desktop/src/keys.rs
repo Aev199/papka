@@ -144,6 +144,8 @@ impl Explorer {
         // The quick filter applies to the focused pane's folder only.
         let filter = if group == self.browser.active && folder == self.pane_path(group) { self.filter.clone() } else { String::new() };
         let spec = self.sort_for(group);
+        let manual_revision = self.manual_orders.revision();
+        let manual = self.manual_orders.enabled(folder);
         let sizes = if spec.key == filemanager_core::sort::SortKey::Size { self.sizes.revision } else { 0 };
         let label_filter = self.label_filter(group);
         let labels_rev = if label_filter.is_some() { self.labels.revision } else { 0 };
@@ -151,6 +153,7 @@ impl Explorer {
         if let Some(view) = self.folder_views.get(&(group,folder.to_path_buf())) {
             if Arc::ptr_eq(&view.listing, &listing)
                 && view.spec == spec
+                && view.manual_revision == manual_revision
                 && view.sizes == sizes
                 && view.show_hidden == self.show_hidden
                 && view.filter == filter
@@ -174,8 +177,9 @@ impl Explorer {
         if let Some(kind) = kind_filter {
             indices.retain(|&row| listing.entries[row].is_directory || filemanager_core::kinds::Kind::of(&listing.entries[row].path) == Some(kind));
         }
-        // Versions of one document fold into its newest file.
-        let (indices, stacks) = if self.stack_versions {
+        if manual { self.manual_orders.apply(folder, &listing.entries, &mut indices); }
+        // Versions of one document fold into its newest file unless manual order is enabled.
+        let (indices, stacks) = if self.stack_versions && !manual {
             let name_of = |row: usize| { let entry = &listing.entries[row]; (!entry.is_directory).then(|| entry.name.clone()) };
             let open = |key: &str| self.open_stacks.contains(&(folder.to_path_buf(), key.to_owned()));
             let (order, roles) = filemanager_core::versions::stack(&indices, &name_of, &open);
@@ -202,6 +206,7 @@ impl Explorer {
         self.folder_views.insert((group,folder.to_path_buf()), FolderView {
             listing: Arc::clone(&listing),
             spec,
+            manual_revision,
             sizes,
             show_hidden: self.show_hidden,
             filter,
@@ -1056,6 +1061,7 @@ impl Explorer {
         self.motion.docks.retain(|id,_| ids.contains(id));
         self.motion.modes.retain(|id,_| ids.contains(id));
         self.motion.spatial.retain(|id,_| ids.contains(id));
+        self.manual_drag.prune(&ids);
         self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));

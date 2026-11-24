@@ -1229,7 +1229,7 @@ impl Explorer {
             .child(div().flex_1().child(format!("Для переноса: {}", items.len())))
             .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("тяните"))
             .tooltip(|window, cx| Tooltip::new("Перетащите в папку или панель: тот же диск — перенос, другой — копия; Ctrl — копия, Shift — перенос").build(window, cx))
-            .on_drag(FileDragInfo { paths: items.to_vec() }, preview(self.drag_target.clone())));
+            .on_drag(FileDragInfo { paths: items.to_vec(), source: None }, preview(self.drag_target.clone())));
         for (index, path) in items.iter().take(5).enumerate() {
             zone = zone.child(
                 div().id(("zone-item", index)).flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT))
@@ -1237,7 +1237,7 @@ impl Explorer {
                     .child(small_icon(if self.zone.is_folder(path) { "fm/folder-fill.svg" } else { "fm/file.svg" },
                         if self.zone.is_folder(path) { FOLDER } else { TEXT_MUTED }))
                     .child(div().flex_1().min_w_0().truncate().child(browser::display_name(path)))
-                    .on_drag(FileDragInfo { paths: vec![path.clone()] }, preview(self.drag_target.clone()))
+                    .on_drag(FileDragInfo { paths: vec![path.clone()], source: None }, preview(self.drag_target.clone()))
             );
         }
         if items.len() > 5 {
@@ -1446,7 +1446,7 @@ impl Explorer {
     fn list_header(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
         let spec = self.sort_for(side);
         let header = |id: &'static str, label: &'static str, key: SortKey, cx: &mut Context<Self>| {
-            let active = spec.key == key;
+            let active = spec.key == key && !self.manual_orders.enabled(&self.pane_path(side));
             div().id(id).h_full().px_2().flex().items_center().gap_1().cursor_pointer()
                 .text_color(rgb(if active { TEXT } else { TEXT_DIM }))
                 .hover(|style| style.text_color(rgb(TEXT)))
@@ -1454,6 +1454,7 @@ impl Explorer {
                 .when(active, |this| this.child(if spec.descending { "↓" } else { "↑" }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     // Each pane sorts on its own.
+                    this.set_manual_order(side, false, cx);
                     let next = this.sort_for(side).toggled(key);
                     this.sorts.insert(side, next);
                     cx.notify();
@@ -1554,7 +1555,9 @@ impl Explorer {
             // Files dropped on the empty space or a file row land in this folder.
             .drag_over::<FileDragInfo>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener(move |this, data: &FileDragInfo, window, cx| {
-                this.drop_files(&data.paths, drop_folder.clone(), window.modifiers(), cx);
+                if !this.commit_manual_drop(side, &drop_folder, data, window.modifiers(), cx) {
+                    this.drop_files(&data.paths, drop_folder.clone(), window.modifiers(), cx);
+                }
             }))
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if let Some(drag) = this.right_drag.as_mut().filter(|drag| drag.active && !drag.claimed) {
@@ -1599,6 +1602,16 @@ impl Explorer {
                 Some(frame)
             }else{None};
             let handle = self.scroll_handle(side, &folder);
+            let logical_indices = indices.clone();
+            let tiles = list_mode && self.thumbs_view(side);
+            let columns = if tiles { crate::thumbs::columns(self.pane_width_for(side)) } else { 1 };
+            let cell = if tiles { (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP, crate::thumbs::tile_height()+crate::thumbs::TILE_GAP) }
+                else { (self.pane_width_for(side).max(1.), row_height()) };
+            let manual = self.manual_display(side, &folder, &listing, &indices, &handle.0.borrow().base_handle, columns, cell, tiles, now, cx);
+            let manual_present = manual.is_some();
+            let (indices, manual_hidden, manual_geometry) = manual.map_or_else(
+                || (indices, std::sync::Arc::new(std::collections::HashSet::new()), None),
+                |display| (display.order, display.hidden, display.geometry));
             let count = indices.len();
             let list_id = SharedString::from(format!("list-{}-{}", side.0, folder.display()));
             let background_marquee_folder=folder.clone();
@@ -1614,7 +1627,7 @@ impl Explorer {
                 self.thumb_columns.insert(side, per_row);
                 let rows = count.div_ceil(per_row);
                 let list_id = SharedString::from(format!("{list_id}-grid-{per_row}-{}",crate::thumbs::size()));
-                let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some() || self.dragging_files(cx);
+                let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some() || (self.dragging_files(cx) && !manual_present);
                 let moving = self.motion.grids.entry(side).or_default().prepare(&folder, &listing, indices.clone(), per_row,
                     (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP, crate::thumbs::tile_height()+crate::thumbs::TILE_GAP), instant, std::time::Instant::now());
                 if moving {self.motion.late_frame.set(true);}
@@ -1624,7 +1637,7 @@ impl Explorer {
                         range.map(|row| {
                             let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
                                 .map(|position| { let entry = listing.entries[indices[position]].clone(); let (x,y)=this.motion.grids.get(&side).map_or((0.,0.),|grid|grid.offset(&entry.path,std::time::Instant::now()));
-                                    let tile=this.tile(&entry, &folder, side, cx);
+                                    let tile=this.tile(&entry, &folder, side, cx).opacity(if manual_hidden.contains(&entry.path){0.}else{1.});
                                     let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
                                     if let Some(frame)=&spatial_frame {
                                         spatial_slot(frame,&entry.path,tile.into_any_element(),Some(crate::thumbs::tile_width()),crate::thumbs::tile_height())
@@ -1640,7 +1653,7 @@ impl Explorer {
                     .pt_2().pl_2().pr(px(12.))
                 ).opacity(opacity).left(px(offset))).into_any_element();
             }
-            let geometry=self.motion.rows.get(&motion_key).map(|m|m.geometry(now))
+            let geometry=manual_geometry.or_else(|| self.motion.rows.get(&motion_key).map(|m|m.geometry(now)))
                 .or_else(||self.motion.lists.get(&motion_key).map(|m|m.geometry(now)));
             if let Some((geometry,total))=geometry {
                 let row_h=row_height();
@@ -1657,10 +1670,11 @@ impl Explorer {
                 let mut content=div().relative().w_full().h(px(total*row_h)).flex_none();
                 for row in geometry.into_iter().filter(|r|r.height>0.001 && (r.top+r.height)*row_h>=start-row_h && r.top*row_h<=end+row_h) {
                     let entry=&listing.entries[row.index];let on_trail=trail.as_ref()==Some(&entry.path);
-                    let body=self.row(entry,&folder,side,row.position.unwrap_or(0),on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx);
+                    let logical=if manual_present {logical_indices.iter().position(|&i|i==row.index).unwrap_or(0)}else{row.position.unwrap_or(0)};
+                    let body=self.row(entry,&folder,side,logical,on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx);
                     let mut slot=div().id(SharedString::from(format!("disclosing-{}",entry.path.display())))
                         .absolute().left_0().right_0().top(px(row.top*row_h)).h(px(row.height*row_h)).overflow_hidden()
-                        .opacity(row.opacity).child(body);
+                        .opacity(if manual_hidden.contains(&entry.path){0.}else{row.opacity}).child(body);
                     if row.position.is_none() {
                         slot=slot.child(div().absolute().inset_0().occlude()
                             .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
@@ -1681,7 +1695,9 @@ impl Explorer {
                         range.map(|position| {
                             let entry = &listing.entries[indices[position]];
                             let on_trail = trail.as_ref() == Some(&entry.path);
-                            let row=this.row(entry, &folder, side, position, on_trail, list_mode, list_mode && position % 2 == 1, cx);
+                            let logical=if manual_present {logical_indices.iter().position(|&i|i==indices[position]).unwrap_or(position)}else{position};
+                            let row=this.row(entry, &folder, side, logical, on_trail, list_mode, list_mode && position % 2 == 1, cx);
+                            let row=if manual_hidden.contains(&entry.path){div().opacity(0.).child(row).into_any_element()}else{row};
                             if let Some(frame)=&spatial_frame {
                                 spatial_slot(frame,&entry.path,row,None,row_height()).into_any_element()
                             }else{row}
@@ -1796,7 +1812,7 @@ impl Explorer {
         let (menu_path, menu_folder, column_folder) = (path.clone(), folder.to_path_buf(), folder.to_path_buf());
         let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
         let target = self.drag_target.clone();
-        tile.on_drag(FileDragInfo { paths: drag_paths }, move |info: &FileDragInfo, position, _, cx| {
+        tile.on_drag(FileDragInfo { paths: drag_paths, source: Some((side, folder.to_path_buf())) }, move |info: &FileDragInfo, position, _, cx| {
                 let name = match info.paths.as_slice() {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
@@ -2011,7 +2027,7 @@ impl Explorer {
         let target = self.drag_target.clone();
         row.when(self.motion.rows.contains_key(&(side,folder.to_path_buf())) || self.motion.lists.contains_key(&(side,folder.to_path_buf())),
                 |row|row.on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation()))
-            .on_drag(FileDragInfo { paths: drag_paths }, move |info: &FileDragInfo, position, _, cx| {
+            .on_drag(FileDragInfo { paths: drag_paths, source: Some((side, folder.to_path_buf())) }, move |info: &FileDragInfo, position, _, cx| {
                 let name = match info.paths.as_slice() {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
@@ -2647,7 +2663,12 @@ impl Explorer {
             .child(bar_button("bar-columns", "fm/columns.svg", "Колонки (Ctrl+2)", self.miller(self.active_side()))
                 .on_click(cx.listener(|this, _, _, cx| this.set_view(true, false, cx))))
             .child(bar_button("bar-thumbs", "fm/grid.svg", "Миниатюры (Ctrl+3)", self.thumbs_view(self.active_side()))
-                .on_click(cx.listener(|this, _, _, cx| this.set_view(false, true, cx)))))
+                .on_click(cx.listener(|this, _, _, cx| this.set_view(false, true, cx))))
+            .child(bar_button("bar-manual-order", "fm/move.svg", "Ручной порядок файлов (версии отдельно)", self.manual_orders.enabled(&self.pane_path(self.active_side())))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let side=this.active_side();let enabled=!this.manual_orders.enabled(&this.pane_path(side));
+                    this.set_manual_order(side, enabled, cx);
+                }))))
     }
 
     // ------------------------------------------------------- context menu
@@ -3406,6 +3427,7 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,_: &keys::SettingsApply,_,cx|this.apply_settings(cx)))
             .on_drag_move::<TabDrag>(cx.listener(|this,event: &gpui::DragMoveEvent<TabDrag>,_,cx| {
                 this.file_drag = false;
+                this.manual_drag.pointer = None;
                 if this.motion.tab_reorder.target.is_some_and(|target|this.tab_scroll.get(&target.to).is_none_or(|scroll|!scroll.bounds().contains(&event.event.position))) {
                     if this.motion.tab_reorder.clear() {cx.notify();}
                 }
@@ -3414,18 +3436,24 @@ impl Render for Explorer {
             // Leaving the window hands the files to Windows for other programs.
             // Ctrl or Shift pressed mid-drag: the word on the files changes at once.
             .on_modifiers_changed(cx.listener(|this,_: &gpui::ModifiersChangedEvent,window,cx| {
-                if this.dragging_files(cx) { window.refresh(); }
+                if this.dragging_files(cx) { if window.modifiers().control || window.modifiers().shift {this.manual_drag.pointer=None;} window.refresh(); }
             }))
             .on_drag_move::<ExternalPaths>(cx.listener(|this,_: &gpui::DragMoveEvent<ExternalPaths>,_,_| {
                 this.file_drag = true;
                 this.drag_paths.clear();
+                this.manual_drag.pointer = None;
             }))
             .on_drag_move::<FileDragInfo>(cx.listener(|this,event: &gpui::DragMoveEvent<FileDragInfo>,window,cx| {
                 this.file_drag = true;
                 let paths = &event.drag(cx).paths;
                 if &this.drag_paths != paths { this.drag_paths = paths.clone(); }
+                let modifiers=window.modifiers();
+                let pointer=event.drag(cx).source.clone().filter(|(_,folder)| this.manual_orders.enabled(folder) && !modifiers.control && !modifiers.shift)
+                    .map(|source|crate::manual_drag::Pointer{source,position:event.event.position});
+                if pointer!=this.manual_drag.pointer {this.manual_drag.pointer=pointer;cx.notify();}
                 if outside_window(event.event.position, window) {
                     let paths = event.drag(cx).paths.clone();
+                    this.manual_drag.pointer=None;
                     this.drag_out(paths, window, cx);
                 }
             }))
@@ -3482,8 +3510,8 @@ impl Render for Explorer {
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.motion.tab_reorder.clear();this.file_drag=false;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.motion.tab_reorder.clear();this.file_drag=false;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.motion.tab_reorder.clear();this.file_drag=false;this.manual_drag.pointer=None;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.motion.tab_reorder.clear();this.file_drag=false;this.manual_drag.pointer=None;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,window,cx| {
                 let Some(drag)=this.right_drag.take() else {return};
                 if !drag.active && event.modifiers.shift {

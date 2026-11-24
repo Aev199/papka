@@ -31,6 +31,7 @@ mod tab_reorder;
 mod popup_motion;
 mod mode_motion;
 mod spatial_motion;
+mod manual_drag;
 mod kind_filter;
 mod search_panel;
 mod updates;
@@ -86,7 +87,7 @@ struct ColumnResize {
 /// Internal drag-and-drop payload. Dropping only stages a path; no file
 /// operation takes place until the user explicitly clicks Copy here.
 #[derive(Clone)]
-struct FileDragInfo { paths: Vec<PathBuf> }
+struct FileDragInfo { paths: Vec<PathBuf>, source: Option<(GroupId, PathBuf)> }
 
 struct FileDragPreview { name: String, position: Point<Pixels>, mode: Option<DropMode>, picked: std::time::Instant }
 
@@ -334,6 +335,7 @@ struct ContextMenu {
 struct FolderView {
     listing: Arc<browser::Listing>,
     spec: SortSpec,
+    manual_revision: u64,
     /// Folder sizes known when sorted; a new size re-sorts a size order.
     sizes: u64,
     show_hidden: bool,
@@ -420,6 +422,8 @@ struct Explorer {
     drive_space: HashMap<PathBuf, (u64, u64)>,
     /// Sort order of each pane, chosen by its list header.
     sorts: HashMap<GroupId, SortSpec>,
+    manual_orders: filemanager_core::manual_order::ManualOrders,
+    manual_drag: manual_drag::ManualDrag,
     show_hidden: bool,
     show_sidebar: bool,
     show_inspector: bool,
@@ -692,6 +696,8 @@ impl Explorer {
             drives: places::drives(),
             drive_space: HashMap::new(),
             sorts: HashMap::new(),
+            manual_orders: Self::load_manual_orders(workspaces.as_ref()),
+            manual_drag: Default::default(),
             show_hidden: prefs.show_hidden,
             show_sidebar: prefs.show_sidebar,
             show_inspector: prefs.show_inspector,
