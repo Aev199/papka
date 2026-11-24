@@ -38,9 +38,83 @@ impl Tween {
     }
 }
 
+/// Critically damped scalar motion. Unlike a restartable easing, a
+/// retarget preserves velocity as well as position. The analytic solution
+/// is independent of render frequency; a bounded tail stops frame requests.
+#[derive(Default)]
+pub(crate) struct Spring {
+    from: f32,
+    velocity: f32,
+    target: f32,
+    started: Option<Instant>,
+}
+
+impl Spring {
+    fn pose(&self, now: Instant, span: Duration) -> (f32, f32) {
+        let Some(start) = self.started else { return (self.target, 0.); };
+        let elapsed = now.saturating_duration_since(start);
+        if elapsed >= span * 2 { return (self.target, 0.); }
+        let t = elapsed.as_secs_f32();
+        let omega = 8. / span.as_secs_f32();
+        let distance = self.from - self.target;
+        let c = self.velocity + omega * distance;
+        let decay = (-omega * t).exp();
+        (self.target + (distance + c * t) * decay, (self.velocity - omega * c * t) * decay)
+    }
+
+    pub(crate) fn sample(&mut self, target: f32, instant: bool, now: Instant, ms: u64) -> (f32, bool) {
+        if instant || ms == 0 {
+            self.from = target; self.target = target; self.velocity = 0.; self.started = None;
+            return (target, false);
+        }
+        let span = Duration::from_millis(ms);
+        let (position, velocity) = self.pose(now, span);
+        if (target - self.target).abs() > 0.01 {
+            self.from = position; self.velocity = velocity; self.target = target; self.started = Some(now);
+        }
+        if (position - self.target).abs() <= 0.02 && velocity.abs() <= 0.5 {
+            self.from = self.target; self.velocity = 0.; self.started = None;
+            (self.target, false)
+        } else {
+            (position, true)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spring_retargets_with_continuous_position_and_velocity() {
+        let now = Instant::now();
+        let span = Duration::from_millis(TRANSIENT_MS);
+        let mut spring = Spring::default();
+        assert_eq!(spring.sample(100., false, now, TRANSIENT_MS), (0., true));
+        let mid = now + span / 4;
+        let before = spring.pose(mid, span);
+        assert!(before.0 > 0. && before.0 < 100.);
+        assert!(before.1 > 0.);
+        assert_eq!(spring.sample(-20., false, mid, TRANSIENT_MS), (before.0, true));
+        let after = spring.pose(mid, span);
+        assert!((before.0 - after.0).abs() < 0.001);
+        assert!((before.1 - after.1).abs() < 0.001);
+        assert_eq!(spring.sample(-20., false, mid + span * 2, TRANSIENT_MS), (-20., false));
+        assert_eq!(spring.sample(0., true, mid, TRANSIENT_MS), (0., false));
+    }
+
+    #[test]
+    fn spring_has_the_same_pose_regardless_of_intermediate_frame_count() {
+        let now = Instant::now();
+        let mut a = Spring::default();
+        let mut b = Spring::default();
+        a.sample(50., false, now, TRANSIENT_MS);
+        b.sample(50., false, now, TRANSIENT_MS);
+        for i in 1..5 { a.sample(50., false, now + Duration::from_millis(i * 10), TRANSIENT_MS); }
+        let end = now + Duration::from_millis(50);
+        assert_eq!(a.sample(50., false, end, TRANSIENT_MS), b.sample(50., false, end, TRANSIENT_MS));
+    }
+
 
     #[test]
     fn curves_have_exact_endpoints_and_are_monotone() {

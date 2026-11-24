@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Instant};
 
 use filemanager_core::panes::GroupId;
 
-use crate::layout_motion::Tween;
+use crate::motion_policy::{Spring, Tween};
 
 const TAB_GAP: f32 = 4.;
 const DURATION_MS: u64 = crate::motion_policy::TRANSIENT_MS;
@@ -21,7 +21,7 @@ pub(crate) struct Target {
 #[derive(Default)]
 pub(crate) struct TabReorder {
     pub target: Option<Target>,
-    offsets: HashMap<GroupId, Vec<Tween>>,
+    offsets: HashMap<GroupId, Vec<Spring>>,
     trailing: HashMap<GroupId, Tween>,
     counts: HashMap<GroupId, usize>,
 }
@@ -86,7 +86,7 @@ impl TabReorder {
             self.trailing.remove(&group);
         }
         let tweens = self.offsets.entry(group).or_default();
-        tweens.resize_with(widths.len(), Tween::default);
+        tweens.resize_with(widths.len(), Spring::default);
         tweens.truncate(widths.len());
 
         let mut active = false;
