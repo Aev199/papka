@@ -8,6 +8,14 @@ pub(crate) const MODE_FADE_IN: Duration = Duration::from_millis(110);
 pub(crate) const TRANSIENT_MS: u64 = 120;
 pub(crate) const DISCLOSURE_MS: u64 = 160;
 pub(crate) const HOVER: Duration = Duration::from_millis(100);
+/// Bounded entry accent; its entire tail fits inside the 140 ms list entrance.
+pub(crate) const ENTRY_STAGGER_LIMIT: usize = 8;
+pub(crate) fn entry_appearance(elapsed: Duration, index: usize) -> (f32,f32) {
+    if index >= ENTRY_STAGGER_LIMIT {return (1.,0.);}
+    let delay = Duration::from_millis(index as u64 * 4);
+    let t = ease_out(elapsed.saturating_sub(delay),Duration::from_millis(95));
+    (0.65 + 0.35*t, 5.*(1.-t))
+}
 
 /// Optional, process-local diagnostic slowdown for migrated visual clocks.
 /// The factor is fixed at launch, so retargets never change time scale midflight.
@@ -132,6 +140,17 @@ mod tests {
         assert_eq!(a.sample(50., false, end, TRANSIENT_MS), b.sample(50., false, end, TRANSIENT_MS));
     }
 
+
+    #[test]
+    fn item_entrance_is_bounded_and_finishes_before_pane_entrance() {
+        let first = entry_appearance(Duration::from_millis(12),0);
+        let later = entry_appearance(Duration::from_millis(12),7);
+        assert!(first.0 > later.0 && first.1 < later.1);
+        assert_eq!(entry_appearance(Duration::ZERO,8),(1.,0.));
+        for i in 0..ENTRY_STAGGER_LIMIT {
+            assert_eq!(entry_appearance(Duration::from_millis(140),i),(1.,0.));
+        }
+    }
 
     #[test]
     fn curves_have_exact_endpoints_and_are_monotone() {

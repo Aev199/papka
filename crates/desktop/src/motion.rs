@@ -259,6 +259,14 @@ impl Motion {
         (e.from + (1. - e.from) * t, e.way * SLIDE * (1. - t))
     }
 
+    /// Only explicit folder entrance in thumbnail mode. Same-folder mode
+    /// switching and watcher refreshes cannot restart this clock.
+    pub(crate) fn thumbnail_entrance(&self, group: GroupId) -> Option<Instant> {
+        if !crate::theme::animations() {return None;}
+        let e = self.entrances.get(&group)?;
+        e.started.filter(|at|e.mode=='t' && e.from < 1. && at.elapsed()<LIST_APPEAR)
+    }
+
     /// Notes that `group`'s strip is drawn with `count` tabs; true when it
     /// had as many last time (the kept layout is of these tabs).
     pub(crate) fn tabs_drawn(&self, group: GroupId, count: usize) -> bool {

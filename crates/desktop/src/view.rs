@@ -1687,6 +1687,9 @@ impl Explorer {
                 let per_row = crate::thumbs::columns(self.pane_width_for(side));
                 self.thumb_columns.insert(side, per_row);
                 let rows = count.div_ceil(per_row);
+                let entry_clock = if !self.dragging_files(cx) && !self.renaming && self.marquee.is_none() && spatial_frame.is_none() {
+                    self.motion.thumbnail_entrance(side)
+                } else {None};
                 let list_id = SharedString::from(format!("{list_id}-grid-{per_row}-{}",crate::thumbs::size()));
                 let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some() || (self.dragging_files(cx) && !manual_mode);
                 let moving = self.motion.grids.entry(side).or_default().prepare(&folder, &listing, indices.clone(), per_row,
@@ -1702,11 +1705,12 @@ impl Explorer {
                                     let tile=if manual_hidden.contains(&entry.path) {
                                         manual_gap(crate::thumbs::tile_height()).w(px(crate::thumbs::tile_width())).into_any_element()
                                     }else{this.tile(&entry, &folder, side, cx).into_any_element()};
+                                    let (alpha,dy)=entry_clock.map_or((1.,0.),|at|crate::motion_policy::entry_appearance(at.elapsed(),position));
                                     let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
                                     if let Some(frame)=&spatial_frame {
                                         spatial_slot(frame,&entry.path,tile,Some(crate::thumbs::tile_width()),crate::thumbs::tile_height())
                                             .absolute().left(left).top(px(y)).into_any_element()
-                                    }else{div().absolute().left(left).top(px(y)).w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).child(tile).into_any_element()} })
+                                    }else{div().absolute().left(left).top(px(y+dy)).w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).opacity(alpha).child(tile).into_any_element()} })
                                 .collect::<Vec<_>>();
                             div().relative().w_full().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP))
                                 .children(tiles).into_any_element()

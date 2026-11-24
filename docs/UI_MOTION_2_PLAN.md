@@ -138,3 +138,10 @@ schemes, light and dark. Centralized title/status/navigation and sidebar row
 geometry without changing heights. Status-bar project and selection labels
 can shrink and truncate instead of competing with the controls.
 Actual appearance and DPI comparison require the deferred Windows manual pass.
+
+### Stage 4 follow-up — bounded thumbnail entrance
+The first eight thumbnail positions receive a subtle vertical and opacity
+stagger during explicit folder entrance only. The tail ends inside the
+existing 140 ms clock; no extra animation frame requests. Same-folder mode
+changes, watcher refresh, rename, marquee, file drag and spatial transitions
+skip the stagger. Test that delay and end time are bounded.
