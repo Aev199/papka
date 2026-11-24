@@ -117,6 +117,8 @@ enum DropAt {
 #[derive(Default)]
 struct DragTarget {
     at: DropAt,
+    /// Set by the current rendered manual insertion preview, never by the ghost.
+    manual_folder: Option<PathBuf>,
     /// A folder row or place claimed this move; the list's own folder
     /// stands in otherwise.
     claimed: bool,
@@ -129,14 +131,15 @@ type DragTargetCell = std::rc::Rc<std::cell::RefCell<DragTarget>>;
 /// What the picture of dragged files needs to name the action.
 struct DropMode {
     first: PathBuf,
+    count: usize,
     /// The files come out of an archive (looked up once, when the drag starts).
     from_archive: bool,
     target: DragTargetCell,
 }
 
 impl DropMode {
-    fn new(first: &std::path::Path, target: &DragTargetCell) -> Self {
-        Self { first: first.to_path_buf(), from_archive: filemanager_core::archive::is_inside(first), target: target.clone() }
+    fn new(first: &std::path::Path, count: usize, target: &DragTargetCell) -> Self {
+        Self { first: first.to_path_buf(), count, from_archive: filemanager_core::archive::is_inside(first), target: target.clone() }
     }
 }
 
@@ -195,10 +198,19 @@ impl Render for FileDragPreview {
             if t < 1. { window.request_animation_frame(); }
             motion_policy::ease_out_fraction(t)
         } else { 1. };
-        let word = self.mode.as_ref().and_then(|mode| match &mode.target.borrow().at {
-            DropAt::Nothing => None,
-            DropAt::Stage => Some("Отложить"),
-            DropAt::Folder(folder) => drop_word(&mode.first, mode.from_archive, folder, modifiers.control, modifiers.shift),
+        let word = self.mode.as_ref().and_then(|mode| {
+            let target = mode.target.borrow();
+            match &target.at {
+                DropAt::Nothing => None,
+                DropAt::Stage => Some("Отложить"),
+                DropAt::Folder(folder) if !modifiers.control && !modifiers.shift
+                    && target.manual_folder.as_ref() == Some(folder) => Some("Переставить"),
+                DropAt::Folder(folder) => drop_word(&mode.first, mode.from_archive, folder, modifiers.control, modifiers.shift),
+            }
+        });
+        // No shell lookup or disk access while painting a drag ghost.
+        let glyph = self.mode.as_ref().map(|mode| {
+            if mode.count > 1 { "fm/layers.svg" } else { "fm/file.svg" }
         });
         div()
             // Off the cursor: from 4 px to 14 px as it is lifted.
@@ -219,7 +231,9 @@ impl Render for FileDragPreview {
                         spread_radius: px(0.),
                         inset: false,
                     }])
-                    .child(self.name.clone())
+                    .when_some(glyph, |chip,path| chip.child(gpui::svg().path(path).size(px(16.)).flex_none()
+                        .text_color(rgb(theme::SELECTION_TEXT))))
+                    .child(div().max_w(px(240.)).truncate().child(self.name.clone()))
                     // What a release here does; Ctrl and Shift change it at once.
                     .when_some(word, |chip, word| chip.child(div().px_1p5().rounded_sm().text_size(px(11.))
                         .bg(rgb(theme::SELECTED_BORDER)).child(word)))

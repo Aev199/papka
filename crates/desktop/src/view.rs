@@ -64,6 +64,12 @@ fn item_overlays(flash: Option<(crate::motion::Flash, f32)>, fill: Option<f32>) 
     layers
 }
 
+/// Paint-only insertion gap: no click, hover or drop listeners of its own.
+fn manual_gap(height: f32) -> Div {
+    div().w_full().h(px(height)).flex_none().rounded(px(ui::CONTROL_RADIUS))
+        .border_1().border_color(accent_alpha(100)).bg(accent_alpha(22))
+}
+
 /// Keep the logical slot in the virtual list while its visible content moves.
 fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElement, width: Option<f32>, height: f32) -> Div {
     use crate::spatial_motion::{Geometry, Position};
@@ -1243,7 +1249,7 @@ impl Explorer {
         // a row carries one, into any folder, pane or program.
         let preview = |target: crate::DragTargetCell| move |info: &FileDragInfo, position, _: &mut Window, cx: &mut App| {
             let name = match info.paths.as_slice() { [single] => browser::display_name(single), many => format!("{} элементов", many.len()) };
-            cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
+            cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, info.paths.len(), &target))))
         };
         zone = zone.child(div().id("zone-all").flex().items_center().gap_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             .cursor_grab().rounded_sm().hover(|style| style.bg(rgb(HOVER)))
@@ -1691,7 +1697,7 @@ impl Explorer {
                                 .map(|position| { let entry = listing.entries[indices[position]].clone(); let (x,y)=this.motion.grids.get(&side).map_or((0.,0.),|grid|grid.offset(&entry.path,std::time::Instant::now()));
                                     // The dragged item is represented by the ghost, not an invisible interactive tile.
                                     let tile=if manual_hidden.contains(&entry.path) {
-                                        div().w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).into_any_element()
+                                        manual_gap(crate::thumbs::tile_height()).w(px(crate::thumbs::tile_width())).into_any_element()
                                     }else{this.tile(&entry, &folder, side, cx).into_any_element()};
                                     let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
                                     if let Some(frame)=&spatial_frame {
@@ -1726,11 +1732,11 @@ impl Explorer {
                 for row in geometry.into_iter().filter(|r|r.height>0.001 && (r.top+r.height)*row_h>=start-row_h && r.top*row_h<=end+row_h) {
                     let entry=&listing.entries[row.index];let on_trail=trail.as_ref()==Some(&entry.path);
                     let logical=manual_positions.as_ref().and_then(|positions|positions.get(&row.index).copied()).unwrap_or(row.position.unwrap_or(0));
-                    let body=if manual_hidden.contains(&entry.path){div().w_full().h(px(row_h)).into_any_element()}
+                    let body=if manual_hidden.contains(&entry.path){manual_gap(row_h).into_any_element()}
                         else{self.row(entry,&folder,side,logical,on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx)};
                     let mut slot=div().id(SharedString::from(format!("disclosing-{}",entry.path.display())))
                         .absolute().left_0().right_0().top(px(row.top*row_h)).h(px(row.height*row_h)).overflow_hidden()
-                        .opacity(if manual_hidden.contains(&entry.path){0.}else{row.opacity}).child(body);
+                        .opacity(row.opacity).child(body);
                     if row.position.is_none() {
                         slot=slot.child(div().absolute().inset_0().occlude()
                             .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
@@ -1752,7 +1758,7 @@ impl Explorer {
                             let entry = &listing.entries[indices[position]];
                             let on_trail = trail.as_ref() == Some(&entry.path);
                             let logical=manual_positions.as_ref().and_then(|positions|positions.get(&indices[position]).copied()).unwrap_or(position);
-                            let row=if manual_hidden.contains(&entry.path){div().w_full().h(px(row_height())).into_any_element()}
+                            let row=if manual_hidden.contains(&entry.path){manual_gap(row_height()).into_any_element()}
                                 else{this.row(entry, &folder, side, logical, on_trail, list_mode, list_mode && position % 2 == 1, cx)};
                             if let Some(frame)=&spatial_frame {
                                 spatial_slot(frame,&entry.path,row,None,row_height()).into_any_element()
@@ -1873,7 +1879,7 @@ impl Explorer {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
+                cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, info.paths.len(), &target))))
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -2088,7 +2094,7 @@ impl Explorer {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
+                cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, info.paths.len(), &target))))
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -3386,6 +3392,7 @@ impl Explorer {
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lab_start = self.motion.lab.begin();
+        self.drag_target.borrow_mut().manual_folder = None;
         #[cfg(windows)]
         if self.hwnd.is_none() { self.hwnd = crate::window_hwnd(window); }
         if self.interface_focus_pending {self.interface_focus_pending=false;window.focus(&self.focus_handle,cx);}

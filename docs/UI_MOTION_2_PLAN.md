@@ -96,3 +96,12 @@ changes cancel the reveal; disabled animations settle immediately. Deferred
 layout callbacks validate the pane path, tab and preview before touching scroll.
 Prune state when a pane closes or switches presentation. Added independent tests.
 Column appearance/exit snapshots and bounded item entrance stagger still pending.
+
+## Stage 5 — drag presentation, first slice
+Manual reorder has a visible paint-only insertion gap instead of invisible
+selected tiles/rows. The ghost labels a valid same-folder preview as
+"Переставить"; Ctrl/Shift and actual folder/staging targets retain copy/move
+semantics. The label is derived from the current rendered preview, reset each
+root render, and does not authorize a drop. Drop revalidation is unchanged.
+Ghosts use generic file/stack icons and truncate long names without disk I/O.
+Cancellation/landing effects and target-transition polish remain pending.

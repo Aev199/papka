@@ -163,6 +163,9 @@ impl Explorer {
             view.hidden = Arc::new(paths.iter().cloned().collect());
         }
         if tiles || !crate::theme::animations() || view.motion.as_ref().is_some_and(|m| !m.active(now)) { view.motion = None; }
+        if candidate.is_some() {
+            self.drag_target.borrow_mut().manual_folder = Some(folder.to_path_buf());
+        }
         let geometry = view.motion.as_ref().map(|m| m.geometry(now));
         if geometry.is_some() { self.motion.late_frame.set(true); }
         if view.boundary.is_none() && geometry.is_none() {
