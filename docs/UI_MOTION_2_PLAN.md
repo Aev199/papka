@@ -161,3 +161,13 @@ logical widths; horizontal reveal is independent. Switching tabs, changing
 viewport width, dragging, renaming and reduced-motion reset presence instead of
 replaying it. Added tests of path changes, retarget and reset. Full departure
 contents are intentionally not retained and visual acceptance is still needed.
+
+### Stage 5 follow-up — explicit manual-order settlement
+Escape resets file-drag pointer, modifier and spring state. The existing FLIP
+return-to-base on cancellation is complemented by a short neutral highlight;
+a committed manual order uses an accent highlight in the final slots. Scoped
+to group/folder/path and bounded to 64 paths for 150 ms, with no timers or
+filesystem operations. Cache validated selected positions while the immutable
+listing/order and dragged paths match to avoid scanning a large list each frame.
+Added scope/cap/expiry tests. This is a landing/return accent, not a cursor-to-file
+flight animation; actual transfers retain their existing success/failure signals.

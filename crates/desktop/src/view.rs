@@ -1883,6 +1883,10 @@ impl Explorer {
             .relative().overflow_hidden()
             .children(item_overlays(self.motion.flash_of(&path),
                 is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
+            .when_some(self.manual_drag.strength(side,folder,&path), |item,(committed,strength)| {
+                let color=if committed {accent_alpha((strength*85.) as u8)}else{text_alpha((strength*40.) as u8)};
+                item.child(div().absolute().inset_0().rounded(px(ui::CONTROL_RADIUS)).bg(color))
+            })
             .child(div().relative().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
                 .child(match picture {
                     Some(file) => img(file).max_w(px(tile_w - 12.)).max_h(px(picture_size)).object_fit(ObjectFit::Contain)
@@ -2004,6 +2008,10 @@ impl Explorer {
                 .top(px(top * row_height())).h(px(height * row_height())).bg(rgb(SELECTED))))
             .children(item_overlays(self.motion.flash_of(&path),
                 is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
+            .when_some(self.manual_drag.strength(side,folder,&path), |item,(committed,strength)| {
+                let color=if committed {accent_alpha((strength*85.) as u8)}else{text_alpha((strength*40.) as u8)};
+                item.child(div().absolute().inset_0().rounded(px(ui::CONTROL_RADIUS)).bg(color))
+            })
             // An older version sits indented under the newest one.
             .when(matches!(stack, Some(Stacked::Member { .. })), |row| row.child(div().w(px(16.)).flex_none()))
             .group("file-row")
@@ -3475,7 +3483,8 @@ impl Render for Explorer {
         self.validate_marquee(cx);
         self.motion.progress(self.transfers.fraction);
         let edge_moving = self.edge_scroll_frame(cx);
-        if self.motion.wants_frame(self.transfers.fraction) || self.spring_filling() || edge_moving { window.request_animation_frame(); }
+        let settling = self.manual_drag.advance(std::time::Instant::now());
+        if self.motion.wants_frame(self.transfers.fraction) || self.spring_filling() || edge_moving || settling { window.request_animation_frame(); }
         if self.clear_filter {
             self.clear_filter = false;
             self.filter.clear();

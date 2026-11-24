@@ -839,7 +839,13 @@ impl Explorer {
         if self.tour.is_some() {self.close_tour(cx);return;}
         self.dock_hover=None;
         self.motion.tab_reorder.clear();
-        if cx.stop_active_drag(window) { cx.notify(); return; }
+        if cx.stop_active_drag(window) {
+            self.file_drag=false;
+            self.manual_drag.pointer=None;
+            self.manual_drag.transfer_modifier=false;
+            self.spring=None;
+            cx.notify();return;
+        }
         if let Some(resize) = self.column_resize.take() {
             self.pane_column_widths.insert(resize.group, resize.start_width);
             cx.notify();

@@ -1,12 +1,14 @@
 //! Manual file ordering: a presentation-only preview, followed by an explicit
 //! same-folder commit. No file operation is dispatched by this module.
-use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::Arc, time::Instant};
+use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::Arc, time::{Duration,Instant}};
 use gpui::{AppContext, Context, Pixels, Point, ScrollHandle, px};
 use filemanager_core::{browser::Listing, manual_order::{ManualOrders, reorder}};
 use crate::{Explorer, FileDragInfo, GroupId, list_motion::ListMotion, row_motion::Row};
 
 const KEY: &str = "manual_file_orders";
 const LIMIT: usize = 5000;
+const SETTLE_LIMIT: usize = 64;
+const SETTLE_SPAN: Duration = Duration::from_millis(150);
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct Pointer {
@@ -26,7 +28,25 @@ struct Preview {
     boundary: Option<usize>,
     paths: Vec<PathBuf>,
     hidden: Arc<HashSet<PathBuf>>,
+    selected: Vec<usize>,
     motion: Option<ListMotion>,
+}
+
+struct Settle {
+    folder:PathBuf,
+    paths:HashSet<PathBuf>,
+    started:Instant,
+    committed:bool,
+}
+impl Settle {
+    fn new(folder:&Path,paths:&[PathBuf],now:Instant,committed:bool)->Self {
+        Self{folder:folder.to_path_buf(),paths:paths.iter().take(SETTLE_LIMIT).cloned().collect(),started:now,committed}
+    }
+    fn strength(&self,folder:&Path,path:&Path,now:Instant)->Option<(bool,f32)> {
+        let elapsed=now.saturating_duration_since(self.started);
+        if folder!=self.folder || !self.paths.contains(path) || elapsed>=SETTLE_SPAN {return None;}
+        Some((self.committed,1.-crate::motion_policy::ease_out(elapsed,SETTLE_SPAN)))
+    }
 }
 
 #[derive(Default)]
@@ -34,6 +54,7 @@ pub(crate) struct ManualDrag {
     pub pointer: Option<Pointer>,
     pub transfer_modifier: bool,
     previews: HashMap<GroupId, Preview>,
+    settles: HashMap<GroupId,Settle>,
 }
 
 pub(crate) struct Display {
@@ -46,7 +67,24 @@ pub(crate) struct Display {
 impl ManualDrag {
     pub(crate) fn prune(&mut self, ids: &[GroupId]) {
         self.previews.retain(|id, _| ids.contains(id));
+        self.settles.retain(|id,_|ids.contains(id));
         if self.pointer.as_ref().is_some_and(|p| !ids.contains(&p.source.0)) { self.pointer = None; }
+    }
+
+    fn settle(&mut self,side:GroupId,folder:&Path,paths:&[PathBuf],now:Instant,committed:bool) {
+        if crate::theme::animations() && !paths.is_empty() {
+            self.settles.insert(side,Settle::new(folder,paths,now,committed));
+        }
+    }
+
+    pub(crate) fn advance(&mut self,now:Instant)->bool {
+        self.settles.retain(|_,s|crate::theme::animations() && now.saturating_duration_since(s.started)<SETTLE_SPAN);
+        !self.settles.is_empty()
+    }
+
+    pub(crate) fn strength(&self,side:GroupId,folder:&Path,path:&Path)->Option<(bool,f32)> {
+        if !crate::theme::animations() {return None;}
+        self.settles.get(&side)?.strength(folder,path,Instant::now())
     }
 }
 
@@ -125,27 +163,37 @@ impl Explorer {
         if self.manual_drag.pointer.is_none() && !self.manual_drag.previews.contains_key(&side) { return None; }
         let pointer = self.manual_drag.pointer.as_ref().filter(|p| p.source.0 == side && p.source.1 == folder);
         let first_file = base.iter().take_while(|&&i| listing.entries[i].is_directory).count();
-        let candidate = if self.dragging_files(cx) && !self.manual_drag.transfer_modifier && self.right_drag.is_none() && self.filter.is_empty()
+        let dragging = self.dragging_files(cx);
+        let candidate = if dragging && !self.manual_drag.transfer_modifier && self.right_drag.is_none() && self.filter.is_empty()
             && self.label_filter(side).is_none() && self.kinds.get(side).is_none() && !self.renaming {
             pointer.and_then(|p| {
                 let at = pointer_boundary(scroll, p.position, base.len(), first_file, columns, cell, tiles)?;
-                let selected = selected_positions(listing, base, &self.drag_paths)?;
+                let selected = self.manual_drag.previews.get(&side)
+                    .filter(|view|Arc::ptr_eq(&view.listing,listing) && Arc::ptr_eq(&view.base,base)
+                        && view.paths==self.drag_paths && !view.selected.is_empty())
+                    .map(|view|view.selected.clone())
+                    .or_else(||selected_positions(listing,base,&self.drag_paths))?;
                 Some((at, selected, self.drag_paths.clone()))
             })
         } else { None };
 
+        if candidate.is_none() && !dragging {
+            let returning=self.manual_drag.previews.get(&side).filter(|view|view.folder==folder && view.boundary.is_some())
+                .map(|view|view.paths.clone());
+            if let Some(paths)=returning {self.manual_drag.settle(side,folder,&paths,now,false);}
+        }
         // A watcher or navigation must invalidate any preview derived from
         // different indices, even if the path and file count are unchanged.
         if candidate.is_none() && !self.manual_drag.previews.contains_key(&side) { return None; }
         let view = self.manual_drag.previews.entry(side).or_insert_with(|| Preview {
             folder: folder.to_path_buf(), listing: listing.clone(), base: base.clone(), order: base.clone(),
             logical_positions: logical_positions(base), columns, cell, tiles,
-            boundary: None, paths: Vec::new(), hidden: Arc::new(HashSet::new()), motion: None,
+            boundary: None, paths: Vec::new(), hidden: Arc::new(HashSet::new()), selected:Vec::new(), motion: None,
         });
         if view.folder != folder || !Arc::ptr_eq(&view.listing, listing) || !Arc::ptr_eq(&view.base, base) {
             *view = Preview { folder: folder.to_path_buf(), listing: listing.clone(), base: base.clone(), order: base.clone(),
                 logical_positions: logical_positions(base), columns, cell, tiles,
-                boundary: None, paths: Vec::new(), hidden: Arc::new(HashSet::new()), motion: None };
+                boundary: None, paths: Vec::new(), hidden: Arc::new(HashSet::new()), selected:Vec::new(), motion: None };
         }
         view.columns = columns; view.cell = cell; view.tiles = tiles;
         let at = candidate.as_ref().map(|c| c.0);
@@ -160,6 +208,7 @@ impl Explorer {
             view.order = next;
             view.boundary = at;
             view.paths = paths.to_vec();
+            view.selected = candidate.as_ref().map_or_else(Vec::new,|c|c.1.clone());
             view.hidden = Arc::new(paths.iter().cloned().collect());
         }
         if tiles || !crate::theme::animations() || view.motion.as_ref().is_some_and(|m| !m.active(now)) { view.motion = None; }
@@ -219,6 +268,7 @@ impl Explorer {
         if self.manual_orders.save(folder, &ordered) {
             self.status = "Ручной порядок сохранён".into();
             self.persist_manual_orders();
+            self.manual_drag.settle(side,folder,&data.paths,now,true);
         }
         cx.notify();
         true
@@ -228,6 +278,20 @@ impl Explorer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settlement_is_bounded_folder_scoped_and_expires() {
+        let now=Instant::now();let folder=Path::new("a");
+        let paths:Vec<_>=(0..100).map(|n|folder.join(n.to_string())).collect();
+        let s=Settle::new(folder,&paths,now,true);
+        assert_eq!(s.paths.len(),SETTLE_LIMIT);
+        assert_eq!(s.strength(folder,&paths[0],now),Some((true,1.)));
+        assert!(s.strength(Path::new("b"),&paths[0],now).is_none());
+        assert!(s.strength(folder,&paths[80],now).is_none());
+        assert!(s.strength(folder,&paths[0],now+SETTLE_SPAN).is_none());
+        let s=Settle::new(folder,&paths,now,false);
+        assert_eq!(s.strength(folder,&paths[0],now),Some((false,1.)));
+    }
+
     #[test]
     fn logical_boundary_respects_folders_grid_and_empty_tail() {
         assert_eq!(boundary(8, 2, 1, (200., 24.), 30., 10.), None);
