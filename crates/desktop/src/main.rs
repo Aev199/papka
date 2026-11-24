@@ -1050,6 +1050,8 @@ impl Explorer {
             if self.dragging_out || paths.is_empty() { return; }
             let Some(hwnd) = window_hwnd(window) else { return };
             cx.stop_active_drag(window);
+            self.manual_drag.pointer = None;
+            self.manual_drag.transfer_modifier = false;
             self.right_drag = None;
             self.dragging_out = true;
             cx.notify();

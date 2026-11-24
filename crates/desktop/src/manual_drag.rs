@@ -32,6 +32,7 @@ struct Preview {
 #[derive(Default)]
 pub(crate) struct ManualDrag {
     pub pointer: Option<Pointer>,
+    pub transfer_modifier: bool,
     previews: HashMap<GroupId, Preview>,
 }
 
@@ -95,7 +96,8 @@ impl Explorer {
 
     fn persist_manual_orders(&mut self) {
         let result = self.manual_orders.encode().map_err(|e| e.to_string()).and_then(|text| {
-            if let Some(store) = &self.workspaces { store.set_value(KEY, &text).map_err(|e| e.to_string())?; }
+            let store = self.workspaces.as_ref().ok_or_else(|| "локальная база недоступна".to_string())?;
+            store.set_value(KEY, &text).map_err(|e| e.to_string())?;
             Ok(())
         });
         if let Err(error) = result { self.status = format!("Ручной порядок не сохранён: {error}"); }
@@ -115,14 +117,15 @@ impl Explorer {
     pub(crate) fn manual_display(&mut self, side: GroupId, folder: &Path, listing: &Arc<Listing>, base: &Arc<Vec<usize>>,
         scroll: &ScrollHandle, columns: usize, cell: (f32, f32), tiles: bool, now: Instant, cx: &Context<Self>) -> Option<Display> {
         if folder != self.pane_path(side) { return None; }
-        if !self.manual_orders.enabled(folder) || base.len() > LIMIT {
+        if !self.manual_orders.enabled(folder) || listing.truncated || base.len() > LIMIT {
             self.manual_drag.previews.remove(&side);
             return None;
         }
 
+        if self.manual_drag.pointer.is_none() && !self.manual_drag.previews.contains_key(&side) { return None; }
         let pointer = self.manual_drag.pointer.as_ref().filter(|p| p.source.0 == side && p.source.1 == folder);
         let first_file = base.iter().take_while(|&&i| listing.entries[i].is_directory).count();
-        let candidate = if self.dragging_files(cx) && self.right_drag.is_none() && self.filter.is_empty()
+        let candidate = if self.dragging_files(cx) && !self.manual_drag.transfer_modifier && self.right_drag.is_none() && self.filter.is_empty()
             && self.label_filter(side).is_none() && self.kinds.get(side).is_none() && !self.renaming {
             pointer.and_then(|p| {
                 let at = pointer_boundary(scroll, p.position, base.len(), first_file, columns, cell, tiles)?;
@@ -177,6 +180,7 @@ impl Explorer {
             || self.kinds.get(side).is_some() || self.renaming
             || data.source.as_ref().is_none_or(|(group, path)| *group != side || path != folder) { return false; }
         let Some((listing, base)) = self.folder_view(side, folder) else { return false; };
+        if listing.truncated || base.len() > LIMIT { return false; }
         let Some(view) = self.manual_drag.previews.get(&side).filter(|view|
             view.folder == folder && view.boundary.is_some() && view.paths == data.paths
                 && Arc::ptr_eq(&view.listing, &listing) && Arc::ptr_eq(&view.base, &base)) else { return false; };

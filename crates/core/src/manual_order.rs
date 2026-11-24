@@ -9,6 +9,8 @@ use crate::browser::Entry;
 struct FolderOrder {
     enabled: bool,
     files: Vec<PathBuf>,
+    #[serde(skip)]
+    revision: u64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -21,15 +23,19 @@ pub struct ManualOrders {
 impl ManualOrders {
     pub fn decode(text: &str) -> Self { serde_json::from_str(text).unwrap_or_default() }
     pub fn encode(&self) -> Result<String, serde_json::Error> { serde_json::to_string(self) }
-    pub fn revision(&self) -> u64 { self.revision }
+    pub fn revision_for(&self, folder: &Path) -> u64 {
+        self.folders.get(folder).map_or(0, |order| order.revision)
+    }
     pub fn enabled(&self, folder: &Path) -> bool {
         self.folders.get(folder).is_some_and(|order| order.enabled)
     }
 
     pub fn set_enabled(&mut self, folder: &Path, enabled: bool) {
         if self.enabled(folder) == enabled { return; }
-        self.folders.entry(folder.to_path_buf()).or_default().enabled = enabled;
         self.revision = self.revision.wrapping_add(1);
+        let order = self.folders.entry(folder.to_path_buf()).or_default();
+        order.enabled = enabled;
+        order.revision = self.revision;
     }
 
     /// Preserve the ordinary folder-first order, and apply the saved order
@@ -53,6 +59,7 @@ impl ManualOrders {
         if order.files == paths { return false; }
         order.files = paths.to_vec();
         self.revision = self.revision.wrapping_add(1);
+        order.revision = self.revision;
         true
     }
 }
@@ -92,6 +99,21 @@ mod tests {
         Entry { name: path.file_name().unwrap().to_string_lossy().into_owned(),
             path: path.to_path_buf(), is_directory: directory, is_symlink: false,
             hidden: false, size: 0, modified: None }
+    }
+
+    #[test]
+    fn changing_one_folder_does_not_invalidate_another() {
+        let mut orders = ManualOrders::default();
+        let a = Path::new("a");
+        let b = Path::new("b");
+        orders.set_enabled(a, true);
+        orders.set_enabled(b, true);
+        let revision = orders.revision_for(b);
+        assert!(orders.save(a, &[a.join("file")]));
+        assert_eq!(orders.revision_for(b), revision);
+        assert_ne!(orders.revision_for(a), revision);
+        orders.set_enabled(a, false);
+        assert_eq!(orders.revision_for(b), revision);
     }
 
     #[test]

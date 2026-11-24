@@ -144,7 +144,7 @@ impl Explorer {
         // The quick filter applies to the focused pane's folder only.
         let filter = if group == self.browser.active && folder == self.pane_path(group) { self.filter.clone() } else { String::new() };
         let spec = self.sort_for(group);
-        let manual_revision = self.manual_orders.revision();
+        let manual_revision = self.manual_orders.revision_for(folder);
         let manual = self.manual_orders.enabled(folder);
         let sizes = if spec.key == filemanager_core::sort::SortKey::Size { self.sizes.revision } else { 0 };
         let label_filter = self.label_filter(group);

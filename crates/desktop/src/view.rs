@@ -1640,12 +1640,15 @@ impl Explorer {
                         range.map(|row| {
                             let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
                                 .map(|position| { let entry = listing.entries[indices[position]].clone(); let (x,y)=this.motion.grids.get(&side).map_or((0.,0.),|grid|grid.offset(&entry.path,std::time::Instant::now()));
-                                    let tile=this.tile(&entry, &folder, side, cx).opacity(if manual_hidden.contains(&entry.path){0.}else{1.});
+                                    // The dragged item is represented by the ghost, not an invisible interactive tile.
+                                    let tile=if manual_hidden.contains(&entry.path) {
+                                        div().w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).into_any_element()
+                                    }else{this.tile(&entry, &folder, side, cx).into_any_element()};
                                     let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
                                     if let Some(frame)=&spatial_frame {
-                                        spatial_slot(frame,&entry.path,tile.into_any_element(),Some(crate::thumbs::tile_width()),crate::thumbs::tile_height())
+                                        spatial_slot(frame,&entry.path,tile,Some(crate::thumbs::tile_width()),crate::thumbs::tile_height())
                                             .absolute().left(left).top(px(y)).into_any_element()
-                                    }else{tile.absolute().left(left).top(px(y)).into_any_element()} })
+                                    }else{div().absolute().left(left).top(px(y)).w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).child(tile).into_any_element()} })
                                 .collect::<Vec<_>>();
                             div().relative().w_full().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP))
                                 .children(tiles).into_any_element()
@@ -1674,7 +1677,8 @@ impl Explorer {
                 for row in geometry.into_iter().filter(|r|r.height>0.001 && (r.top+r.height)*row_h>=start-row_h && r.top*row_h<=end+row_h) {
                     let entry=&listing.entries[row.index];let on_trail=trail.as_ref()==Some(&entry.path);
                     let logical=manual_positions.as_ref().and_then(|positions|positions.get(&row.index).copied()).unwrap_or(row.position.unwrap_or(0));
-                    let body=self.row(entry,&folder,side,logical,on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx);
+                    let body=if manual_hidden.contains(&entry.path){div().w_full().h(px(row_h)).into_any_element()}
+                        else{self.row(entry,&folder,side,logical,on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx)};
                     let mut slot=div().id(SharedString::from(format!("disclosing-{}",entry.path.display())))
                         .absolute().left_0().right_0().top(px(row.top*row_h)).h(px(row.height*row_h)).overflow_hidden()
                         .opacity(if manual_hidden.contains(&entry.path){0.}else{row.opacity}).child(body);
@@ -1699,8 +1703,8 @@ impl Explorer {
                             let entry = &listing.entries[indices[position]];
                             let on_trail = trail.as_ref() == Some(&entry.path);
                             let logical=manual_positions.as_ref().and_then(|positions|positions.get(&indices[position]).copied()).unwrap_or(position);
-                            let row=this.row(entry, &folder, side, logical, on_trail, list_mode, list_mode && position % 2 == 1, cx);
-                            let row=if manual_hidden.contains(&entry.path){div().opacity(0.).child(row).into_any_element()}else{row};
+                            let row=if manual_hidden.contains(&entry.path){div().w_full().h(px(row_height())).into_any_element()}
+                                else{this.row(entry, &folder, side, logical, on_trail, list_mode, list_mode && position % 2 == 1, cx)};
                             if let Some(frame)=&spatial_frame {
                                 spatial_slot(frame,&entry.path,row,None,row_height()).into_any_element()
                             }else{row}
@@ -3439,7 +3443,11 @@ impl Render for Explorer {
             // Leaving the window hands the files to Windows for other programs.
             // Ctrl or Shift pressed mid-drag: the word on the files changes at once.
             .on_modifiers_changed(cx.listener(|this,_: &gpui::ModifiersChangedEvent,window,cx| {
-                if this.dragging_files(cx) { if window.modifiers().control || window.modifiers().shift {this.manual_drag.pointer=None;} window.refresh(); }
+                if this.dragging_files(cx) {
+                    let modifiers=window.modifiers();
+                    this.manual_drag.transfer_modifier=modifiers.control || modifiers.shift;
+                    window.refresh();
+                }
             }))
             .on_drag_move::<ExternalPaths>(cx.listener(|this,_: &gpui::DragMoveEvent<ExternalPaths>,_,_| {
                 this.file_drag = true;
@@ -3451,7 +3459,8 @@ impl Render for Explorer {
                 let paths = &event.drag(cx).paths;
                 if &this.drag_paths != paths { this.drag_paths = paths.clone(); }
                 let modifiers=window.modifiers();
-                let pointer=event.drag(cx).source.clone().filter(|(_,folder)| this.manual_orders.enabled(folder) && !modifiers.control && !modifiers.shift)
+                this.manual_drag.transfer_modifier=modifiers.control || modifiers.shift;
+                let pointer=event.drag(cx).source.clone().filter(|(_,folder)| this.manual_orders.enabled(folder))
                     .map(|source|crate::manual_drag::Pointer{source,position:event.event.position});
                 if pointer!=this.manual_drag.pointer {this.manual_drag.pointer=pointer;cx.notify();}
                 if outside_window(event.event.position, window) {
