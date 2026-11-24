@@ -43,6 +43,7 @@ pub mod dwg;
 pub mod operation_journal;
 
 pub mod sort;
+pub mod manual_order;
 
 pub mod format;
 
