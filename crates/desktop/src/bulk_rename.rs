@@ -3,7 +3,7 @@ use filemanager_core::bulk_rename::RenamePreview;
 
 pub(crate) struct BulkRenameDialog {
     paths: Vec<PathBuf>,
-    pub(crate) preview: Option<RenamePreview>,
+    pub(crate) preview: Option<Arc<RenamePreview>>,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
 }
@@ -20,7 +20,7 @@ impl Explorer {
             return;
         }
         self.context_menu = None;
-        self.bulk_rename_errors.clear();
+        self.bulk_rename_errors = Arc::default();
         self.renaming = false;
         self.bulk_rename = Some(BulkRenameDialog {
             paths,
@@ -78,7 +78,7 @@ impl Explorer {
                 };
                 dialog.loading = false;
                 match result {
-                    Ok(preview) => dialog.preview = Some(preview),
+                    Ok(preview) => dialog.preview = Some(Arc::new(preview)),
                     Err(error) => dialog.error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -88,7 +88,7 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn apply_bulk_rename(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn apply_bulk_rename(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         if self.transfers.busy || self.transfers.copying {
             return;
         }
@@ -106,7 +106,8 @@ impl Explorer {
             return;
         }
         let dialog = self.bulk_rename.take().unwrap();
-        let mut queue = match dialog.preview.unwrap().into_queue() {
+        window.focus(&self.focus_handle, cx);
+        let mut queue = match Arc::unwrap_or_clone(dialog.preview.unwrap()).into_queue() {
             Ok(queue) => queue,
             Err(error) => {
                 self.status = error.to_string();
@@ -134,7 +135,7 @@ impl Explorer {
                 let report = filemanager_core::bulk_rename::RenameReport::from_results(results);
                 let receipts = report.receipts;
                 let total = report.total;
-                this.bulk_rename_errors = report.errors;
+                this.bulk_rename_errors = Arc::new(report.errors);
                 let done = receipts.len();
                 this.marked.clear(); this.anchor = None;
                 this.selected = crate::normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));

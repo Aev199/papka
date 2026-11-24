@@ -31,10 +31,6 @@ pub fn set_animations(on: bool) { ANIMATIONS.store(on, std::sync::atomic::Orderi
 /// A popup's entrance: quick and easing out, like macOS. It plays whatever
 /// Windows' own animation setting is (often off and locked by policy);
 /// Papka's own «Анимации» setting turns it off.
-pub fn motion(ms: u64) -> gpui::Animation {
-    let ms = if animations() { ms } else { 1 };
-    gpui::Animation::new(std::time::Duration::from_millis(ms)).with_easing(gpui::ease_out_quint())
-}
 
 pub fn set_light(light: bool) {
     LIGHT.store(light, std::sync::atomic::Ordering::Relaxed);

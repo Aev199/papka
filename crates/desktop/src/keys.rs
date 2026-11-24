@@ -857,7 +857,7 @@ impl Explorer {
         }
         self.renaming = false;
         self.bulk_rename = None;
-        self.bulk_rename_errors.clear();
+        self.bulk_rename_errors = Arc::default();
         self.bulk_rename_generation = self.bulk_rename_generation.wrapping_add(1);
         self.creating_folder = false;
         self.saving_workspace = false;

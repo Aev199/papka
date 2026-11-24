@@ -504,7 +504,7 @@ impl Explorer {
     }
     /// One page of the main moves, keys on the left: read at a glance,
     /// closed with one button or Esc.
-    fn tour_view(&self, _step: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn tour_view(&self, _step: usize, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         let mut list = div().flex().flex_col().gap_3();
         for (heading, rows) in TOUR {
             let mut group = div().flex().flex_col()
@@ -529,14 +529,13 @@ impl Explorer {
                     .on_click(cx.listener(|this,_,_,cx| this.close_tour(cx)))));
         div().id("tour-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x0000008C))
-            .child(card)
-            .with_animation("tour-appear", motion(130), |this, delta| this.opacity(delta))
+            .child(card.mt(px(6.*(1.-phase.alpha))))
+            .opacity(phase.alpha).when(phase.closing,|view|view.child(crate::popup_motion::shield()))
             .into_any_element()
     }
 
-    fn comparison_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn comparison_view(&self, comparison:&crate::compare::Comparison, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         use filemanager_core::folder_compare::Difference::*;
-        let comparison = self.comparison.as_ref().unwrap();
         let (to_right, to_left) = (comparison.count(true), comparison.count(false));
         let side = |side: &Option<filemanager_core::folder_compare::Side>, is_dir: bool| match side {
             Some(s) if is_dir => "папка".to_string(),
@@ -582,7 +581,7 @@ impl Explorer {
                 .child(div().w(px(170.)).flex_none().child("Слева")).child(div().w(px(170.)).flex_none().child("Справа")))
             .child(body)
             .child(div().p_3().flex().items_center().gap_2().border_t_1().border_color(rgb(BORDER))
-                .child(div().flex_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                     .child("Сравниваются имена, размеры и даты. Новый файл заменяет старый, старый уходит в Корзину."))
                 .child(text_button("comparison-again", "Сравнить снова", ButtonKind::Ghost)
                     .on_click(cx.listener(|this,_,_,cx| this.rerun_comparison(cx))))
@@ -594,8 +593,8 @@ impl Explorer {
                     .on_click(cx.listener(|this,_,_,cx| {this.comparison=None;cx.notify();}))));
         div().id("comparison-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x0000008C))
-            .child(card.with_animation("comparison-card", motion(170), |card, delta| card.mt(px(12. * (1. - delta)))))
-            .with_animation("comparison-appear", motion(150), |this, delta| this.opacity(delta))
+            .child(card.mt(px(6.*(1.-phase.alpha))))
+            .opacity(phase.alpha).when(phase.closing,|view|view.child(crate::popup_motion::shield()))
             .into_any_element()
     }
 
@@ -3115,13 +3114,13 @@ impl Explorer {
 
     // ------------------------------------------------------------ dialogs
 
-    fn bulk_rename_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.bulk_rename_errors.is_empty() {
+    fn bulk_rename_dialog(&self, state:&crate::popup_motion::Bulk, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
+        if !state.errors.is_empty() {
             let mut rows = div().id("bulk-rename-errors").max_h(px(320.)).overflow_y_scrollbar()
                 .flex().flex_col().gap_2().text_size(px(12.));
-            for error in &self.bulk_rename_errors { rows = rows.child(error.clone()); }
-            return Some(div().id("bulk-rename-result").absolute().inset_0().flex().items_center().justify_center()
-                .bg(rgba(0x0000008C))
+            for error in state.errors.iter() { rows = rows.child(error.clone()); }
+            return div().id("bulk-rename-result").absolute().inset_0().flex().items_center().justify_center()
+                .bg(rgba(0x0000008C)).opacity(phase.alpha)
                 .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded(px(4.)).bg(rgb(RAISED))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child("Ошибки переименования группы")
@@ -3129,9 +3128,8 @@ impl Explorer {
                     .child("Завершённые действия можно отменить Ctrl+Z после закрытия этого списка.")
                     .child(text_button("bulk-result-close", "Закрыть", ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, window, cx| this.key_dismiss(&keys::DismissOverlay, window, cx)))))
-                .into_any_element());
+                .when(phase.closing,|view|view.child(crate::popup_motion::shield())).into_any_element();
         }
-        let state = self.bulk_rename.as_ref()?;
         let mut rows = div().id("bulk-rename-rows").max_h(px(320.)).overflow_y_scrollbar()
             .flex().flex_col().gap_2().p_2().rounded(px(4.)).bg(rgb(SURFACE));
         if state.loading { rows = rows.child("Проверка имён…"); }
@@ -3152,12 +3150,12 @@ impl Explorer {
                 .on_click(cx.listener(|this, _, window, cx| this.key_dismiss(&keys::DismissOverlay, window, cx))));
         if can_apply {
             buttons = buttons.child(text_button("bulk-apply", "Переименовать группу", ButtonKind::Primary)
-                .on_click(cx.listener(|this, _, _, cx| this.apply_bulk_rename(cx))));
+                .on_click(cx.listener(|this, _, window, cx| this.apply_bulk_rename(window, cx))));
         } else {
             buttons = buttons.child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Применение недоступно"));
         }
-        Some(div().id("bulk-rename-backdrop").absolute().inset_0().flex().items_center().justify_center()
-            .bg(rgba(0x0000008C))
+        div().id("bulk-rename-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C)).opacity(phase.alpha)
             .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded(px(6.))
                 .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -3168,58 +3166,45 @@ impl Explorer {
                 .child(rows)
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM))
                     .child("Занятые имена и ошибки блокируют группу. Частичный успех можно отменить Ctrl+Z."))
-                .child(buttons))
-            .into_any_element())
+                .child(buttons).mt(px(6.*(1.-phase.alpha))))
+            .when(phase.closing,|view|view.child(crate::popup_motion::shield())).into_any_element()
     }
 
-    fn conflict_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (transfer, conflicts) = self.transfers.pending.as_ref()?;
-        let recycle = filemanager_core::path_utils::has_recycle_bin(&transfer.target);
-        let shown = conflicts.len().min(4);
-        let more = conflicts.len() - shown;
-        let mut list = div().flex().flex_col().gap_1().p_2().rounded(px(4.)).bg(rgb(SURFACE))
+    fn conflict_content(&self)->Option<crate::popup_motion::Conflict> {
+        let (transfer,conflicts)=self.transfers.pending.as_ref()?;
+        Some(crate::popup_motion::Conflict{
+            target:browser::display_name(&transfer.target),recycle:filemanager_core::path_utils::has_recycle_bin(&transfer.target),total:conflicts.len(),
+            lines:conflicts.iter().take(4).map(|c|(c.source_size.is_none()&&c.existing_size.is_none(),browser::display_name(&c.source),crate::transfers::conflict_note(c))).collect(),
+        })
+    }
+    fn conflict_dialog(&self,state:&crate::popup_motion::Conflict,phase:crate::popup_motion::Phase,cx:&mut Context<Self>)->AnyElement {
+        let recycle=state.recycle;
+        let mut list=div().flex().flex_col().gap_1().p_2().rounded(px(4.)).bg(rgb(SURFACE))
             .border_1().border_color(rgb(BORDER)).text_size(px(12.));
-        for conflict in &conflicts[..shown] {
-            let note = crate::transfers::conflict_note(conflict);
-            let folder = conflict.source_size.is_none() && conflict.existing_size.is_none();
-            list = list.child(div().flex().items_center().gap_2()
-                .child(small_icon(if folder { "fm/folder-fill.svg" } else { "fm/file.svg" }, TEXT_MUTED))
-                .child(div().flex().flex_col().min_w_0()
-                    .child(div().truncate().child(browser::display_name(&conflict.source)))
-                    .when(!note.is_empty(), |d| d.child(div().truncate().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(note)))));
+        for (folder,name,note) in &state.lines {
+            list=list.child(div().flex().items_center().gap_2()
+                .child(small_icon(if *folder{"fm/folder-fill.svg"}else{"fm/file.svg"},TEXT_MUTED))
+                .child(div().flex().flex_col().min_w_0().child(div().truncate().child(name.clone()))
+                    .when(!note.is_empty(),|d|d.child(div().truncate().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(note.clone())))));
         }
-        if more > 0 {
-            list = list.child(div().text_color(rgb(TEXT_DIM)).child(format!("и ещё {more}")));
-        }
-        let dialog = div().id("conflict-dialog").w(px(460.)).p_4().flex().flex_col().gap_3()
-            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(format!("Совпадают имена: {}", conflicts.len())))
-            .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                .child(format!("В папке «{}» уже есть объекты с такими именами. {} Каталоги не заменяются.",
-                    browser::display_name(&transfer.target),
-                    if recycle { "При замене прежние файлы отправляются в Корзину." }
-                    else { "Здесь нет Корзины (сетевая папка или съёмный диск): прежние файлы заменятся безвозвратно, как в Проводнике." })))
+        let more=state.total.saturating_sub(state.lines.len());
+        if more>0 {list=list.child(div().text_color(rgb(TEXT_DIM)).child(format!("и ещё {more}")));}
+        let dialog=div().id("conflict-dialog").w(px(460.)).p_4().flex().flex_col().gap_3()
+            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).mt(px(6.*(1.-phase.alpha)))
+            .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
+            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Совпадают имена: {}",state.total)))
+            .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("В папке «{}» уже есть объекты с такими именами. {} Каталоги не заменяются.",state.target,
+                if recycle{"При замене прежние файлы отправляются в Корзину."}else{"Здесь нет Корзины (сетевая папка или съёмный диск): прежние файлы заменятся безвозвратно, как в Проводнике."})))
             .child(list)
-            .child(text_button("conflict-replace", if recycle { "Заменить файлы — прежние в Корзину" } else { "Заменить файлы безвозвратно" }, ButtonKind::Ghost)
-                .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Replace, cx))))
+            .child(text_button("conflict-replace",if recycle{"Заменить файлы — прежние в Корзину"}else{"Заменить файлы безвозвратно"},ButtonKind::Ghost)
+                .on_click(cx.listener(|this,_,_,cx|this.resolve_transfer(crate::ConflictChoice::Replace,cx))))
             .child(div().flex().justify_end().gap_2()
-                .child(text_button("conflict-cancel", "Отмена", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Cancel, cx))))
-                .child(text_button("conflict-skip", "Пропустить", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Skip, cx))))
-                .child(text_button("conflict-keep", "Сохранить оба", ButtonKind::Primary)
-                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::KeepBoth, cx)))))
-            .with_animation("conflict-appear",
-                motion(150),
-                |this, delta| this.opacity(delta).mt(px(12. * (1. - delta))));
-        Some(
-            div().id("conflict-backdrop").absolute().inset_0().flex().items_center().justify_center()
-                .bg(rgba(0x0000008C))
-                .child(dialog)
-                .into_any_element()
-        )
+                .child(text_button("conflict-cancel","Отмена",ButtonKind::Ghost).on_click(cx.listener(|this,_,_,cx|this.resolve_transfer(crate::ConflictChoice::Cancel,cx))))
+                .child(text_button("conflict-skip","Пропустить",ButtonKind::Ghost).on_click(cx.listener(|this,_,_,cx|this.resolve_transfer(crate::ConflictChoice::Skip,cx))))
+                .child(text_button("conflict-keep","Сохранить оба",ButtonKind::Primary).on_click(cx.listener(|this,_,_,cx|this.resolve_transfer(crate::ConflictChoice::KeepBoth,cx)))));
+        div().id("conflict-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C)).opacity(phase.alpha).child(dialog)
+            .when(phase.closing,|view|view.child(crate::popup_motion::shield())).into_any_element()
     }
 
     fn dialog_content(&self)->Option<crate::popup_motion::Prompt> {
@@ -3363,10 +3348,20 @@ impl Render for Explorer {
             .text_color(rgb(TEXT)).text_size(px(13.))
             .key_context("Filemanager")
             .capture_key_down(cx.listener(|this,event:&gpui::KeyDownEvent,_,cx|{
-                let replacement=this.palette.is_some() || this.settings.is_some() || this.tour.is_some() || this.comparison.is_some() || this.dialog_content().is_some();
-                let closing=!replacement && (this.motion.surfaces.interface.closing || this.motion.surfaces.palette.is_some() || this.motion.surfaces.settings.is_some() || this.motion.surfaces.prompt.retained()
-                    || (!this.about_open && this.motion.surfaces.about.retained())
-                    || (this.context_menu.is_none() && this.motion.surfaces.menu.retained()));
+                let held=&this.motion.surfaces;
+                let closing=crate::popup_motion::blocks_input(&[
+                    (this.version_editing.is_some(),held.versions.retained()),
+                    (this.palette.is_some()||this.settings.is_some(),held.interface.closing||held.palette.is_some()||held.settings.is_some()),
+                    (this.tour.is_some(),held.tour.retained()),
+                    (this.updates.dialog,held.update.retained()),
+                    (this.about_open,held.about.retained()),
+                    (this.comparison.is_some(),held.comparison.retained()),
+                    (this.quick_look.is_some(),false),
+                    (this.bulk_rename.is_some()||!this.bulk_rename_errors.is_empty(),held.bulk.retained()),
+                    (this.transfers.pending.is_some(),held.conflict.retained()),
+                    (this.dialog_content().is_some(),held.prompt.retained()),
+                    (this.context_menu.is_some(),held.menu.retained()),
+                ]);
                 let reopen=event.keystroke.modifiers.control && matches!(event.keystroke.key.as_str(),"k"|"p"|",");
                 if closing && !reopen {cx.stop_propagation();}
             }))
@@ -3573,7 +3568,7 @@ impl Render for Explorer {
                         .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
                     .child(self.status_bar(cx))));
         let now=std::time::Instant::now();let animate=crate::theme::animations();
-        if self.context_menu.is_none() && (self.palette.is_some() || self.settings.is_some() || self.dialog_content().is_some() || self.tour.is_some() || self.comparison.is_some() || self.about_open) {
+        if self.context_menu.is_none() && (self.palette.is_some() || self.settings.is_some() || self.dialog_content().is_some() || self.tour.is_some() || self.comparison.is_some() || self.about_open || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty() || self.transfers.pending.is_some() || self.updates.dialog || self.version_editing.is_some()) {
             self.motion.surfaces.menu=Default::default();
         }
         if let Some((menu,phase))=self.motion.surfaces.menu.sample_identity(self.context_menu.clone().map(|menu|(menu.serial,menu)),now,animate) {
@@ -3585,10 +3580,17 @@ impl Render for Explorer {
             if phase.active {window.request_animation_frame();}
             root=root.child(self.dialog(&state,phase,cx));
         }
-        if let Some(dialog) = self.conflict_dialog(cx) {
-            root = root.child(dialog);
+        let conflict=self.conflict_content();
+        if let Some((state,phase))=self.motion.surfaces.conflict.sample(conflict,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.conflict_dialog(&state,phase,cx));
         }
-        if let Some(dialog) = self.bulk_rename_dialog(cx) { root = root.child(dialog); }
+        let bulk=(self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty()).then(||crate::popup_motion::Bulk{
+            preview:self.bulk_rename.as_ref().and_then(|s|s.preview.clone()),loading:self.bulk_rename.as_ref().is_some_and(|s|s.loading),
+            error:self.bulk_rename.as_ref().and_then(|s|s.error.clone()),errors:self.bulk_rename_errors.clone(),
+        });
+        if let Some((state,phase))=self.motion.surfaces.bulk.sample(bulk,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.bulk_rename_dialog(&state,phase,cx));
+        }
         if let Some(rect)=self.marquee_rectangle() {root=root.child(rect);}
         if let Some(drag)=self.right_drag.as_ref().filter(|drag| drag.active) {
             let name = match drag.paths.as_slice() {
@@ -3606,25 +3608,37 @@ impl Render for Explorer {
             if active {window.request_animation_frame();}
             if finished {self.quick_look=None;} else {root=root.child(self.quick_look_view(shell,content,loading,cx));}
         }
-        if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
+        if let Some((state,phase))=self.motion.surfaces.comparison.sample(self.comparison.clone(),now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.comparison_view(&state,phase,cx));
+        }
         if let Some((_,phase))=self.motion.surfaces.about.sample(self.about_open.then_some(()),now,animate) {
             if phase.active {window.request_animation_frame();}
             root=root.child(self.about_panel(phase,cx));
         }
-        if let Some(panel)=self.transfer_panel(cx) { root=root.child(panel); }
-        if let Some(dialog)=self.update_dialog(cx) { root=root.child(dialog); }
-        if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
+        let transfer=self.transfer_panel_presentation(self.motion.surfaces.transfer.last());
+        if let Some((state,phase))=self.motion.surfaces.transfer.sample(transfer,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.transfer_panel(&state,phase,cx));
+        }
+        let update=(self.updates.dialog && !matches!(self.updates.phase,crate::updates::Phase::Idle|crate::updates::Phase::Checking)).then(||self.updates.phase.clone());
+        if let Some((state,phase))=self.motion.surfaces.update.sample(update,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.update_dialog(&state,phase,cx));
+        }
+        if let Some((step,phase))=self.motion.surfaces.tour.sample(self.tour,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.tour_view(step,phase,cx));
+        }
         let live_interface=self.palette.is_some() || self.settings.is_some();
-        let replaced=self.about_open || self.tour.is_some() || self.comparison.is_some() || self.creating_folder || self.saving_workspace || self.confirm_recycle.is_some();
+        let replaced=self.about_open || self.tour.is_some() || self.comparison.is_some() || self.creating_folder || self.saving_workspace || self.confirm_recycle.is_some() || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty() || self.transfers.pending.is_some() || self.updates.dialog;
         if live_interface || replaced {self.motion.surfaces.palette=None;self.motion.surfaces.settings=None;}
-        if replaced {self.motion.surfaces.interface=Default::default();}
+        if replaced && !live_interface {self.motion.surfaces.interface=Default::default();}
         if let Some(phase)=self.motion.surfaces.interface.sample(live_interface,now,animate) {
             if phase.active {window.request_animation_frame();}
             let palette=self.palette.as_ref().or(self.motion.surfaces.palette.as_ref());
             let settings=self.settings.as_ref().or(self.motion.surfaces.settings.as_ref());
             if let Some(overlay)=self.interface_overlay(palette,settings,phase,cx) {root=root.child(overlay);}
         } else {self.motion.surfaces.palette=None;self.motion.surfaces.settings=None;}
-        if let Some(dialog)=self.version_rules_dialog(cx) { root=root.child(dialog); }
+        if let Some((state,phase))=self.motion.surfaces.versions.sample(self.version_editing.clone(),now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.version_rules_dialog(&state,phase,cx));
+        }
         root
     }
 }
