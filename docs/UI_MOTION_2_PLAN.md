@@ -191,3 +191,11 @@ binary detection for invalid bytes. Thumbnail work starts independently of
 metadata/version enumeration, still one worker and guarded by request/path.
 Multi-selection counts use a HashSet rather than repeated linear membership.
 No filesystem reads added to paint. Visual verification remains deferred.
+
+### Stage 8 follow-up — command/folder palette lifecycle
+Typed local path validation runs in a background task rather than during render
+or on every key. One probe per open palette at a time; only the exact current
+query may contribute the direct result. Recursive folder scan and input callbacks
+validate the palette entity identity. Async results preserve selection by path;
+closing folder palettes render their own retained results, not the current
+palette's list. Explicit navigation still uses the existing path validation.

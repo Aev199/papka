@@ -56,6 +56,8 @@ pub(crate) struct Folders {
     items: Vec<(PathBuf, &'static str)>,
     seen: HashSet<String>,
     pub(crate) reading: bool,
+    checked_path: Option<(PathBuf,bool)>,
+    checking_path: bool,
 }
 
 impl Folders {
@@ -64,6 +66,13 @@ impl Folders {
             self.items.push((path, source));
         }
     }
+}
+
+fn typed_local_path(query:&str)->Option<PathBuf>{
+    let query=query.trim();
+    let path=PathBuf::from(query);
+    ((query.contains('\\') || query.contains('/')) && !query.starts_with(r"\\") && path.is_absolute()
+        && !path_utils::is_network_path(&path)).then_some(path)
 }
 
 impl Explorer {
@@ -104,7 +113,8 @@ impl Explorer {
         shallow.dedup();
         folders.reading = true;
         self.open_palette_mode("Перейти к папке: несколько букв имени или путь…", Some(folders), window, cx);
-        if self.palette.is_none() { return; }
+        let Some(palette)=self.palette.as_ref().filter(|p|p.folders.is_some()) else {return;};
+        let session=palette.input.entity_id();
         let task = cx.background_spawn(async move {
             let mut found = jump::subfolders(&roots, DEPTH, LIMIT);
             found.extend(jump::subfolders(&shallow, 1, LIMIT));
@@ -113,9 +123,12 @@ impl Explorer {
         cx.spawn(async move |this, cx| {
             let found = task.await;
             let _ = this.update(cx, |this, cx| {
+                if !this.palette.as_ref().is_some_and(|p|p.input.entity_id()==session) {return;}
+                let selected=this.jump_selected_path();
                 if let Some(folders) = this.palette.as_mut().and_then(|palette| palette.folders.as_mut()) {
                     for path in found { folders.add(path, "Вложенная"); }
                     folders.reading = false;
+                    this.restore_jump_selection(selected);
                     cx.notify();
                 }
             });
@@ -123,19 +136,59 @@ impl Explorer {
         cx.notify();
     }
 
+    /// At most one typed-path probe per open palette; a changed query
+    /// replaces the pending target instead of spawning work on every key.
+    pub(crate) fn probe_jump_path(&mut self,cx:&mut Context<Self>) {
+        let Some(palette)=self.palette.as_mut() else{return;};
+        let Some(folders)=palette.folders.as_mut() else{return;};
+        let Some(path)=typed_local_path(&palette.query) else{return;};
+        if folders.checking_path || folders.checked_path.as_ref().is_some_and(|(p,_)|p==&path) {return;}
+        folders.checking_path=true;
+        let session=palette.input.entity_id();
+        let probe=path.clone();
+        let task=cx.background_spawn(async move {probe.is_dir()});
+        cx.spawn(async move |weak,cx| {
+            let valid=task.await;
+            let _=weak.update(cx,|this,cx|{
+                if !this.palette.as_ref().is_some_and(|p|p.input.entity_id()==session){return;}
+                let selected=this.jump_selected_path();
+                if let Some(folders)=this.palette.as_mut().and_then(|p|p.folders.as_mut()){
+                    folders.checking_path=false;
+                    folders.checked_path=Some((path,valid));
+                }
+                this.restore_jump_selection(selected);
+                this.probe_jump_path(cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn jump_selected_path(&self)->Option<PathBuf>{
+        let selected=self.palette.as_ref()?.selected;
+        self.jump_results().into_iter().nth(selected).map(|(path,_)|path)
+    }
+
+    fn restore_jump_selection(&mut self,path:Option<PathBuf>){
+        let results=self.jump_results();
+        if let Some(palette)=self.palette.as_mut(){
+            palette.selected=path.and_then(|path|results.iter().position(|(p,_)|p==&path))
+                .unwrap_or_else(||palette.selected.min(results.len().saturating_sub(1)));
+            if !results.is_empty(){palette.scroll.scroll_to_item(palette.selected);}
+        }
+    }
+
     /// The folders matching what is typed, best first.
     pub(crate) fn jump_results(&self) -> Vec<(PathBuf, &'static str)> {
-        let Some(palette) = self.palette.as_ref() else { return Vec::new() };
+        self.palette.as_ref().map_or_else(Vec::new,|p|self.jump_results_for(p))
+    }
+
+    fn jump_results_for(&self,palette:&Palette)->Vec<(PathBuf,&'static str)>{
         let Some(folders) = palette.folders.as_ref() else { return Vec::new() };
         let query = palette.query.trim();
         let mut results = Vec::new();
-        // A typed path goes first when it is a folder (shares are not
-        // asked: a slow server must not stall typing).
-        let typed = PathBuf::from(query);
-        // Asked on every keystroke on the UI thread: never on a share.
-        if (query.contains('\\') || query.contains('/')) && !query.starts_with(r"\\") && typed.is_absolute()
-            && !path_utils::is_network_path(&typed) && typed.is_dir() {
-            results.push((typed, "Путь"));
+        // Only use the completed probe for the exact current query.
+        if let Some((path,true))=&folders.checked_path {
+            if typed_local_path(query).as_ref()==Some(path) {results.push((path.clone(),"Путь"));}
         }
         if query.is_empty() {
             results.extend(folders.items.iter().filter(|(_, source)| *source != "Вложенная").take(SHOWN).cloned());
@@ -148,7 +201,9 @@ impl Explorer {
             .collect();
         // Better match first; among equals, the order of the sources.
         scored.sort_by_key(|(score, index)| (-score, *index));
-        results.extend(scored.into_iter().take(SHOWN).map(|(_, index)| folders.items[index].clone()));
+        let direct=results.first().map(|(path,_)|path.clone());
+        results.extend(scored.into_iter().filter(|(_,index)|direct.as_ref()!=Some(&folders.items[*index].0))
+            .take(SHOWN.saturating_sub(results.len())).map(|(_,index)|folders.items[index].clone()));
         results
     }
 
@@ -171,8 +226,8 @@ impl Explorer {
 
     /// The window's list in jump mode.
     pub(crate) fn jump_list(&self, palette: &Palette, list_height:f32, cx: &mut Context<Self>) -> (AnyElement, String) {
-        let results = self.jump_results();
-        let reading = palette.folders.as_ref().is_some_and(|folders| folders.reading);
+        let results = self.jump_results_for(palette);
+        let reading = palette.folders.as_ref().is_some_and(|folders| folders.reading || folders.checking_path);
         let mut list = gpui::div().id("jump-list").min_h_0().max_h(px(list_height)).overflow_y_scroll().py_1().track_scroll(&palette.scroll);
         if results.is_empty() {
             list = list.child(gpui::div().px_4().py_3().text_color(rgb(TEXT_MUTED))

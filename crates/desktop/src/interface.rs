@@ -133,7 +133,11 @@ impl Explorer {
         cx.subscribe_in(
             &input,
             window,
-            |this, input, event, window, cx| match event {
+            |this, input, event, window, cx| {
+                // The closing overlay retains its input entity for painting.
+                // Its delayed events must never act on a newly opened palette.
+                if !this.palette.as_ref().is_some_and(|p|p.input.entity_id()==input.entity_id()){return;}
+                match event {
                 gpui_component::input::InputEvent::Change => {
                     let query = input.read(cx).value().to_string();
                     let selected = if this.palette.as_ref().is_some_and(|p|p.folders.is_none()) {
@@ -144,12 +148,14 @@ impl Explorer {
                         palette.selected = selected;
                         palette.scroll.scroll_to_item(0);
                     }
+                    this.probe_jump_path(cx);
                     cx.notify();
                 }
                 gpui_component::input::InputEvent::PressEnter { .. } => {
                     this.palette_enter(window, cx)
                 }
                 _ => {}
+                }
             },
         )
         .detach();
