@@ -113,3 +113,11 @@ an input shield and fully closed bodies are no longer rendered. Choice chips
 use the same retained hover background as toolbar controls. Hover transitions
 now settle their internal endpoints and obey the diagnostic visual slowdown.
 Selection plate and broader panel spring tuning remain outstanding.
+
+## Stage 7 — inspector visual stability, first slice
+Image/document preview has a fixed-size framed placeholder while the helper or
+GPUI decoding is pending. Fade starts only after ImgResourceLoader returns
+success, and request/path guards prevent stale results; failure is shown once
+per request. Reset readiness on selection/refresh. Add file kind subtitle and
+align inspector metadata labels. No new disk access in rendering; reduced-motion
+pictures snap. Text-preview layout and full visual comparison remain pending.

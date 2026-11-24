@@ -11,6 +11,8 @@ pub(crate) struct InspectorState {
     pub(crate) preview: Option<(String, String)>,
     /// Shell thumbnail (PNG in the cache) for the selected file, if any.
     pub(crate) thumbnail: Option<PathBuf>,
+    pub(crate) thumbnail_ready: bool,
+    pub(crate) thumbnail_failed: bool,
     pub(crate) details_busy: bool,
     pub(crate) thumbnail_busy: bool,
     pub(crate) history: Vec<Event>,
@@ -20,7 +22,7 @@ pub(crate) struct InspectorState {
 
 impl Explorer {
     pub(crate) fn load_selected_thumbnail(&mut self, cx: &mut Context<Self>) {
-        if self.inspector.thumbnail_busy || self.inspector.thumbnail.is_some() {
+        if self.inspector.thumbnail_busy || self.inspector.thumbnail.is_some() || self.inspector.thumbnail_failed {
             return;
         }
         let Some(path) = self.selected.clone().filter(|p| wants_shell_thumbnail(p) && !filemanager_core::archive::is_inside(p)) else {
@@ -42,12 +44,34 @@ impl Explorer {
                     this.load_selected_thumbnail(cx);
                     return;
                 }
+                this.inspector.thumbnail_failed = result.is_err();
                 this.inspector.thumbnail = result.ok();
-                if this.inspector.thumbnail.is_some() { this.motion.picture_arrived(format!("inspector:{}", selected.display())); }
+                this.inspector.thumbnail_ready = false;
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Start the entrance only when GPUI has decoded the thumbnail, not when
+    /// the Shell helper merely returned a cache path.
+    pub(crate) fn prepare_inspector_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.show_inspector || self.operation_review || self.marked.len() > 1
+            || self.inspector.path != self.selected || self.inspector.thumbnail_ready
+            || self.inspector.thumbnail_failed { return; }
+        let Some(path) = self.inspector.thumbnail.clone() else { return; };
+        let resource = gpui::Resource::Path(path.into());
+        let Some(result) = window.use_asset::<gpui::ImgResourceLoader>(&resource,cx) else { return; };
+        if result.is_ok() {
+            self.inspector.thumbnail_ready = true;
+            if let Some(selected) = &self.selected {
+                self.motion.picture_arrived(format!("inspector:{}", selected.display()));
+                if crate::theme::animations() { self.motion.late_frame.set(true); }
+            }
+        } else {
+            self.inspector.thumbnail = None;
+            self.inspector.thumbnail_failed = true;
+        }
     }
 
     pub(crate) fn open_document_preview(&mut self, path: PathBuf, cx: &mut Context<Self>) {

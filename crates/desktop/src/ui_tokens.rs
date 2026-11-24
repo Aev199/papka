@@ -26,6 +26,8 @@ pub(crate) const PALETTE_HEADER_HEIGHT: f32 = 44.;
 pub(crate) const PALETTE_FOOTER_HEIGHT: f32 = 28.;
 pub(crate) const CHECKBOX_SIZE: f32 = 16.;
 pub(crate) const CHECKMARK_SIZE: f32 = 12.;
+pub(crate) const INSPECTOR_LABEL_WIDTH: f32 = 84.;
+pub(crate) const INSPECTOR_PREVIEW_HEIGHT: f32 = 240.;
 
 #[cfg(test)]
 mod tests {

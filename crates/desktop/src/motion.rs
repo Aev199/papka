@@ -297,6 +297,7 @@ impl Motion {
 
     /// How far in the picture for `key` is (1: fully, or never tracked).
     pub(crate) fn picture_opacity(&self, key: &str) -> f32 {
+        if !crate::theme::animations() { return 1.; }
         self.pictures.borrow().get(key).map_or(1., |arrived| ease_out(arrived.elapsed(), PICTURE_IN))
     }
 

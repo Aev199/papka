@@ -2256,8 +2256,8 @@ impl Explorer {
     // ----------------------------------------------------------- inspector
 
     fn property(label: &'static str, value: impl Into<SharedString>) -> impl IntoElement {
-        div().flex().gap_2().text_size(px(12.))
-            .child(div().w(px(76.)).flex_none().text_color(rgb(TEXT_MUTED)).child(label))
+        div().flex().gap_2().text_size(px(ui::SECONDARY_TEXT))
+            .child(div().w(px(ui::INSPECTOR_LABEL_WIDTH)).flex_none().text_color(rgb(TEXT_MUTED)).child(label))
             .child(div().flex_1().min_w_0().text_color(rgb(TEXT)).child(value.into()))
     }
 
@@ -2334,7 +2334,7 @@ impl Explorer {
                     .child(Self::property("Папок", folders.to_string()))
                     .child(Self::property("Размер", format!("{} (без папок)", format_size(bytes))))
                     .child(div().flex().items_center().gap_2()
-                        .child(div().w(px(84.)).flex_none().text_color(rgb(TEXT_MUTED)).child("Метка"))
+                        .child(div().w(px(ui::INSPECTOR_LABEL_WIDTH)).flex_none().text_color(rgb(TEXT_MUTED)).child("Метка"))
                         .child(self.label_picker("group-label", self.marked.to_vec(), cx))))
                 .child(div().flex().gap_2()
                     .child(text_button("group-stage", "Отложить", ButtonKind::Ghost).flex_1()
@@ -2365,8 +2365,12 @@ impl Explorer {
                     Some(image) => img(image).size(px(16.)).flex_none().into_any_element(),
                     None => icon(icon_path, tint).into_any_element(),
                 })
-                .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::SEMIBOLD)
-                    .overflow_hidden().child(title))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap_0p5()
+                    .child(div().text_size(px(ui::SECTION_TITLE_TEXT)).font_weight(gpui::FontWeight::SEMIBOLD)
+                        .overflow_hidden().child(title))
+                    .child(div().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_MUTED))
+                        .child(selected_entry.as_ref().map_or_else(|| if self.selected.is_some() {"Файл".to_owned()} else {"Папка".to_owned()},
+                            |entry| if entry.is_directory {"Папка".to_owned()} else {entry.extension().map(|ext| ext.to_uppercase()).unwrap_or_else(|| "Файл".to_owned())}))))
         );
         match &selected_entry {
             Some(entry) => {
@@ -2385,7 +2389,7 @@ impl Explorer {
                     props = props.child(Self::property("Изменён", format_time(modified)));
                 }
                 props = props.child(div().flex().items_center().gap_2()
-                    .child(div().w(px(84.)).flex_none().text_color(rgb(TEXT_MUTED)).child("Метка"))
+                    .child(div().w(px(ui::INSPECTOR_LABEL_WIDTH)).flex_none().text_color(rgb(TEXT_MUTED)).child("Метка"))
                     .child(self.label_picker("inspector-label", vec![entry.path.clone()], cx)));
                 panel = panel.child(props);
                 let copy_target=entry.path.clone();let tip=entry.path.display().to_string();
@@ -2472,13 +2476,25 @@ impl Explorer {
 
     fn preview_section(&self, entry: &Entry) -> AnyElement {
         // GPUI only decodes dimension-validated small PNGs from the helper.
-        if let Some(thumbnail) = self.inspector.thumbnail.clone().filter(|_| self.inspector.path.as_ref() == Some(&entry.path)) {
+        let current = self.inspector.path.as_ref() == Some(&entry.path);
+        let visual = !entry.is_directory && crate::wants_shell_thumbnail(&entry.path)
+            && !filemanager_core::archive::is_inside(&entry.path);
+        if visual && current {
+            let mut frame = div().w_full().h(px(ui::INSPECTOR_PREVIEW_HEIGHT)).p_1().flex_none()
+                .rounded(px(ui::PANEL_RADIUS)).bg(rgb(SURFACE)).border_1().border_color(rgb(BORDER))
+                .overflow_hidden().flex().items_center().justify_center();
+            if let Some(thumbnail) = self.inspector.thumbnail.clone().filter(|_| self.inspector.thumbnail_ready) {
+                frame = frame.child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)
+                    .opacity(self.motion.picture_opacity(&format!("inspector:{}", entry.path.display()))));
+            } else {
+                let message = if self.inspector.thumbnail_failed { "Предпросмотр недоступен" } else { "Загрузка предпросмотра…" };
+                frame = frame.child(div().flex().flex_col().items_center().gap_2().text_size(px(ui::SECONDARY_TEXT))
+                    .text_color(rgb(TEXT_MUTED)).child(icon(if self.inspector.thumbnail_failed {"fm/file.svg"} else {"fm/image.svg"},TEXT_DIM))
+                    .child(message));
+            }
             return div().flex().flex_col().gap_1()
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Предпросмотр"))
-                .child(div().w_full().h(px(240.)).p_1().flex().items_center().justify_center()
-                    .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)
-                        .opacity(self.motion.picture_opacity(&format!("inspector:{}", entry.path.display())))))
-                .into_any_element();
+                .child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child("Предпросмотр"))
+                .child(frame).into_any_element();
         }
         if self.inspector.loading {
             return div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Загрузка предпросмотра…").into_any_element();
@@ -3418,6 +3434,7 @@ impl Render for Explorer {
             self.request_icons(window.scale_factor(), cx);
         }
         self.load_selected_details(cx);
+        self.prepare_inspector_preview(window,cx);
         self.load_feed(cx);
         if self.select_first_when_loaded && self.selected.is_none() {
             let folder = self.pane_path(self.active_side());

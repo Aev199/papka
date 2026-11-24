@@ -817,6 +817,8 @@ impl Explorer {
         self.inspector.path = self.selected.clone();
         self.inspector.preview = None;
         self.inspector.thumbnail = None;
+        self.inspector.thumbnail_ready = false;
+        self.inspector.thumbnail_failed = false;
         self.inspector.history.clear();
         self.inspector.versions.clear();
         let Some(path) = self.selected.clone() else {
