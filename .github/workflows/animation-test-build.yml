@@ -2,8 +2,8 @@ name: Papka animation test build
 
 on:
   push:
-    branches: [feat/native-gpui-foundation]
-    paths: ['.github/workflows/animation-test-build.yml']
+    branches: [feat/native-gpui-foundation, feat/ui-motion-2]
+    paths: ['.github/workflows/animation-test-build.yml', '.github/ui-motion-test-request.txt']
   workflow_dispatch:
 
 permissions:
@@ -22,7 +22,11 @@ jobs:
       - name: Stamp test build
         run: |
           $commit = (git rev-parse --short HEAD)
-          "PAPKA_VERSION=0.1.104" >> $env:GITHUB_ENV
+          if ("${{ github.ref_name }}" -eq "feat/ui-motion-2") {
+            "PAPKA_VERSION=0.1.105" >> $env:GITHUB_ENV
+          } else {
+            "PAPKA_VERSION=0.1.104" >> $env:GITHUB_ENV
+          }
           "PAPKA_COMMIT=$commit" >> $env:GITHUB_ENV
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,7 +43,7 @@ jobs:
           Set-Content -Path "dist/BUILD.txt" -Value "Animation test build; commit $(git rev-parse HEAD); not an update-channel release."
       - uses: actions/upload-artifact@v4
         with:
-          name: Papka-animation-test-win64
+          name: Papka-animation-test-win64-${{ github.run_number }}
           path: dist/
           retention-days: 3
           if-no-files-found: error
