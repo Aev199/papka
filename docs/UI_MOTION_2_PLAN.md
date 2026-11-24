@@ -79,3 +79,12 @@ filesystem, drag dwell, scroll and mode-commit clocks keep real time. Default 1;
 normal behavior unchanged. More motion clocks can migrate once paired expiration
 and sampling paths are covered. Added standalone telemetry tests and exact
 zero-time spring continuity. CI only, no intermediate portable builds per user.
+
+## Stage 3 — spatial geometry, first slice
+Spatial snapshots now store both origin and size and retarget from shown rectangles.
+The live destination is clipped to an interpolated rectangle while its virtual list
+slot remains fixed; this is a container morph, not a separate icon/text morph or
+an outgoing-content snapshot. Measured destination bounds become available after
+the first destination frame, so the existing mode fade stays for that handover.
+Tests cover interpolated dimensions, interrupted transitions and stale callbacks.
+Windows visual verification and paint-only departure remain outstanding.

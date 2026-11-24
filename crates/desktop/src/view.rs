@@ -66,16 +66,25 @@ fn item_overlays(flash: Option<(crate::motion::Flash, f32)>, fill: Option<f32>) 
 
 /// Keep the logical slot in the virtual list while its visible content moves.
 fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElement, width: Option<f32>, height: f32) -> Div {
-    let offset = frame.offset(path, std::time::Instant::now());
+    use crate::spatial_motion::{Geometry, Position};
+    let pose = frame.pose(path, std::time::Instant::now());
     let record = frame.clone();
     let path = path.to_path_buf();
+    // The virtual slot never changes size. Only the live content moves and
+    // clips to its interpolated rectangle; no duplicated interactive rows.
+    let content = if let Some((offset,size)) = pose {
+        div().absolute().left(px(offset.x)).top(px(offset.y)).w(px(size.x)).h(px(size.y))
+            .overflow_hidden().child(body)
+    } else {
+        div().relative().w_full().h_full().child(body)
+    };
     div().relative().h(px(height)).when_some(width, |slot, width| slot.w(px(width)))
-        .when(width.is_none(), |slot| slot.w_full())
-        .child(div().relative().w_full().h_full().left(px(offset.x)).top(px(offset.y)).child(body))
+        .when(width.is_none(), |slot| slot.w_full()).child(content)
         .on_prepaint(move |bounds, _, _| {
-            record.record(path.clone(), crate::spatial_motion::Position {
-                x: bounds.origin.x / px(1.), y: bounds.origin.y / px(1.),
-            }, offset);
+            record.record(path.clone(), Geometry {
+                origin: Position { x: bounds.origin.x / px(1.), y: bounds.origin.y / px(1.) },
+                size: Position { x: bounds.size.width / px(1.), y: bounds.size.height / px(1.) },
+            }, pose);
         })
 }
 
