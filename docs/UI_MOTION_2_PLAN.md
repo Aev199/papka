@@ -105,3 +105,11 @@ semantics. The label is derived from the current rendered preview, reset each
 root render, and does not authorize a drop. Drop revalidation is unchanged.
 Ghosts use generic file/stack icons and truncate long names without disk I/O.
 Cancellation/landing effects and target-transition polish remain pending.
+
+## Stage 6 — microinteractions, first slice
+Disclosure height and chevron use the shared critically damped spring with a
+bounded tail; clamp physical output to [0,1]. Closing disclosure bodies have
+an input shield and fully closed bodies are no longer rendered. Choice chips
+use the same retained hover background as toolbar controls. Hover transitions
+now settle their internal endpoints and obey the diagnostic visual slowdown.
+Selection plate and broader panel spring tuning remain outstanding.

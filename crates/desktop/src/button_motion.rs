@@ -54,9 +54,10 @@ impl Tween {
             self.started = now;
         }
 
-        let t = (now.duration_since(self.started).as_secs_f32() / HOVER_TIME.as_secs_f32()).clamp(0., 1.);
+        let t = (now.saturating_duration_since(self.started).as_secs_f32() / crate::motion_policy::diagnostic_span(HOVER_TIME).as_secs_f32()).clamp(0., 1.);
         let eased = crate::motion::smoothstep(t);
         self.current = self.from + (self.to - self.from) * eased;
+        if t >= 1. { self.from = self.to; self.current = self.to; }
         (self.current, t < 1.)
     }
 }
@@ -78,11 +79,11 @@ impl RenderOnce for ButtonBackground {
             move |bounds, (normal, hover, amount), window, _| {
                 let color = normal.map(|normal| crate::palette::mix(normal, hover, amount)).unwrap_or(hover);
                 if normal.is_some() {
-                    window.paint_quad(gpui::fill(bounds, gpui::rgb(color)).corner_radii(px(4.)));
+                    window.paint_quad(gpui::fill(bounds, gpui::rgb(color)).corner_radii(px(crate::ui_tokens::CONTROL_RADIUS)));
                 } else {
                     let alpha = (amount * 255.).round() as u32;
                     if alpha > 0 {
-                        window.paint_quad(gpui::fill(bounds, gpui::rgba((color << 8) | alpha)).corner_radii(px(4.)));
+                        window.paint_quad(gpui::fill(bounds, gpui::rgba((color << 8) | alpha)).corner_radii(px(crate::ui_tokens::CONTROL_RADIUS)));
                     }
                 }
             },

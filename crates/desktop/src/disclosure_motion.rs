@@ -45,7 +45,7 @@ struct Chevron {
 #[derive(Default)]
 struct Motion {
     initialized: bool,
-    tween: crate::layout_motion::Tween,
+    spring: crate::motion_policy::Spring,
 }
 
 impl Motion {
@@ -53,9 +53,10 @@ impl Motion {
         let target = if open { 1. } else { 0. };
         if !self.initialized {
             self.initialized = true;
-            return self.tween.sample(target, true, now, DURATION_MS);
+            return self.spring.sample(target, true, now, DURATION_MS);
         }
-        self.tween.sample(target, !animate, now, DURATION_MS)
+        let (amount,active) = self.spring.sample(target, !animate, now, DURATION_MS);
+        (amount.clamp(0.,1.),active)
     }
 }
 
@@ -73,13 +74,16 @@ impl RenderOnce for Reveal {
         let fully_closed = amount <= 0. && !self.open;
         div()
             .id(self.id)
+            .relative()
             .h(px(visible_height))
             .w_full()
             .flex_none()
             .min_h_0()
             .overflow_hidden()
-            .when(fully_closed, |element| element.invisible())
-            .child(div().h(px(self.height)).w_full().flex_none().child(self.content))
+            .when(!fully_closed, |element| element.child(div().h(px(self.height)).w_full().flex_none().child(self.content)))
+            // Closing rows are visible only for continuity. No invisible
+            // actionable entries may remain after the group has settled.
+            .when(!self.open && !fully_closed, |element| element.child(crate::popup_motion::shield()))
     }
 }
 

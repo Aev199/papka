@@ -215,12 +215,15 @@ pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
 /// Compact, non-animated choice control for settings. Callers own the
 /// selected state and click action; geometry and presentation are shared.
 pub(crate) fn choice_chip(id: impl Into<ElementId>, label: impl Into<SharedString>, chosen: bool) -> Stateful<Div> {
-    div().id(id).h(px(ui::CHOICE_HEIGHT)).px_2().flex().flex_none().items_center()
+    let id = id.into();
+    div().id(id.clone()).relative().overflow_hidden().h(px(ui::CHOICE_HEIGHT)).px_2().flex().flex_none().items_center()
         .rounded(px(ui::CONTROL_RADIUS)).cursor_pointer().text_size(px(ui::SECONDARY_TEXT)).border_1()
         .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
         .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
-            .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))))
-        .child(label.into())
+            .hover(|s| s.text_color(rgb(TEXT))).on_hover(|_,window,_|window.refresh())
+            .child(div().absolute().inset_0().child(crate::button_motion::background(id,None,themed(HOVER)))))
+        .active(|style|style.opacity(0.8))
+        .child(div().relative().child(label.into()))
 }
 
 #[derive(Clone, Copy)]
