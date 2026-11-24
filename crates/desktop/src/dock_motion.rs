@@ -1,7 +1,7 @@
 //! Presentation of a tab's docking destination. Drop semantics use the live hit test.
 use std::time::{Duration,Instant};
 use crate::{layout::DockZone,layout_motion::{Rect,Tween}};
-const SPAN:Duration=Duration::from_millis(120);
+const SPAN:Duration=Duration::from_millis(crate::motion::TRANSIENT_MS);
 #[derive(Default)]
 pub(crate) struct DockMotion {
     zone:Option<DockZone>,target:Option<Rect>,from:Option<Rect>,started:Option<Instant>,opacity:Tween,
@@ -9,7 +9,7 @@ pub(crate) struct DockMotion {
 impl DockMotion {
     fn shown(&self,now:Instant)->Option<Rect>{
         let to=self.target?;let from=self.from.unwrap_or(to);
-        let t=self.started.map_or(1.,|at|(now.saturating_duration_since(at).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.));let t=1.-(1.-t).powi(3);
+        let t=self.started.map_or(1.,|at|(now.saturating_duration_since(at).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.));let t=crate::motion::ease_out_fraction(t);
         let mix=|a:f32,b:f32|a+(b-a)*t;
         Some(Rect{x:mix(from.x,to.x),y:mix(from.y,to.y),w:mix(from.w,to.w),h:mix(from.h,to.h)})
     }
@@ -21,7 +21,7 @@ impl DockMotion {
             }
             self.zone=Some(zone);
         }
-        let (opacity,fading)=self.opacity.sample(if zone.is_some(){1.}else{0.},!animate,now,120);
+        let (opacity,fading)=self.opacity.sample(if zone.is_some(){1.}else{0.},!animate,now,crate::motion::TRANSIENT_MS);
         if !animate {self.from=self.target;self.started=None;}
         let moving=self.started.is_some_and(|at|now.saturating_duration_since(at)<SPAN);
         if !moving {self.started=None;}

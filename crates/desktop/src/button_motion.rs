@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, Styled, Window, canvas, px};
 
-const HOVER_TIME: Duration = Duration::from_millis(100);
+const HOVER_TIME: Duration = crate::motion::HOVER;
 
 /// Paint a button's normal/hover background without taking over its input
 /// handling. `None` keeps the normal state transparent (for icon buttons).
@@ -55,7 +55,7 @@ impl Tween {
         }
 
         let t = (now.duration_since(self.started).as_secs_f32() / HOVER_TIME.as_secs_f32()).clamp(0., 1.);
-        let eased = t * t * (3. - 2. * t);
+        let eased = crate::motion::smoothstep(t);
         self.current = self.from + (self.to - self.from) * eased;
         (self.current, t < 1.)
     }

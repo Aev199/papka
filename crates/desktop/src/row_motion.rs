@@ -1,7 +1,7 @@
 //! Temporary variable-height presentation of a virtualized version stack.
 use std::{collections::{HashMap,HashSet},path::PathBuf,sync::Arc,time::{Duration,Instant}};
 use filemanager_core::{browser::Listing,versions::Stacked};
-const SPAN:Duration=Duration::from_millis(180);
+const SPAN:Duration=crate::motion::ITEM_REFLOW;
 const LIMIT:usize=20_000;
 #[derive(Clone,Copy,Debug)]
 pub(crate) struct Row {pub index:usize,pub top:f32,pub height:f32,pub opacity:f32,pub position:Option<usize>}
@@ -15,7 +15,7 @@ impl RowMotion {
         let mut motion=Self{listing,roles,order:before.to_vec(),from:before.iter().map(|&i|(i,1.)).collect(),target:HashMap::new(),started:now};
         motion.retarget(after,now);Some(motion)
     }
-    fn amount(&self,now:Instant)->f32{let t=(now.saturating_duration_since(self.started).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.);1.-(1.-t).powi(3)}
+    fn amount(&self,now:Instant)->f32{let t=(now.saturating_duration_since(self.started).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.);crate::motion::ease_out_fraction(t)}
     fn height(&self,index:usize,now:Instant)->f32{let from=self.from.get(&index).copied().unwrap_or(0.);let to=if self.target.contains_key(&index){1.}else{0.};from+(to-from)*self.amount(now)}
     pub fn openness(&self,key:&str,now:Instant)->Option<f32>{
         self.order.iter().find_map(|&i|{

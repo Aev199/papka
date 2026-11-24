@@ -1,8 +1,8 @@
 //! Retained opacity for switching a pane's presentation mode.
 use std::time::{Duration, Instant};
 
-const FADE_OUT: Duration = Duration::from_millis(70);
-const FADE_IN: Duration = Duration::from_millis(110);
+const FADE_OUT: Duration = crate::motion::MODE_FADE_OUT;
+const FADE_IN: Duration = crate::motion::MODE_FADE_IN;
 // Keep a faint layout at the handover: no fully empty/white frame.
 const LOW:f32=0.12;
 
@@ -86,7 +86,7 @@ impl ModeMotion {
 fn progress(now: Instant, started: Instant, duration: Duration) -> f32 {
     (now.saturating_duration_since(started).as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.)
 }
-fn ease(t: f32) -> f32 { 1. - (1. - t).powi(3) }
+use crate::motion::ease_out_fraction as ease;
 
 #[cfg(test)]
 mod tests {

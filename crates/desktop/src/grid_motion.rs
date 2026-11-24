@@ -1,7 +1,7 @@
 //! Retained content coordinates; scrolling does not restart tile movement.
 use std::{collections::HashMap, path::{Path,PathBuf}, sync::Arc, time::{Duration,Instant}};
 use filemanager_core::browser::Listing;
-const SPAN:Duration=Duration::from_millis(180);
+const SPAN:Duration=crate::motion::ITEM_REFLOW;
 #[derive(Clone,Copy,Debug,PartialEq)]
 struct Point{x:f32,y:f32}
 impl Point{fn mix(self,to:Self,t:f32)->Self{Self{x:self.x+(to.x-self.x)*t,y:self.y+(to.y-self.y)*t}}}
@@ -12,7 +12,7 @@ pub(crate) struct GridMotion{
 }
 impl GridMotion{
     fn progress(&self,now:Instant)->f32{self.start.map_or(1.,|at|(now.saturating_duration_since(at).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.))}
-    fn shown(&self,path:&Path,now:Instant)->Option<Point>{let to=*self.target.get(path)?;let t=self.progress(now);Some(self.from.get(path).copied().unwrap_or(to).mix(to,1.-(1.-t).powi(3)))}
+    fn shown(&self,path:&Path,now:Instant)->Option<Point>{let to=*self.target.get(path)?;let t=self.progress(now);Some(self.from.get(path).copied().unwrap_or(to).mix(to,crate::motion::ease_out_fraction(t)))}
     pub fn prepare(&mut self,folder:&Path,listing:&Listing,indices:Arc<Vec<usize>>,columns:usize,cell:(f32,f32),instant:bool,now:Instant)->bool{
         let layout=(columns,cell.0.to_bits(),cell.1.to_bits());let same_folder=self.folder==folder;
         let changed=!same_folder||self.layout!=layout||self.indices.as_ref().is_none_or(|old|!Arc::ptr_eq(old,&indices));

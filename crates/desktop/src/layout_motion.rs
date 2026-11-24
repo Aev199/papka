@@ -39,7 +39,7 @@ pub(crate) struct Tween { from:f32, target:f32, started:Option<Instant> }
 impl Tween {
     pub fn sample(&mut self,target:f32,instant:bool,now:Instant,ms:u64)->(f32,bool) {
         let value=match self.started {
-            Some(at)=>{let t=(now.saturating_duration_since(at).as_secs_f32()/(ms as f32/1000.)).clamp(0.,1.);self.from+(self.target-self.from)*(1.-(1.-t).powi(3))},
+            Some(at)=>{let t=(now.saturating_duration_since(at).as_secs_f32()/(ms as f32/1000.)).clamp(0.,1.);self.from+(self.target-self.from)*crate::motion::ease_out_fraction(t)},
             None=>self.target,
         };
         if instant {self.from=target;self.target=target;self.started=None;return(target,false);}
@@ -105,7 +105,7 @@ impl LayoutMotion {
         let t=self.started.map_or(1.,|at|(now.saturating_duration_since(at).as_secs_f32()/(self.duration as f32/1000.)).clamp(0.,1.));
         let active=t<1.;
         self.shown=target.into_iter().map(|(id,r)|{
-            let from=self.from.get(&id).copied().unwrap_or(r);(id,if active {from.mix(r,1.-(1.-t).powi(3))}else{r})
+            let from=self.from.get(&id).copied().unwrap_or(r);(id,if active {from.mix(r,crate::motion::ease_out_fraction(t))}else{r})
         }).collect();
         if !active {self.started=None;} (self.shown.clone(),active)
     }

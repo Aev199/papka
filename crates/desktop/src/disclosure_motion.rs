@@ -5,7 +5,7 @@ use gpui::{
     prelude::*, App, AnyElement, ElementId, IntoElement, RenderOnce, Styled, Svg, Window, div, px,
 };
 
-const DURATION_MS: u64 = 160;
+const DURATION_MS: u64 = crate::motion::DISCLOSURE_MS;
 
 /// Clip content while its accordion height moves. Content stays rendered through closing.
 pub(crate) fn reveal(

@@ -35,10 +35,21 @@ pub(crate) fn flash_strength(elapsed: Duration) -> Option<f32> {
     (t < 1.).then(|| (1. - t) * (1. - t))
 }
 
+// Shared motion policy. Preserve the current visual timing while consolidating curves.
+pub(crate) const ITEM_REFLOW: Duration = Duration::from_millis(180);
+pub(crate) const MODE_FADE_OUT: Duration = Duration::from_millis(70);
+pub(crate) const MODE_FADE_IN: Duration = Duration::from_millis(110);
+pub(crate) const TRANSIENT_MS: u64 = 120;
+pub(crate) const DISCLOSURE_MS: u64 = 160;
+pub(crate) const HOVER: Duration = Duration::from_millis(100);
+
+pub(crate) fn ease_out_fraction(t: f32) -> f32 { 1. - (1. - t).powi(3) }
+pub(crate) fn smoothstep(t: f32) -> f32 { t * t * (3. - 2. * t) }
+
 /// Eased progress of an opening (0 → 1) `elapsed` into `span`.
 pub(crate) fn ease_out(elapsed: Duration, span: Duration) -> f32 {
     let t = (elapsed.as_secs_f32() / span.as_secs_f32()).clamp(0., 1.);
-    1. - (1. - t).powi(3)
+    ease_out_fraction(t)
 }
 
 /// The bar's next value on the way from `shown` to `real` after `dt` s.

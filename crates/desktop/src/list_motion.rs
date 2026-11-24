@@ -2,7 +2,7 @@
 use std::{collections::HashMap,sync::Arc,time::{Duration,Instant}};
 use filemanager_core::browser::Listing;
 use crate::row_motion::Row;
-const SPAN:Duration=Duration::from_millis(180);
+const SPAN:Duration=crate::motion::ITEM_REFLOW;
 const LIMIT:usize=5000;
 #[derive(Clone,Copy)]
 struct Place {top:f32,opacity:f32}
@@ -28,7 +28,7 @@ impl ListMotion {
     pub fn active(&self,now:Instant)->bool{now.saturating_duration_since(self.started)<SPAN}
     pub fn matches(&self,order:&[usize])->bool{self.order==order}
     pub fn geometry(&self,now:Instant)->(Vec<Row>,f32){
-        let t=(now.saturating_duration_since(self.started).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.);let t=1.-(1.-t).powi(3);
+        let t=(now.saturating_duration_since(self.started).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.);let t=crate::motion::ease_out_fraction(t);
         let rows=self.order.iter().enumerate().map(|(p,&index)|{
             let from=self.from[&index];Row{index,top:from.top+(p as f32-from.top)*t,height:1.,opacity:from.opacity+(1.-from.opacity)*t,position:Some(p)}
         }).collect();

@@ -8,7 +8,7 @@ pub(crate) struct Clock {tween:Tween,pub closing:bool}
 impl Clock {
     pub fn sample(&mut self,open:bool,now:Instant,animate:bool)->Option<Phase>{
         self.closing=!open;
-        let (alpha,active)=self.tween.sample(if open{1.}else{0.},!animate,now,120);
+        let (alpha,active)=self.tween.sample(if open{1.}else{0.},!animate,now,crate::motion::TRANSIENT_MS);
         if !open && !active {self.closing=false;return None;}
         Some(Phase{alpha,closing:!open,active})
     }
