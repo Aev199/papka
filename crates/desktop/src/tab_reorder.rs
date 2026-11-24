@@ -6,7 +6,7 @@ use filemanager_core::panes::GroupId;
 use crate::layout_motion::Tween;
 
 const TAB_GAP: f32 = 4.;
-const DURATION_MS: u64 = 120;
+const DURATION_MS: u64 = crate::motion_policy::TRANSIENT_MS;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Target {

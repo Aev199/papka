@@ -19,6 +19,7 @@ mod edge_scroll;
 mod smooth_scroll;
 mod marked;
 mod motion;
+mod motion_policy;
 mod layout_motion;
 mod button_motion;
 mod disclosure_motion;
@@ -187,7 +188,7 @@ impl Render for FileDragPreview {
         let lift = if theme::animations() {
             let t = (self.picked.elapsed().as_secs_f32() / 0.25).min(1.);
             if t < 1. { window.request_animation_frame(); }
-            1. - (1. - t).powi(3)
+            motion_policy::ease_out_fraction(t)
         } else { 1. };
         let word = self.mode.as_ref().and_then(|mode| match &mode.target.borrow().at {
             DropAt::Nothing => None,

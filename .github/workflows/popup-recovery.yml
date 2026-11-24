@@ -1,9 +1,13 @@
-name: Verify recovered popup transitions
+name: Verify native animation changes
 
 on:
   push:
     branches: [feat/native-gpui-foundation]
-    paths: [.github/workflows/popup-recovery.yml]
+    paths:
+      - '.github/workflows/popup-recovery.yml'
+      - 'crates/desktop/src/**'
+      - 'crates/core/src/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,8 +34,12 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets
-      - name: Test standalone layout and colour policies
+      - name: Test standalone motion, layout and colour policies
         run: |
+          rustc --edition=2024 --test crates/desktop/src/motion_policy.rs -o target/ui-motion-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./target/ui-motion-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustc --edition=2024 --test crates/desktop/src/layout.rs -o target/ui-layout-tests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./target/ui-layout-tests.exe

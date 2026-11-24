@@ -47,7 +47,7 @@ pub(crate) struct QuickLook {
     pub(crate) previous_pose: (f32,gpui::Point<f32>),
 }
 
-const PREVIEW_FADE: Duration = Duration::from_millis(150);
+const PREVIEW_FADE: Duration = crate::motion_policy::PREVIEW_FADE;
 static NEXT_PREVIEW_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
@@ -63,7 +63,7 @@ enum PreviewTransition {
 impl QuickLook {
     pub(crate) fn sample(&mut self, now: Instant, animations: bool) -> (f32, f32, bool, bool, bool) {
         let closing=self.closing();
-        let (shell_alpha,shell_active)=self.shell.sample(if closing {0.}else{1.},!animations,now,140);
+        let (shell_alpha,shell_active)=self.shell.sample(if closing {0.}else{1.},!animations,now,crate::motion_policy::PANE_CLOSE_MS);
         let content_active=matches!(self.transition,PreviewTransition::FadeIn(at) if animations && now.saturating_duration_since(at)<PREVIEW_FADE);
         if matches!(self.transition,PreviewTransition::FadeIn(_)) && !content_active {self.transition=PreviewTransition::Stable;}
         let active=shell_active || content_active;
