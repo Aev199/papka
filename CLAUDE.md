@@ -71,6 +71,9 @@ rustc --edition=2024 --test crates/desktop/src/palette.rs -o /tmp/pt && /tmp/pt
   с тестами, как `transfers.rs` (очередь переносов), `directories.rs`
   (кэш списков), `InspectorState`, `SearchState`; новые поля-флаги в
   `Explorer` не добавлять, если им есть место в такой структуре.
+- Обмен с Notch — только через файлы из `docs/INBOX.md` (`projects.json`
+  и записи во `_Входящие`); формат менять в обоих проектах вместе.
+  Notch: репозиторий `Aev199/notch`, модуль `crates/core/src/papka.rs`.
 - Никогда не хранить содержимое файлов: история и лента — только метаданные.
 - Не удалять данные пользователя и профиль (`%LOCALAPPDATA%\Papka`).
 - В GPUI нельзя дважды вызывать `.hover()` на одном элементе — паника.

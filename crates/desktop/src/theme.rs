@@ -22,11 +22,15 @@ pub fn file_icon(extension: Option<&str>) -> (&'static str, u32) {
 }
 
 static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ANIMATIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// «Анимации» in the settings: off, everything appears at once and the
+/// wheel scrolls in steps (busy remote desktops, or a matter of taste).
+pub fn animations() -> bool { ANIMATIONS.load(std::sync::atomic::Ordering::Relaxed) }
+pub fn set_animations(on: bool) { ANIMATIONS.store(on, std::sync::atomic::Ordering::Relaxed); }
+
 /// A popup's entrance: quick and easing out, like macOS. It plays whatever
-/// Windows' own animation setting is: often it is off and locked by policy.
-pub fn motion(ms: u64) -> gpui::Animation {
-    gpui::Animation::new(std::time::Duration::from_millis(ms)).with_easing(gpui::ease_out_quint())
-}
+/// Windows' own animation setting is (often off and locked by policy);
+/// Papka's own «Анимации» setting turns it off.
 
 pub fn set_light(light: bool) {
     LIGHT.store(light, std::sync::atomic::Ordering::Relaxed);
@@ -71,6 +75,15 @@ pub fn themed(color: u32) -> u32 {
 }
 pub fn rgb(color: u32) -> gpui::Rgba {
     gpui::rgb(themed(color))
+}
+/// The text colour with transparency: a light that shows on any row, the
+/// selected one included, in both themes.
+pub fn text_alpha(alpha: u8) -> gpui::Rgba {
+    gpui::rgba((themed(TEXT) << 8) | alpha as u32)
+}
+/// The danger colour with transparency: the light on an item that failed.
+pub fn danger_alpha(alpha: u8) -> gpui::Rgba {
+    gpui::rgba((themed(DANGER) << 8) | alpha as u32)
 }
 /// The accent with transparency, for selections and drop highlights.
 pub fn accent_alpha(alpha: u8) -> gpui::Rgba {

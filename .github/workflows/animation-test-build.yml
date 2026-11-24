@@ -1,0 +1,45 @@
+name: Papka animation test build
+
+on:
+  push:
+    branches: [feat/native-gpui-foundation]
+    paths: ['.github/workflows/animation-test-build.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Build portable Windows test executable
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stamp test build
+        run: |
+          $commit = (git rev-parse --short HEAD)
+          "PAPKA_VERSION=0.1.104" >> $env:GITHUB_ENV
+          "PAPKA_COMMIT=$commit" >> $env:GITHUB_ENV
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Build portable executable
+        run: cargo build --locked -p filemanager-desktop --release --target x86_64-pc-windows-msvc
+      - name: Package executable and SHA256
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/filemanager-desktop.exe" "dist/Papka.exe"
+          $sha = (Get-FileHash "dist/Papka.exe" -Algorithm SHA256).Hash
+          Set-Content -Path "dist/SHA256.txt" -Value "$sha  Papka.exe"
+          Set-Content -Path "dist/BUILD.txt" -Value "Animation test build; commit $(git rev-parse HEAD); not an update-channel release."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Papka-animation-test-win64
+          path: dist/
+          retention-days: 3
+          if-no-files-found: error

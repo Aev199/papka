@@ -1,0 +1,50 @@
+name: Verify native animation changes
+
+on:
+  push:
+    branches: [feat/native-gpui-foundation]
+    paths:
+      - '.github/workflows/popup-recovery.yml'
+      - 'crates/desktop/src/**'
+      - 'crates/core/src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: popup-recovery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Check and test recovered changes on Windows
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Check all workspace targets
+        run: cargo check --workspace --all-targets
+      - name: Run all workspace tests
+        run: cargo test --workspace --all-targets
+      - name: Test standalone motion, layout and colour policies
+        run: |
+          rustc --edition=2024 --test crates/desktop/src/motion_policy.rs -o target/ui-motion-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./target/ui-motion-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2024 --test crates/desktop/src/layout.rs -o target/ui-layout-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./target/ui-layout-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2024 --test crates/desktop/src/palette.rs -o target/ui-palette-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./target/ui-palette-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

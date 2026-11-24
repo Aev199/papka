@@ -1,6 +1,9 @@
 name: Windows portable EXE (manual)
 
 on:
+  push:
+    branches: [feat/native-gpui-foundation]
+    paths: ['.github/beta-release-request.txt']
   workflow_dispatch:
     inputs:
       channel:
@@ -97,6 +100,7 @@ jobs:
       # Some hosted runners do not expose a visible desktop; do not fail
       # the binary build merely because screenshot capture is unavailable.
       - name: Capture native GPUI window (best effort)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         continue-on-error: true
         run: |
           Add-Type -AssemblyName System.Drawing
@@ -172,6 +176,7 @@ jobs:
           }
 
       - name: Upload native UI screenshot when available
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: Papka-UI-Screenshot
@@ -180,6 +185,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload ZIP
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: Papka-Windows-x64
@@ -191,11 +197,11 @@ jobs:
       # version, SHA-256 and change list. A re-run of the same build number
       # does not publish twice.
       - name: Publish release for in-app updates
-        if: ${{ inputs.publish }}
+        if: ${{ github.event_name == 'push' || inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
-          CHANNEL: ${{ inputs.channel }}
-          NOTES: ${{ inputs.notes }}
+          CHANNEL: ${{ inputs.channel || 'beta' }}
+          NOTES: ${{ inputs.notes || '' }}
         run: |
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           $tag = "v$env:PAPKA_VERSION"

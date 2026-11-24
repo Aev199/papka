@@ -4,6 +4,7 @@ pub mod browser;
 pub mod history;
 pub mod versions;
 pub mod labels;
+pub mod kinds;
 pub mod jump;
 pub mod archive;
 pub mod table;
@@ -16,13 +17,18 @@ pub mod find;
 pub mod file_icon;
 pub mod shell_verb;
 pub mod shell_items;
+pub mod passport;
+pub mod project_card;
+pub mod inbox;
 pub mod update;
+pub mod guard;
 
 pub mod workspace;
 
 pub mod folder_copy;
 
 pub mod persistent_index;
+pub mod scan_policy;
 
 pub mod index_watch;
 
@@ -37,6 +43,7 @@ pub mod dwg;
 pub mod operation_journal;
 
 pub mod sort;
+pub mod manual_order;
 
 pub mod format;
 
@@ -69,3 +76,6 @@ pub mod projects;
 pub mod shell_drag;
 #[cfg(windows)]
 pub mod shell_menu;
+
+pub mod inbox_preview;
+pub mod word_text;

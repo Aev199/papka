@@ -23,6 +23,8 @@ pub(crate) enum SpringTarget {
 pub(crate) struct Spring {
     target: SpringTarget,
     generation: u64,
+    /// When the pointer settled on the target: the fill runs from here.
+    started: std::time::Instant,
     /// Re-claimed by the hovered element on every move; the root drops an
     /// unclaimed spring, so leaving the target cancels it.
     claimed: bool,
@@ -50,7 +52,7 @@ impl Explorer {
         }
         self.spring_generation += 1;
         let generation = self.spring_generation;
-        self.spring = Some(Spring { target, generation, claimed: true });
+        self.spring = Some(Spring { target, generation, claimed: true, started: std::time::Instant::now() });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DELAY).await;
             let _ = this.update(cx, |this, cx| {
@@ -68,6 +70,51 @@ impl Explorer {
                 cx.notify();
             });
         }).detach();
+    }
+
+    /// How far `target` has filled on its way to opening (0..1), while it does.
+    pub(crate) fn spring_fill(&self, target: &SpringTarget) -> Option<f32> {
+        if !crate::theme::animations() { return None; }
+        let spring = self.spring.as_ref().filter(|spring| spring.generation != 0 && &spring.target == target)?;
+        Some((spring.started.elapsed().as_secs_f32() / DELAY.as_secs_f32()).min(1.))
+    }
+
+    /// Whether a target is filling now (the window draws its next frame).
+    pub(crate) fn spring_filling(&self) -> bool {
+        // No fill drawn with animations off: no frames asked for it either.
+        if !crate::theme::animations() { return false; }
+        self.spring.as_ref().is_some_and(|spring| spring.generation != 0 && spring.started.elapsed() < DELAY)
+    }
+
+    /// What a release over the hovered element does (a folder row or tile,
+    /// a place, a tab), for the word on the dragged files. A folder the
+    /// files come from or lie inside takes nothing.
+    pub(crate) fn drag_over(&mut self, at: crate::DropAt, cx: &gpui::App) {
+        if !self.dragging_files(cx) { return; }
+        let at = match at {
+            crate::DropAt::Folder(folder) if self.drag_paths.iter().any(|path| folder.starts_with(path)) => crate::DropAt::Nothing,
+            other => other,
+        };
+        let mut drop = self.drag_target.borrow_mut();
+        drop.at = at;
+        drop.claimed = true;
+        drop.touched = true;
+    }
+
+    /// A list's own folder under dragged files, unless a folder in it (a
+    /// row or tile, met first) took the move.
+    pub(crate) fn drag_over_list(&mut self, folder: &std::path::Path) {
+        let mut drop = self.drag_target.borrow_mut();
+        if !drop.claimed { drop.at = crate::DropAt::Folder(folder.to_path_buf()); }
+        drop.touched = true;
+    }
+
+    /// Root mouse move: nothing under the pointer takes files, no word.
+    pub(crate) fn drag_target_settle(&mut self) {
+        let mut drop = self.drag_target.borrow_mut();
+        if !drop.touched { drop.at = crate::DropAt::Nothing; }
+        drop.touched = false;
+        drop.claimed = false;
     }
 
     /// Root mouse move, after the hovered elements had their turn.

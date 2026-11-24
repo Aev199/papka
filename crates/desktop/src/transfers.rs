@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use filemanager_core::operations::{CopyControl, DropZone};
+use filemanager_core::operations::{Conflict, CopyControl, DropZone, Pruned};
 
 /// A copy or move waiting to run (or for the conflict dialog).
 pub(crate) struct Transfer {
@@ -17,6 +17,16 @@ pub(crate) struct Transfer {
     pub(crate) replace: bool,
     /// Items came from the Drop Zone and go back there if not done.
     pub(crate) restore_failed: bool,
+}
+
+/// A failed job retains its own destination and conflict policy.
+#[derive(Clone, Debug)]
+pub(crate) struct Retry {
+    pub(crate) items: Vec<PathBuf>,
+    pub(crate) target: PathBuf,
+    pub(crate) copy: bool,
+    pub(crate) keep_both: bool,
+    pub(crate) replace: bool,
 }
 
 /// The running copy or move as its panel shows it.
@@ -46,7 +56,7 @@ pub(crate) struct Failure {
 pub(crate) struct Report {
     pub(crate) id: u64,
     pub(crate) title: String,
-    pub(crate) target: PathBuf,
+    pub(crate) targets: Vec<PathBuf>,
     pub(crate) failures: Vec<Failure>,
 }
 
@@ -56,6 +66,40 @@ pub(crate) fn report_title(done: &str, ok: usize, failed: usize, cancelled: usiz
     if failed > 0 { title.push_str(&format!(", ошибок: {failed}")); }
     if cancelled > 0 { title.push_str(&format!(", отменено: {cancelled}")); }
     title
+}
+
+/// An error a cancelled transfer gives for the items it stopped: the
+/// queue's `Interrupted`, or Windows' "request aborted" (1235) from a copy
+/// stopped half way.
+pub(crate) fn is_cancellation(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Interrupted || error.raw_os_error() == Some(1235)
+}
+
+/// What the conflict dialog says under a name: which side is newer and
+/// the two sizes, «переносимый новее · 10 Б, в папке 3 Б».
+pub(crate) fn conflict_note(conflict: &Conflict) -> String {
+    use filemanager_core::format::format_size;
+    let mut parts = Vec::new();
+    match conflict.incoming_newer() {
+        Some(true) => parts.push("переносимый новее".to_string()),
+        Some(false) => parts.push("в папке новее".to_string()),
+        None if conflict.source_modified.is_some() && conflict.existing_modified.is_some() => parts.push("даты совпадают".to_string()),
+        None => {}
+    }
+    match (conflict.source_size, conflict.existing_size) {
+        (Some(a), Some(b)) if a == b => parts.push(format!("оба {}", format_size(a))),
+        (Some(a), Some(b)) => parts.push(format!("{}, в папке {}", format_size(a), format_size(b))),
+        _ => {}
+    }
+    parts.join(" · ")
+}
+
+/// Status text for items a transfer left out, empty when none were.
+pub(crate) fn pruned_note(pruned: &Pruned) -> String {
+    let mut parts = Vec::new();
+    if !pruned.nested.is_empty() { parts.push(format!("вложенных в выбранные папки: {}", pruned.nested.len())); }
+    if !pruned.in_place.is_empty() { parts.push(format!("уже в этой папке: {}", pruned.in_place.len())); }
+    if parts.is_empty() { String::new() } else { format!("Пропущено — {}", parts.join(", ")) }
 }
 
 /// The errors as plain text, to paste into a message.
@@ -85,9 +129,12 @@ pub(crate) struct Transfers {
     pub(crate) control: Option<Arc<CopyControl>>,
     /// Items a transfer could not finish (e.g. the network dropped): their
     /// target and whether it was a copy, for «Повторить сбойные».
-    pub(crate) retry: Option<(Vec<PathBuf>, PathBuf, bool)>,
+    pub(crate) retries: Vec<Retry>,
+    /// What the starting transfer left out («Пропущено — …»): said again
+    /// when it ends, since its progress replaces the status meanwhile.
+    pub(crate) skipped_note: Option<String>,
     /// Transfer paused on name conflicts, with the conflicting items.
-    pub(crate) pending: Option<(Transfer, Vec<PathBuf>)>,
+    pub(crate) pending: Option<(Transfer, Vec<Conflict>)>,
     /// Asked for while another ran (or folders of a sync): started in turn.
     pub(crate) queue: VecDeque<Transfer>,
 }
@@ -128,12 +175,13 @@ impl Transfers {
         let report = match self.report.take().filter(|unread| !unread.failures.is_empty()) {
             Some(mut unread) => {
                 if !failures.is_empty() {
+                    if !unread.targets.contains(&target) { unread.targets.push(target.clone()); }
                     unread.failures.extend(failures);
                     unread.title = format!("Ошибок в переносах: {}", unread.failures.len());
                 }
                 Report { id: self.reports, ..unread }
             }
-            None => Report { id: self.reports, title, target, failures },
+            None => Report { id: self.reports, title, targets: vec![target], failures },
         };
         let quiet = report.failures.is_empty();
         // Errors are shown even if the panel was folded away.
@@ -144,7 +192,11 @@ impl Transfers {
 
     /// Removes report `id` if it is still the one shown.
     pub(crate) fn dismiss(&mut self, id: u64) {
-        if self.report.as_ref().is_some_and(|report| report.id == id) { self.report = None; }
+        if self.report.as_ref().is_some_and(|report| report.id == id) { self.report = None; self.retries.clear(); }
+    }
+
+    pub(crate) fn retry_count(&self) -> usize {
+        self.retries.iter().map(|retry| retry.items.len()).sum()
     }
 
     pub(crate) fn panel_visible(&self) -> bool {
@@ -163,6 +215,30 @@ mod tests {
 
     fn transfer(target: &str) -> Transfer {
         Transfer { zone: DropZone::default(), target: target.into(), copy: true, keep_both: false, replace: false, restore_failed: false }
+    }
+
+    #[test]
+    fn failed_jobs_keep_their_targets_and_policy_across_later_results() {
+        let mut state = Transfers::default();
+        let failure = Failure { path: "a/file".into(), error: "нет доступа".into() };
+        state.retries.push(Retry { items: vec!["a/file".into()], target: "first".into(), copy: true, keep_both: true, replace: false });
+        state.finish("Ошибка".into(), "first".into(), vec![failure.clone()]);
+        state.begin("Перемещение", "second".into());
+        state.finish("Успешно".into(), "second".into(), Vec::new());
+        assert_eq!(state.retry_count(), 1);
+        assert_eq!(state.report.as_ref().unwrap().targets, [PathBuf::from("first")]);
+        state.retries.push(Retry { items: vec!["b/file".into()], target: "second".into(), copy: false, keep_both: false, replace: true });
+        state.finish("Ошибка".into(), "second".into(), vec![failure]);
+        assert_eq!(state.retry_count(), 2);
+        assert_eq!(state.report.as_ref().unwrap().targets.len(), 2);
+        let retry = std::mem::take(&mut state.retries);
+        let id = state.report.as_ref().unwrap().id;
+        state.dismiss(id);
+        assert_eq!(retry[0].target, PathBuf::from("first"));
+        assert!(retry[0].copy && retry[0].keep_both);
+        assert_eq!(retry[1].target, PathBuf::from("second"));
+        assert!(!retry[1].copy && retry[1].replace);
+        assert_eq!(state.retry_count(), 0);
     }
 
     #[test]
@@ -185,11 +261,39 @@ mod tests {
         assert_eq!(transfers.queue_note(), "");
     }
 
+    fn conflict(source: Option<u64>, existing: Option<u64>) -> Conflict {
+        Conflict { source: PathBuf::from("a/x"), source_size: source, existing_size: existing,
+            source_modified: None, existing_modified: None }
+    }
+
+    #[test]
+    fn conflict_note_names_the_newer_side_and_sizes() {
+        let now = std::time::SystemTime::now();
+        let mut c = conflict(Some(10), Some(3));
+        c.source_modified = Some(now);
+        c.existing_modified = Some(now - std::time::Duration::from_secs(60));
+        assert_eq!(conflict_note(&c), "переносимый новее · 10 Б, в папке 3 Б");
+        c.existing_modified = Some(now + std::time::Duration::from_secs(60));
+        c.existing_size = Some(10);
+        assert_eq!(conflict_note(&c), "в папке новее · оба 10 Б");
+        assert_eq!(conflict_note(&conflict(None, None)), "");
+    }
+
+    #[test]
+    fn pruned_note_counts_both_kinds() {
+        let mut pruned = Pruned::default();
+        assert_eq!(pruned_note(&pruned), "");
+        pruned.nested.push("a".into());
+        pruned.in_place.push("b".into());
+        pruned.in_place.push("c".into());
+        assert_eq!(pruned_note(&pruned), "Пропущено — вложенных в выбранные папки: 1, уже в этой папке: 2");
+    }
+
     #[test]
     fn an_open_conflict_dialog_holds_the_queue() {
         let mut transfers = Transfers::default();
         transfers.queue.push_back(transfer("b"));
-        transfers.pending = Some((transfer("a"), vec![PathBuf::from("a/x")]));
+        transfers.pending = Some((transfer("a"), vec![conflict(None, None)]));
         assert!(transfers.occupied());
         assert!(transfers.next().is_none());
         transfers.pending = None;
@@ -230,6 +334,15 @@ mod tests {
         transfers.finish(report_title("Перемещено", 1, 0, 0), "u".into(), Vec::new());
         transfers.begin("Копирование", "v".into());
         assert!(transfers.report.is_none());
+    }
+
+    #[test]
+    fn stopped_items_are_told_apart_from_failures() {
+        use std::io::{Error, ErrorKind};
+        assert!(is_cancellation(&Error::new(ErrorKind::Interrupted, "Copy cancelled")));
+        assert!(is_cancellation(&Error::from_raw_os_error(1235)));
+        assert!(!is_cancellation(&Error::new(ErrorKind::PermissionDenied, "Отказано в доступе")));
+        assert!(!is_cancellation(&Error::from_raw_os_error(112)), "a full disk is an error, cancelled or not");
     }
 
     #[test]

@@ -9,6 +9,9 @@ use crate::{theme, Explorer};
 const SYSTEM_THEME_KEY: &str = "theme_system";
 const DENSITY_KEY: &str = "row_density";
 const TILE_SIZE_KEY: &str = "tile_size";
+const ANIMATIONS_KEY: &str = "animations";
+/// «Анимации»: on (index 0) or off.
+pub(crate) const ANIMATION_CHOICES: [&str; 2] = ["Включены", "Выключены"];
 /// «Плотность строк», matching `layout::DENSITIES`.
 pub(crate) const DENSITIES: [&str; 3] = ["Плотно", "Обычно", "Просторно"];
 
@@ -21,6 +24,7 @@ pub(crate) struct Look {
     pub density: usize,
     pub folder_color: usize,
     pub tile_size: usize,
+    pub animations: bool,
 }
 
 fn is_light(appearance: WindowAppearance) -> bool {
@@ -37,6 +41,7 @@ impl Explorer {
             density: index(DENSITY_KEY, DENSITIES.len(), 1),
             folder_color: index(theme::FOLDER_COLOR_KEY, theme::FOLDER_COLORS.len(), 0),
             tile_size: index(TILE_SIZE_KEY, crate::thumbs::SIZES.len(), 1),
+            animations: value(ANIMATIONS_KEY).is_none_or(|flag| flag != "0"),
         };
         self.light_preference = theme::is_light();
         self.system_light = is_light(window.appearance());
@@ -54,7 +59,9 @@ impl Explorer {
         crate::layout::set_density(look.density);
         theme::set_folder_color(look.folder_color);
         crate::thumbs::set_size(look.tile_size);
+        theme::set_animations(look.animations);
         if let Some(store) = &self.workspaces {
+            let _ = store.set_value(ANIMATIONS_KEY, if look.animations { "1" } else { "0" });
             let _ = store.set_value(SYSTEM_THEME_KEY, if look.system_theme { "1" } else { "0" });
             let _ = store.set_value(DENSITY_KEY, &look.density.to_string());
             let _ = store.set_value(theme::FOLDER_COLOR_KEY, &look.folder_color.to_string());

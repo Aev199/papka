@@ -129,7 +129,7 @@ pub fn listing(archive: &Path, inner: &str) -> io::Result<Listing> {
     let prefix = if inner.is_empty() { String::new() } else { format!("{inner}/") };
     let mut children: BTreeMap<String, Entry> = BTreeMap::new();
     let mut found_inner = inner.is_empty();
-    for item in items(archive)? {
+    for item in crate::guard::catch("чтение архива", || items(archive))?? {
         if item.name.is_empty() { continue; }
         if item.name == inner { found_inner = true; continue; }
         let Some(rest) = item.name.strip_prefix(&prefix) else { continue };
@@ -195,6 +195,10 @@ fn free_name(folder: &Path, name: &str) -> PathBuf {
 /// hold) into `target`, next to each other as they were selected. A name
 /// already taken in `target` gets " (2)". Returns what was created there.
 pub fn extract(archive: &Path, items: &[String], target: &Path) -> io::Result<Vec<PathBuf>> {
+    crate::guard::catch("распаковка архива", || extract_unguarded(archive, items, target))?
+}
+
+fn extract_unguarded(archive: &Path, items: &[String], target: &Path) -> io::Result<Vec<PathBuf>> {
     if !target.is_dir() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "папки для извлечения нет"));
     }

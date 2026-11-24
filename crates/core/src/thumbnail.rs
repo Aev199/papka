@@ -76,6 +76,10 @@ pub fn cache_path(cache: &Path, path: &Path, edge: u32) -> io::Result<PathBuf> {
 /// Returns a cached or freshly made PNG thumbnail of at most `edge` pixels.
 /// Blocks on the Shell: call from a background thread.
 pub fn thumbnail(path: &Path, edge: u32) -> io::Result<PathBuf> {
+    crate::guard::catch("миниатюра", || make_thumbnail(path, edge))?
+}
+
+fn make_thumbnail(path: &Path, edge: u32) -> io::Result<PathBuf> {
     validate_bitmap(1, 1, edge)?;
     crate::folder_copy::reject_link(path)?;
     let cache = cache_dir();

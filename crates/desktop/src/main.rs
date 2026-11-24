@@ -15,6 +15,24 @@ mod folder_sizes;
 mod quick_look;
 mod compare;
 mod spring;
+mod edge_scroll;
+mod smooth_scroll;
+mod marked;
+mod motion;
+mod motion_policy;
+mod layout_motion;
+mod button_motion;
+mod disclosure_motion;
+mod grid_motion;
+mod row_motion;
+mod list_motion;
+mod dock_motion;
+mod tab_reorder;
+mod popup_motion;
+mod mode_motion;
+mod spatial_motion;
+mod manual_drag;
+mod kind_filter;
 mod search_panel;
 mod updates;
 mod icons;
@@ -29,6 +47,9 @@ mod directories;
 mod transfers;
 mod transfer_panel;
 mod shell_actions;
+mod project_card;
+mod inbox;
+mod inbox_previews;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -66,24 +87,139 @@ struct ColumnResize {
 /// Internal drag-and-drop payload. Dropping only stages a path; no file
 /// operation takes place until the user explicitly clicks Copy here.
 #[derive(Clone)]
-struct FileDragInfo { paths: Vec<PathBuf> }
+struct FileDragInfo { paths: Vec<PathBuf>, source: Option<(GroupId, PathBuf)> }
 
-struct FileDragPreview { name: String, position: Point<Pixels> }
+struct FileDragPreview { name: String, position: Point<Pixels>, mode: Option<DropMode>, picked: std::time::Instant }
+
+impl FileDragPreview {
+    fn new(name: String, position: Point<Pixels>, mode: Option<DropMode>) -> Self {
+        Self { name, position, mode, picked: std::time::Instant::now() }
+    }
+}
+
+/// The folder files would land in if released now, shared with the drag's
+/// picture so it can say «Копия» or «Перенос».
+/// What releasing dragged files over the thing under them does.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum DropAt {
+    /// Nothing takes files there (a tab, the path bar: they only open).
+    #[default]
+    Nothing,
+    /// Copied or moved into this folder (a folder row or tile, a list).
+    Folder(PathBuf),
+    /// Put aside in «Файлы для переноса» (a place in the sidebar, the zone).
+    Stage,
+}
+
+#[derive(Default)]
+struct DragTarget {
+    at: DropAt,
+    /// A folder row or place claimed this move; the list's own folder
+    /// stands in otherwise.
+    claimed: bool,
+    /// Something under the pointer named a folder this move.
+    touched: bool,
+}
+
+type DragTargetCell = std::rc::Rc<std::cell::RefCell<DragTarget>>;
+
+/// What the picture of dragged files needs to name the action.
+struct DropMode {
+    first: PathBuf,
+    /// The files come out of an archive (looked up once, when the drag starts).
+    from_archive: bool,
+    target: DragTargetCell,
+}
+
+impl DropMode {
+    fn new(first: &std::path::Path, target: &DragTargetCell) -> Self {
+        Self { first: first.to_path_buf(), from_archive: filemanager_core::archive::is_inside(first), target: target.clone() }
+    }
+}
+
+#[cfg(test)]
+mod drop_word_tests {
+    use super::drop_word;
+    use std::path::Path;
+
+    #[test]
+    fn says_what_a_release_does() {
+        let file = Path::new("/w/a/report.docx");
+        assert_eq!(drop_word(file, false, Path::new("/w/a"), false, false), None);
+        assert_eq!(drop_word(file, false, Path::new("/w/a"), true, false), Some("Копия"));
+        assert_eq!(drop_word(file, false, Path::new("/w/b"), true, false), Some("Копия"));
+        assert_eq!(drop_word(file, false, Path::new("/w/b"), false, true), Some("Перенос"));
+        assert_eq!(drop_word(file, true, Path::new("/w/b"), false, false), Some("Извлечь"));
+        assert_eq!(drop_word(Path::new("/w/a"), false, Path::new("/w/a"), true, false), None);
+        // Into a folder inside an archive: refused, no word.
+        let dir = std::env::temp_dir().join(format!("papka-drop-word-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pack.zip"), b"").unwrap();
+        assert_eq!(drop_word(file, false, &dir.join("pack.zip").join("inner"), true, false), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The word for a drop of files starting with `first` into `folder`, as
+/// `drop_files` decides it: Ctrl copies, Shift moves, otherwise a move on
+/// the same drive and a copy across. Out of an archive: extracted. Into the
+/// folder they are in, or into an archive: nothing.
+fn drop_word(first: &std::path::Path, from_archive: bool, folder: &std::path::Path, control: bool, shift: bool) -> Option<&'static str> {
+    use filemanager_core::path_utils::same_path;
+    // Staged items are spelled `\\?\C:\…`, the panes' folders are not.
+    if same_path(first, folder) || (!control && first.parent().is_some_and(|parent| same_path(parent, folder))) { return None; }
+    // A folder inside an archive takes nothing.
+    if filemanager_core::archive::is_inside(folder) { return None; }
+    if from_archive { return Some("Извлечь"); }
+    let copy = if control { true } else if shift { false } else { !filemanager_core::path_utils::same_volume(first, folder) };
+    Some(if copy { "Копия" } else { "Перенос" })
+}
 
 /// Dragging a tab to reorder it.
 #[derive(Clone)]
 struct TabDrag { group: GroupId, index: usize, title: String }
 
 impl Render for FileDragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let modifiers = window.modifiers();
+        // Picked up: the label grows out from under the cursor, moves away
+        // from it and casts a shadow, as if lifted. A rise alone was lost:
+        // the label follows the cursor anyway. Counted from the moment it was
+        // taken (GPUI draws a drag's picture afresh on every move, so an
+        // element animation would start over each time).
+        let lift = if theme::animations() {
+            let t = (self.picked.elapsed().as_secs_f32() / 0.25).min(1.);
+            if t < 1. { window.request_animation_frame(); }
+            motion_policy::ease_out_fraction(t)
+        } else { 1. };
+        let word = self.mode.as_ref().and_then(|mode| match &mode.target.borrow().at {
+            DropAt::Nothing => None,
+            DropAt::Stage => Some("Отложить"),
+            DropAt::Folder(folder) => drop_word(&mode.first, mode.from_archive, folder, modifiers.control, modifiers.shift),
+        });
         div()
-            .pl(self.position.x + px(12.))
-            .pt(self.position.y + px(8.))
+            // Off the cursor: from 4 px to 14 px as it is lifted.
+            .pl(self.position.x + px(4. + 10. * lift))
+            .pt(self.position.y + px(2. + 8. * lift))
             .child(
-                div().px_3().py_1().rounded(px(4.)).bg(rgb(theme::SELECTED))
+                div().rounded(px(4.)).bg(rgb(theme::SELECTED))
                     .border_1().border_color(rgb(theme::SELECTED_BORDER))
-                    .text_color(rgb(theme::SELECTION_TEXT)).text_size(px(13.))
+                    .text_color(rgb(theme::SELECTION_TEXT))
+                    // From a small tag to its full size.
+                    .px(px(4. + 8. * lift)).py(px(1. + 3. * lift)).text_size(px(11. + 2. * lift))
+                    .flex().items_center().gap_2()
+                    .opacity(0.5 + 0.5 * lift)
+                    .shadow(vec![gpui::BoxShadow {
+                        color: gpui::hsla(0., 0., 0., 0.55 * lift),
+                        offset: gpui::point(px(0.), px(2. + 6. * lift)),
+                        blur_radius: px(4. + 14. * lift),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }])
                     .child(self.name.clone())
+                    // What a release here does; Ctrl and Shift change it at once.
+                    .when_some(word, |chip, word| chip.child(div().px_1p5().rounded_sm().text_size(px(11.))
+                        .bg(rgb(theme::SELECTED_BORDER)).child(word)))
             )
     }
 }
@@ -118,6 +254,11 @@ pub(crate) fn wants_shell_thumbnail(path: &std::path::Path) -> bool {
 }
 
 /// A path from an operation receipt as the listings know it (no `\\?\`).
+/// Now, in milliseconds since 1970.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
 fn normalized(path: Option<PathBuf>) -> Option<PathBuf> {
     path.map(|path| filemanager_core::path_utils::normalize_extended_path(&path))
 }
@@ -159,6 +300,11 @@ enum MenuTarget {
     /// A row of «Места», or (None) the section title.
     Place(Option<usize>),
     Recent(PathBuf),
+    /// The status bar's «Тип»: the kinds of files in the active pane.
+    Kinds,
+    /// A › of the path bar: the subfolders of the folder before it, the
+    /// next part of the path (if any) marked, to jump to one in the pane.
+    Children(GroupId, PathBuf, Option<PathBuf>),
 }
 
 struct RightDrag {
@@ -189,6 +335,7 @@ struct ContextMenu {
 struct FolderView {
     listing: Arc<browser::Listing>,
     spec: SortSpec,
+    manual_revision: u64,
     /// Folder sizes known when sorted; a new size re-sorts a size order.
     sizes: u64,
     show_hidden: bool,
@@ -198,6 +345,8 @@ struct FolderView {
     /// The label shown alone, and the labels as they were when filtered.
     label_filter: Option<filemanager_core::labels::Label>,
     labels_rev: u64,
+    /// The kind of file shown alone.
+    kind_filter: Option<filemanager_core::kinds::Kind>,
     indices: Arc<Vec<usize>>,
     /// Rows that head or belong to a stack of versions.
     stacks: Arc<HashMap<PathBuf, filemanager_core::versions::Stacked>>,
@@ -219,6 +368,10 @@ struct Explorer {
     /// The running copy or move, the one waiting for an answer, and those queued behind.
     transfers: transfers::Transfers,
     context_menu: Option<ContextMenu>,
+    /// The project card shown in a pane in place of its folders.
+    cards: project_card::ProjectCards,
+    /// Projects as published for other programs (`projects.json`).
+    registry: inbox::Registry,
     /// The window's handle, for menus and dialogs Windows itself shows.
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Option<isize>,
@@ -231,6 +384,11 @@ struct Explorer {
     drag_paths: Vec<PathBuf>,
     spring: Option<spring::Spring>,
     spring_generation: u64,
+    /// The folder dragged files are over, for the word on their picture.
+    drag_target: DragTargetCell,
+    edge_scroll: edge_scroll::EdgeScroll,
+    smooth: smooth_scroll::SmoothScroll,
+    motion: motion::Motion,
     /// A system drag to another program is running.
     #[cfg_attr(not(windows), allow(dead_code))]
     dragging_out: bool,
@@ -250,6 +408,10 @@ struct Explorer {
     all_places: Vec<Place>,
     /// Folders used recently, most recent first.
     recent: Vec<PathBuf>,
+    /// How often and how lately folders were stayed in, for Ctrl+P.
+    stays: jump::Stays,
+    /// Panes showing only files of one kind.
+    kinds: kind_filter::KindFilters,
     /// Sidebar sections folded by the user.
     collapsed: HashSet<String>,
     sizes: folder_sizes::FolderSizes,
@@ -260,6 +422,8 @@ struct Explorer {
     drive_space: HashMap<PathBuf, (u64, u64)>,
     /// Sort order of each pane, chosen by its list header.
     sorts: HashMap<GroupId, SortSpec>,
+    manual_orders: filemanager_core::manual_order::ManualOrders,
+    manual_drag: manual_drag::ManualDrag,
     show_hidden: bool,
     show_sidebar: bool,
     show_inspector: bool,
@@ -307,7 +471,7 @@ struct Explorer {
     rename_input: Entity<InputState>,
     bulk_template_input: Entity<InputState>,
     bulk_rename: Option<bulk_rename::BulkRenameDialog>,
-    bulk_rename_errors: Vec<String>,
+    bulk_rename_errors: Arc<Vec<String>>,
     bulk_rename_generation: u64,
     folder_input: Entity<InputState>,
     creating_folder: bool,
@@ -352,7 +516,7 @@ struct Explorer {
     /// exactly these plans, never re-prepared ones.
     confirm_recycle: Option<Vec<(PathBuf, Plan)>>,
     /// Extra selected items (Ctrl/Shift); empty means only `selected`.
-    marked: Vec<PathBuf>,
+    marked: marked::Marked,
     /// Fixed end of a Shift range.
     anchor: Option<PathBuf>,
     /// Lower-case name filter for the focused folder ("" = none).
@@ -510,8 +674,10 @@ impl Explorer {
             zone: DropZone::default(),
             transfers: Default::default(),
             context_menu: None,
+            cards: project_card::ProjectCards::new(window, cx),
+            registry: inbox::Registry { due: true, ..Default::default() },
             hwnd: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, drag_target: Default::default(), edge_scroll: Default::default(), smooth: Default::default(), motion: Default::default(), dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),
@@ -524,9 +690,14 @@ impl Explorer {
             comparison: None,
             recent: workspaces.as_ref().and_then(|store| store.value(projects::RECENT).ok().flatten())
                 .map(|text| text.lines().map(PathBuf::from).collect()).unwrap_or_default(),
+            stays: jump::Stays::new(workspaces.as_ref().and_then(|store| store.value(projects::VISITS).ok().flatten())
+                .map(|text| filemanager_core::jump::Visits::parse(&text)).unwrap_or_default()),
+            kinds: Default::default(),
             drives: places::drives(),
             drive_space: HashMap::new(),
             sorts: HashMap::new(),
+            manual_orders: Self::load_manual_orders(workspaces.as_ref()),
+            manual_drag: Default::default(),
             show_hidden: prefs.show_hidden,
             show_sidebar: prefs.show_sidebar,
             show_inspector: prefs.show_inspector,
@@ -535,7 +706,7 @@ impl Explorer {
             address_editing: None,
             filter_open: false,
             search_mode: false,
-            marked: Vec::new(),
+            marked: Default::default(),
             anchor: None,
             filter: String::new(),
             clear_filter: false,
@@ -564,7 +735,7 @@ impl Explorer {
             pane_bounds: HashMap::new(),
             select_first_when_loaded: false,
             rename_input, folder_input,
-            bulk_template_input, bulk_rename: None, bulk_rename_errors: Vec::new(), bulk_rename_generation: 0,
+            bulk_template_input, bulk_rename: None, bulk_rename_errors: Arc::default(), bulk_rename_generation: 0,
             renaming: false,
             creating_folder: false,
             creating_file: false,
@@ -588,7 +759,14 @@ impl Explorer {
             operation_alerts: Vec::new(),
             watcher: None, live_watch_started: false, live_watch_error: None,
             watched_root: None, history_paused: false, unwatched_folders: Default::default(), confirm_recycle: None,
-            status: prefs_error.unwrap_or(operation_status),
+            status: prefs_error.unwrap_or_else(|| {
+                // The last run ended on an error: said once, with where the log is.
+                match filemanager_core::guard::take_pending(&filemanager_core::path_utils::app_data_dir()) {
+                    Some(crash) => format!("Прошлый сеанс закрылся из-за ошибки ({}). Подробности: crash.log в папке профиля",
+                        crash.split(" · ").nth(2).unwrap_or("без описания")),
+                    None => operation_status,
+                }
+            }),
             search_input, address_input, comment_input, author_input,
             search: search_panel::SearchState {
                 depth: search_depth,
@@ -691,9 +869,12 @@ impl Explorer {
     }
 
     fn add_tab(&mut self, cx: &mut Context<Self>) {
+        // The new tab is shown: a project card over the pane gives way.
+        self.leave_project_card(self.browser.active, cx);
         let path = self.browser.active().active().path.clone();
-        if let Err(e) = self.browser.new_tab(self.browser.active, path) {
-            self.status = e.to_string();
+        match self.browser.new_tab(self.browser.active, path) {
+            Ok(_) => self.motion.tab_opened(self.browser.active, self.browser.active_group().active_tab),
+            Err(e) => self.status = e.to_string(),
         }
         self.selected = None; self.marked.clear(); self.anchor = None;
         self.close_search();
@@ -761,8 +942,10 @@ impl Explorer {
     }
 
     fn open_in_new_tab(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Err(error) = self.browser.new_tab(self.browser.active, path) {
-            self.status = format!("Не удалось открыть вкладку: {error}");
+        self.leave_project_card(self.browser.active, cx);
+        match self.browser.new_tab(self.browser.active, path) {
+            Ok(_) => self.motion.tab_opened(self.browser.active, self.browser.active_group().active_tab),
+            Err(error) => self.status = format!("Не удалось открыть вкладку: {error}"),
         }
         self.selected = None;
         self.close_search();
@@ -867,6 +1050,8 @@ impl Explorer {
             if self.dragging_out || paths.is_empty() { return; }
             let Some(hwnd) = window_hwnd(window) else { return };
             cx.stop_active_drag(window);
+            self.manual_drag.pointer = None;
+            self.manual_drag.transfer_modifier = false;
             self.right_drag = None;
             self.dragging_out = true;
             cx.notify();
@@ -1046,6 +1231,22 @@ impl Explorer {
             cx.notify();
             return;
         }
+        // A folder and something inside it: the folder brings it along.
+        // A move into the folder the item is in: nothing to do for it.
+        let pruned = transfer.zone.prune_for(&transfer.target, !transfer.copy);
+        let skipped = crate::transfers::pruned_note(&pruned);
+        if transfer.zone.items().is_empty() {
+            self.status = if pruned.nested.is_empty() { "Объекты уже находятся в этой папке".into() } else { skipped };
+            if transfer.restore_failed { for path in pruned.nested.iter().chain(&pruned.in_place) { let _ = self.zone.add(path); } }
+            cx.notify();
+            return;
+        }
+        // Left-out items of the Drop Zone stay staged; the note is repeated
+        // when the transfer ends (its progress replaces the status).
+        if transfer.restore_failed { for path in pruned.in_place.iter() { let _ = self.zone.add(path); } }
+        self.transfers.skipped_note = (!skipped.is_empty()).then(|| skipped.clone());
+        if !skipped.is_empty() { self.status = skipped; }
+        let items = transfer.zone.items().to_vec();
         // Staged paths are canonical (\\?\C:\…), the pane's are not.
         if items.iter().all(|path| path.parent().is_some_and(|parent| filemanager_core::path_utils::same_path(parent, &transfer.target))) {
             if !transfer.copy {
@@ -1057,7 +1258,7 @@ impl Explorer {
             transfer.keep_both = true;
         }
         // A replacing transfer was already decided on (conflict dialog, sync).
-        let conflicts = if transfer.keep_both || transfer.replace { Vec::new() } else { transfer.zone.conflicts_in(&transfer.target) };
+        let conflicts = if transfer.keep_both || transfer.replace { Vec::new() } else { transfer.zone.conflict_details(&transfer.target, 4) };
         if conflicts.is_empty() {
             self.execute_transfer(transfer, cx);
         } else {
@@ -1071,10 +1272,12 @@ impl Explorer {
         let Some((mut transfer, conflicts)) = self.transfers.pending.take() else { return };
         match choice {
             ConflictChoice::Cancel => {
+                self.transfers.skipped_note = None;
                 self.return_to_staging(&transfer);
                 self.status = "Отменено, файлы не изменены".into();
             }
             ConflictChoice::Skip => {
+                let conflicts: Vec<PathBuf> = conflicts.into_iter().map(|c| c.source).collect();
                 transfer.zone.remove(&conflicts);
                 if transfer.restore_failed {
                     for path in &conflicts {
@@ -1082,6 +1285,7 @@ impl Explorer {
                     }
                 }
                 if transfer.zone.items().is_empty() {
+                    self.transfers.skipped_note = None;
                     self.status = "Все объекты пропущены".into();
                 } else {
                     self.execute_transfer(transfer, cx);
@@ -1179,10 +1383,11 @@ impl Explorer {
 
     /// A copy or move ended: one short line below, and the panel with
     /// every error in full. A clean result leaves the screen by itself.
-    fn finish_transfer(&mut self, done: &'static str, ok: usize, not_done: usize, target: PathBuf,
+    fn finish_transfer(&mut self, done: &'static str, ok: usize, cancelled: usize, target: PathBuf,
         failures: Vec<transfers::Failure>, cx: &mut Context<Self>) {
-        let cancelled = not_done.saturating_sub(failures.len());
         let title = transfers::report_title(done, ok, failures.len(), cancelled);
+        // Items that did not get through flash red where they still are.
+        self.motion.flash_as(motion::Flash::Failed, failures.iter().map(|failure| failure.path.clone()).collect::<Vec<_>>());
         self.status = if !failures.is_empty() {
             format!("{title}. Ошибки — в окне переноса справа внизу.")
         } else if ok > 0 {
@@ -1190,6 +1395,7 @@ impl Explorer {
         } else {
             format!("{title}.")
         };
+        if let Some(note) = self.transfers.skipped_note.take() { self.status = format!("{} {note}.", self.status); }
         if let Some(id) = self.transfers.finish(title, target, failures) {
             cx.spawn(async move |weak, cx| {
                 cx.background_executor().timer(Duration::from_secs(6)).await;
@@ -1219,15 +1425,15 @@ impl Explorer {
             };
             let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
             let errors = results.len() - ok;
-            let failures = transfer_failures(&results);
+            let (failures, cancelled) = transfer_failures(&results, control.is_cancelled());
             let created: Vec<Receipt> = results.iter()
                 .filter_map(|(_, result)| result.as_ref().ok().cloned())
                 .collect();
-            (zone, target, ok, errors, failures, created)
+            (zone, target, ok, errors, failures, cancelled, created)
         });
         self.start_transfer_progress("Копирование", target_shown, cx);
         cx.spawn(async move |weak, cx| {
-            let (zone, target, ok, errors, failures, created) = task.await;
+            let (zone, target, ok, errors, failures, cancelled, created) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 // Failed Drop Zone items stay staged; staging done meanwhile is kept.
                 for pending in zone.items().iter().filter(|_| restore_failed) {
@@ -1237,10 +1443,13 @@ impl Explorer {
                 }
                 this.transfers.copying = false;
                 this.transfers.control = None;
-                this.transfers.retry = (errors > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), true));
+                if errors > 0 && !zone.items().is_empty() {
+                    this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: true, keep_both, replace });
+                }
                 this.load_directory(target.clone(), true, cx);
-                this.finish_transfer("Скопировано", ok, errors, target, failures, cx);
+                this.finish_transfer("Скопировано", ok, cancelled, target, failures, cx);
                 if !created.is_empty() {
+                    this.motion.flash(created.iter().filter_map(|receipt| receipt.destination.clone()));
                     let label = format!("копирование ({})", created.len());
                     this.push_undo(created, label);
                 }
@@ -1274,7 +1483,7 @@ impl Explorer {
             };
             let moved = results.iter().filter(|(_, result)| result.is_ok()).count();
             let failed = results.len() - moved;
-            let failures = transfer_failures(&results);
+            let (failures, cancelled) = transfer_failures(&results, control.is_cancelled());
             let sources = results.iter()
                 .filter(|(_, result)| result.is_ok())
                 .map(|(path, _)| path.clone())
@@ -1283,10 +1492,10 @@ impl Explorer {
             let receipts: Vec<Receipt> = results.iter()
                 .filter_map(|(_, result)| result.as_ref().ok().cloned())
                 .collect();
-            (zone, target, moved, failed, failures, sources, receipts)
+            (zone, target, moved, failed, failures, cancelled, sources, receipts)
         });
         cx.spawn(async move |weak, cx| {
-            let (zone, target, moved, failed, failures, sources, receipts) = task.await;
+            let (zone, target, moved, failed, failures, cancelled, sources, receipts) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 for path in zone.items().iter().filter(|_| restore_failed) {
                     if let Err(error) = this.zone.add(path) {
@@ -1296,13 +1505,16 @@ impl Explorer {
                 this.transfers.busy = false;
                 this.transfers.copying = false;
                 this.transfers.control = None;
-                this.transfers.retry = (failed > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), false));
+                if failed > 0 && !zone.items().is_empty() {
+                    this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: false, keep_both, replace });
+                }
                 this.load_directory(target.clone(), true, cx);
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
                 }
-                this.finish_transfer("Перемещено", moved, failed, target, failures, cx);
+                this.finish_transfer("Перемещено", moved, cancelled, target, failures, cx);
                 if moved > 0 {
+                    this.motion.flash(receipts.iter().filter_map(|receipt| receipt.destination.clone()));
                     this.selected = normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));
                     let label = if moved == 1 {
                         format!("перенос «{}»", browser::display_name(&receipts[0].source))
@@ -1367,6 +1579,7 @@ impl Explorer {
                             this.refresh_parent_of(dest, cx);
                         }
                         this.status = if file { "Файл создан" } else { "Папка создана" }.into();
+                        this.motion.flash(receipt.destination.clone());
                         if let Some(dest) = receipt.destination.clone() {
                             let label = format!("создание {} «{}»", if file { "файла" } else { "папки" }, browser::display_name(&dest));
                             this.push_undo(vec![receipt.clone()], label);
@@ -1432,6 +1645,7 @@ impl Explorer {
             Ok(plan) => plan,
             Err(error) => {
                 self.status = format!("Переименование невозможно: {error}");
+                self.motion.flash_as(motion::Flash::Failed, [source.clone()]);
                 cx.notify();
                 return;
             }
@@ -1462,12 +1676,16 @@ impl Explorer {
                             this.refresh_parent_of(dest, cx);
                         }
                         this.selected = normalized(receipt.destination.clone());
+                        this.motion.flash(receipt.destination.clone());
                         let label = format!("переименование «{}»", browser::display_name(&receipt.source));
                         this.status = "Переименовано. Ctrl+Z — отменить.".into();
                         this.push_undo(vec![receipt], label);
                         this.renaming = false;
                     }
-                    Err(error) => this.status = format!("Переименование отклонено: {error}"),
+                    Err(error) => {
+                        this.status = format!("Переименование отклонено: {error}");
+                        this.motion.flash_as(motion::Flash::Failed, this.selected.clone());
+                    }
                 }
                 cx.notify();
             });
@@ -1551,6 +1769,20 @@ impl Explorer {
                 this.transfers.busy = false;
                 this.start_queued(cx);
                 this.follow_labels(&undone, true);
+                let removed = |path: &std::path::Path| undone.iter().any(|receipt| {
+                    matches!(receipt.action, Action::Copy | Action::Move | Action::Rename | Action::CreateFile | Action::CreateFolder)
+                        && receipt.destination.as_ref().is_some_and(|destination|
+                            filemanager_core::path_utils::same_path(path, destination)
+                            || filemanager_core::path_utils::is_inside(path, destination))
+                });
+                if this.selected.as_deref().is_some_and(&removed) { this.selected = None; this.selected_history_event = None; }
+                if this.anchor.as_deref().is_some_and(&removed) { this.anchor = None; }
+                this.marked.retain(|path| !removed(path));
+                // What came back (a move or rename undone, a deletion
+                // restored) lights up where it is again.
+                this.motion.flash(undone.iter()
+                    .filter(|receipt| matches!(receipt.action, Action::Move | Action::Rename | Action::Recycle | Action::Delete))
+                    .map(|receipt| receipt.source.clone()));
                 for path in &touched {
                     this.refresh_parent_of(path, cx);
                 }
@@ -1584,16 +1816,18 @@ impl Explorer {
     /// Runs the items that failed last time again, through the same safe
     /// copy or move; items that already arrived are not touched.
     pub(crate) fn retry_failed(&mut self, cx: &mut Context<Self>) {
-        let Some((items, target, copy)) = self.transfers.retry.take() else { return };
-        let mut zone = DropZone::default();
-        let missing = items.iter().filter(|path| zone.add(path).is_err()).count();
-        if zone.items().is_empty() {
-            self.status = "Сбойные файлы больше недоступны".into();
-            cx.notify();
-            return;
+        let retries = std::mem::take(&mut self.transfers.retries);
+        if let Some(id) = self.transfers.report.as_ref().map(|report| report.id) { self.transfers.dismiss(id); }
+        let mut missing = 0;
+        for retry in retries {
+            let mut zone = DropZone::default();
+            missing += retry.items.iter().filter(|path| zone.add(path).is_err()).count();
+            if zone.items().is_empty() { continue; }
+            self.request_transfer(Transfer { zone, target: retry.target, copy: retry.copy,
+                keep_both: retry.keep_both, replace: retry.replace, restore_failed: false }, cx);
         }
         if missing > 0 { self.status = format!("Недоступно и пропущено: {missing}"); }
-        self.request_transfer(Transfer { zone, target, copy, keep_both: false, replace: false, restore_failed: false }, cx);
+        cx.notify();
     }
 
     fn cancel_copy(&mut self, cx: &mut Context<Self>) {
@@ -1661,6 +1895,17 @@ impl Explorer {
         self.selected = None;
         self.marked.clear();
         self.selected_history_event = None;
+        self.run_recycle(plans, cx);
+    }
+
+    /// Deletes what `plans` name, already confirmed: to the Recycle Bin
+    /// where there is one, through the journal, undone with Ctrl+Z.
+    pub(crate) fn run_recycle(&mut self, plans: Vec<(PathBuf, Plan)>, cx: &mut Context<Self>) {
+        if self.transfers.copying || self.transfers.busy {
+            self.status = "Дождитесь завершения текущей операции".into();
+            cx.notify();
+            return;
+        }
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.status = "Операция отклонена: журнал SQLite недоступен".into();
             cx.notify();
@@ -1716,6 +1961,8 @@ impl Explorer {
                     };
                     this.push_undo(recycled, label);
                 }
+                // A deleted inbox entry leaves the card at once.
+                this.project_card_registry_changed(cx);
                 cx.notify();
             });
         }).detach();
@@ -1795,14 +2042,27 @@ impl Explorer {
                         cx.notify();
                     }
                     let visible = this.visible_directories();
+                    // Files another program or person changed light up softly where
+                    // they are on screen. A burst (a sync, an unpacked archive) and
+                    // the folder Papka itself is copying into stay unlit.
+                    let copying_into = this.transfers.live.as_ref().map(|live| live.target.clone());
+                    if changes.paths.len() <= 50 {
+                        this.motion.flash_as(motion::Flash::Changed, changes.paths.iter()
+                            .filter(|path| path.parent().is_some_and(|parent| visible.iter().any(|folder| folder == parent)
+                                && !copying_into.as_deref().is_some_and(|target| filemanager_core::path_utils::same_path(target, parent))))
+                            .cloned().collect::<Vec<_>>());
+                    }
                     // Invalidating non-visible cache entries prevents an old
                     // listing reappearing when the user navigates back.
                     let dirty = if changes.refresh_all { visible.clone() } else { changes.directories.into_iter().collect() };
                     for folder in dirty {
-                        this.dirs.cache.remove(&folder);
-                        this.folder_views.retain(|(_,path),_|path != &folder);
                         if visible.contains(&folder) && !this.search.active {
+                            // A refresh replaces the snapshot when ready; do not
+                            // briefly tear down the list (or its scroll layout).
                             this.load_directory(folder, true, cx);
+                        } else {
+                            this.dirs.cache.remove(&folder);
+                            this.folder_views.retain(|(_,path),_|path != &folder);
                         }
                     }
                     true
@@ -1842,7 +2102,16 @@ impl Explorer {
                 match this.dirs.finish(&folder, request, result, &visible) {
                     directories::Finished::Stale => {}
                     directories::Finished::Reload => this.load_directory(folder, true, cx),
-                    directories::Finished::Stored => cx.notify(),
+                    directories::Finished::Stored => {
+                        // F5's «Обновление…» gives way once its folders are read.
+                        if this.dirs.refresh_ended(&folder) && this.status == "Обновление…" {
+                            this.status = match this.dirs.errors.get(&folder) {
+                                Some(_) => "Обновлено; часть папок не прочитана".into(),
+                                None => "Обновлено".into(),
+                            };
+                        }
+                        cx.notify();
+                    }
                 }
             });
         }).detach();
@@ -1864,7 +2133,9 @@ impl Explorer {
     }
 
     fn refresh_visible_directories(&mut self, cx: &mut Context<Self>) {
-        for folder in self.visible_directories() {
+        let folders = self.visible_directories();
+        self.dirs.start_refresh(folders.iter().cloned());
+        for folder in folders {
             self.load_directory(folder, true, cx);
         }
         self.inspector.path = None;
@@ -1956,6 +2227,7 @@ fn main() {
     if let Some(code) = filemanager_core::preview_host::helper_main(&helper_args) {
         std::process::exit(code);
     }
+    filemanager_core::guard::install(filemanager_core::path_utils::app_data_dir());
     // Files rescued from archivers' drops (vendor/gpui_ce_windows): kept a
     // day in case a copy from them was still going, then removed.
     std::thread::spawn(|| {
@@ -2027,16 +2299,22 @@ fn main() {
 }
 
 /// "осталось" for a transfer: rounded the way people say it.
-/// Every item of a transfer that failed, with its whole error text. Items
-/// the user cancelled are not errors: they are counted, not listed.
-fn transfer_failures(results: &[(PathBuf, std::io::Result<Receipt>)]) -> Vec<transfers::Failure> {
-    results.iter().filter_map(|(path, result)| {
-        let error = result.as_ref().err()?;
-        (error.kind() != std::io::ErrorKind::Interrupted && !error.to_string().contains("cancelled")).then(|| transfers::Failure {
+/// Every item of a transfer that failed, with its whole error text, and
+/// how many were cancelled. Every planned item has a result (the queue
+/// answers the rest with `Interrupted` once cancelled), so the counts add
+/// up; cancelled items are counted, not listed as errors.
+fn transfer_failures(results: &[(PathBuf, std::io::Result<Receipt>)], cancelled: bool) -> (Vec<transfers::Failure>, usize) {
+    let mut failures = Vec::new();
+    let mut stopped = 0;
+    for (path, result) in results {
+        let Err(error) = result else { continue };
+        if cancelled && transfers::is_cancellation(error) { stopped += 1; continue; }
+        failures.push(transfers::Failure {
             path: filemanager_core::path_utils::normalize_extended_path(path),
             error: messages::localize(&error.to_string()),
-        })
-    }).collect()
+        });
+    }
+    (failures, stopped)
 }
 
 fn remaining(seconds: f64) -> String {

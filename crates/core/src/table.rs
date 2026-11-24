@@ -24,6 +24,10 @@ pub fn is_table(path: &Path) -> bool {
 
 /// Reads at most `max_rows` × `max_columns` cells of sheet `sheet`.
 pub fn read(path: &Path, sheet: usize, max_rows: usize, max_columns: usize) -> io::Result<Table> {
+    crate::guard::catch("чтение таблицы", || read_unguarded(path, sheet, max_rows, max_columns))?
+}
+
+fn read_unguarded(path: &Path, sheet: usize, max_rows: usize, max_columns: usize) -> io::Result<Table> {
     match extension(path).as_str() {
         "csv" | "tsv" => read_csv(path, max_rows, max_columns),
         _ => read_sheet(path, sheet, max_rows, max_columns),

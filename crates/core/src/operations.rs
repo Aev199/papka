@@ -686,6 +686,51 @@ impl Receipt {
     }
 }
 
+/// Items [`DropZone::prune_for`] took out of a transfer.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// Inside another item of the same transfer.
+    pub nested: Vec<PathBuf>,
+    /// A move into the folder they already are in.
+    pub in_place: Vec<PathBuf>,
+}
+
+/// An occupied name of a transfer, with what the dialog needs to choose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+    pub source: PathBuf,
+    /// Sizes of files; `None` for folders.
+    pub source_size: Option<u64>,
+    pub existing_size: Option<u64>,
+    pub source_modified: Option<std::time::SystemTime>,
+    pub existing_modified: Option<std::time::SystemTime>,
+}
+
+impl Conflict {
+    pub fn read(source: &Path, existing: &Path) -> Self {
+        let source_meta = fs::metadata(source).ok();
+        let existing_meta = fs::metadata(existing).ok();
+        let size = |m: &Option<fs::Metadata>| m.as_ref().filter(|m| m.is_file()).map(fs::Metadata::len);
+        let modified = |m: &Option<fs::Metadata>| m.as_ref().and_then(|m| m.modified().ok());
+        Self {
+            source: source.to_path_buf(),
+            source_size: size(&source_meta),
+            existing_size: size(&existing_meta),
+            source_modified: modified(&source_meta),
+            existing_modified: modified(&existing_meta),
+        }
+    }
+
+    /// Whether the incoming item is newer than the one in place; `None`
+    /// when either date is unknown or they match to the second.
+    pub fn incoming_newer(&self) -> Option<bool> {
+        let (a, b) = (self.source_modified?, self.existing_modified?);
+        let seconds = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let (a, b) = (seconds(a), seconds(b));
+        if a == b { None } else { Some(a > b) }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct DropZone {
     sources: Vec<PathBuf>,
@@ -784,6 +829,25 @@ impl DropZone {
         self.transfer_with_optional_journal(Action::Move, target, control, Some(journal), true)
     }
 
+    /// Leaves out what a transfer into `target` would handle twice or not
+    /// at all: items inside another staged folder (copying the folder brings
+    /// them along) and, when moving, items that already lie in `target`.
+    pub fn prune_for(&mut self, target: &Path, moving: bool) -> Pruned {
+        let mut pruned = Pruned::default();
+        let sources = std::mem::take(&mut self.sources);
+        for source in &sources {
+            if sources.iter().any(|other| crate::path_utils::is_inside(source, other)) {
+                pruned.nested.push(source.clone());
+            } else if moving && source.parent().is_some_and(|parent| crate::path_utils::same_path(parent, target)) {
+                pruned.in_place.push(source.clone());
+            } else {
+                self.sources.push(source.clone());
+            }
+        }
+        self.folders.retain(|folder| self.sources.contains(folder));
+        pruned
+    }
+
     /// Staged items whose name is already taken in `target`.
     pub fn conflicts_in(&self, target: &Path) -> Vec<PathBuf> {
         self.sources.iter()
@@ -791,6 +855,19 @@ impl DropZone {
                 source.file_name().is_some_and(|name| fs::symlink_metadata(target.join(name)).is_ok())
             })
             .cloned()
+            .collect()
+    }
+
+    /// Occupied names in `target`; the first `detailed` with sizes and
+    /// dates of both sides (the dialog shows a few; on a network share each
+    /// costs two requests, made on the window's thread).
+    pub fn conflict_details(&self, target: &Path, detailed: usize) -> Vec<Conflict> {
+        self.conflicts_in(target).iter().enumerate()
+            .map(|(index, source)| if index < detailed {
+                Conflict::read(source, &target.join(source.file_name().unwrap_or_default()))
+            } else {
+                Conflict { source: source.clone(), source_size: None, existing_size: None, source_modified: None, existing_modified: None }
+            })
             .collect()
     }
 
@@ -861,6 +938,53 @@ pub fn free_destination(target: &Path, name: &Path, reserved: &[PathBuf]) -> Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_leaves_out_nested_items_and_moves_in_place() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("a");
+        fs::create_dir_all(folder.join("inner")).unwrap();
+        fs::write(folder.join("inner/x.txt"), b"x").unwrap();
+        let target = temp.path().join("t");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("here.txt"), b"h").unwrap();
+        let mut zone = DropZone::default();
+        zone.add(&folder.join("inner/x.txt")).unwrap();
+        zone.add(&folder).unwrap();
+        zone.add(&target.join("here.txt")).unwrap();
+        let target = crate::path_utils::canonical(&target).unwrap();
+        let mut copying = DropZone::default();
+        for item in zone.items() { copying.add(item).unwrap(); }
+        let pruned = zone.prune_for(&target, true);
+        assert_eq!(pruned.nested.len(), 1);
+        assert!(pruned.nested[0].ends_with("x.txt"));
+        assert_eq!(pruned.in_place.len(), 1);
+        assert_eq!(zone.items().len(), 1);
+        assert!(zone.is_folder(&zone.items()[0]));
+        // A copy into the same folder keeps the file: it gets a numbered copy.
+        let pruned = copying.prune_for(&target, false);
+        assert!(pruned.in_place.is_empty());
+        assert_eq!(copying.items().len(), 2);
+    }
+
+    #[test]
+    fn conflict_details_compare_sizes_and_dates() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("new.txt");
+        let target = temp.path().join("t");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("new.txt"), b"old").unwrap();
+        fs::write(&source, b"newer text").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options().write(true).open(target.join("new.txt")).unwrap().set_modified(old).unwrap();
+        let mut zone = DropZone::default();
+        zone.add(&source).unwrap();
+        let details = zone.conflict_details(&target, 4);
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].source_size, Some(10));
+        assert_eq!(details[0].existing_size, Some(3));
+        assert_eq!(details[0].incoming_newer(), Some(true));
+    }
 
     #[test]
     fn audited_queue_reports_processed_items_and_current_path() {

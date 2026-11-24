@@ -12,6 +12,8 @@ pub(crate) const PLACES: &str = "places";
 pub(crate) const COLLAPSED: &str = "collapsed_sections";
 /// Recently used folders, most recent first, one per line.
 pub(crate) const RECENT: &str = "recent";
+/// How often and how lately folders were stayed in (`jump::Visits`).
+pub(crate) const VISITS: &str = "folder_visits";
 const RECENT_KEPT: usize = 30;
 pub(crate) const RECENT_SHOWN: usize = 8;
 
@@ -56,6 +58,7 @@ impl Explorer {
                 this.remember_recent(cx);
                 if this.session_restore_error.is_some() {return;}
                 let state=format!("{:?}",this.browser);
+                if this.registry.due {this.publish_projects(cx);}
                 if state!=this.saved_layout { match this.persist_workspace() {
                     Ok(())=>this.saved_layout=state,
                     Err(error)=>{this.status=format!("Сеанс не сохранён: {error}");cx.notify();}
@@ -69,7 +72,7 @@ impl Explorer {
         self.scroll_handles.clear();self.folder_views.clear();self.column_resize=None;self.dock_hover=None;
         self.marquee=None;self.anchor=None;self.address_editing=None;self.select_first_when_loaded=false;
         self.selected=None;self.marked.clear();self.confirm_recycle=None;self.selected_history_event=None;
-        self.context_menu=None;self.clear_filter=true;self.close_search();self.close_document_preview(cx);self.inspector.path=None;
+        self.context_menu=None;self.close_project_card(cx);self.clear_filter=true;self.close_search();self.close_document_preview(cx);self.inspector.path=None;
     }
     /// Opens project `name` in the active pane; the other panes stay. A
     /// project already open in some pane is focused there instead.
@@ -118,6 +121,8 @@ impl Explorer {
         self.refresh_workspace_names();cx.notify();
     }
     pub(crate) fn refresh_workspace_names(&mut self) {
+        // Other programs see the list soon after it changes.
+        self.registry.due=true;
         self.workspace_names=self.workspaces.as_ref().and_then(|store|store.list().ok()).unwrap_or_default()
             .into_iter().filter(|name|filemanager_core::projects::valid_name(name)).collect();
     }
@@ -173,6 +178,11 @@ impl Explorer {
         let mut current: Vec<PathBuf> = self.browser.leaves().into_iter().map(|id|self.pane_path(id)).collect();
         // The active pane's folder is the most recent.
         let active=self.pane_path(self.active_side());
+        // A folder stayed in (active on two ticks running, 2 s and more)
+        // counts once per stay; one passed through on the way does not.
+        if self.stays.tick(&active,crate::now_ms()) {
+            if let Some(store)=&self.workspaces { let _=store.set_value(VISITS,&self.stays.visits.to_text()); }
+        }
         current.retain(|p|p!=&active); current.insert(0,active);
         let mut next=current.clone();
         next.extend(self.recent.iter().filter(|p|!current.contains(p)).cloned());

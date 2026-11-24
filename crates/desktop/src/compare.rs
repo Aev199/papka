@@ -4,7 +4,8 @@
 //! file replaces the older one, which goes to the Recycle Bin.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool,AtomicU64,Ordering};
+static REQUEST:AtomicU64=AtomicU64::new(1);
 
 use filemanager_core::folder_compare::{compare, Difference, Row};
 use filemanager_core::operations::DropZone;
@@ -12,14 +13,18 @@ use gpui::{AppContext, Context};
 
 use crate::{Explorer, Transfer};
 
+#[derive(Clone)]
 pub(crate) struct Comparison {
+    request_id:u64,
     pub(crate) left: PathBuf,
     pub(crate) right: PathBuf,
     /// `None` while comparing.
-    pub(crate) rows: Option<Result<Vec<Row>, String>>,
+    pub(crate) rows: Option<Result<std::sync::Arc<Vec<Row>>, String>>,
 }
 
 impl Comparison {
+    fn new(left:PathBuf,right:PathBuf)->Self{Self{request_id:REQUEST.fetch_add(1,Ordering::Relaxed),left,right,rows:None}}
+    fn accepts(&self,request:u64)->bool{self.request_id==request && self.rows.is_none()}
     pub(crate) fn count(&self, to_right: bool) -> usize {
         self.rows.as_ref().and_then(|r| r.as_ref().ok()).map_or(0, |rows| rows.iter().filter(|row| moves(row, to_right)).count())
     }
@@ -51,16 +56,17 @@ impl Explorer {
             cx.notify();
             return;
         }
-        self.comparison = Some(Comparison { left: left.clone(), right: right.clone(), rows: None });
+        self.comparison = Some(Comparison::new(left.clone(),right.clone()));
         let pair = (left.clone(), right.clone());
+        let request_id=self.comparison.as_ref().unwrap().request_id;
         let task = cx.background_spawn(async move { compare(&left, &right, &AtomicBool::new(false)).map_err(|e| e.to_string()) });
         cx.spawn(async move |this, cx| {
             let rows = task.await;
             let _ = this.update(cx, |this, cx| {
                 // An older, abandoned comparison must not fill in a newer one.
                 if let Some(comparison) = this.comparison.as_mut()
-                    .filter(|c| c.rows.is_none() && c.left == pair.0 && c.right == pair.1) {
-                    comparison.rows = Some(rows);
+                    .filter(|c| c.accepts(request_id) && c.left == pair.0 && c.right == pair.1) {
+                    comparison.rows = Some(rows.map(std::sync::Arc::new));
                     cx.notify();
                 }
             });
@@ -70,16 +76,17 @@ impl Explorer {
 
     pub(crate) fn rerun_comparison(&mut self, cx: &mut Context<Self>) {
         let Some(comparison) = self.comparison.take() else { return };
-        self.comparison = Some(Comparison { rows: None, ..comparison });
+        self.comparison = Some(Comparison::new(comparison.left,comparison.right));
         let (left, right) = { let c = self.comparison.as_ref().unwrap(); (c.left.clone(), c.right.clone()) };
         let pair = (left.clone(), right.clone());
+        let request_id=self.comparison.as_ref().unwrap().request_id;
         let task = cx.background_spawn(async move { compare(&left, &right, &AtomicBool::new(false)).map_err(|e| e.to_string()) });
         cx.spawn(async move |this, cx| {
             let rows = task.await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(comparison) = this.comparison.as_mut()
-                    .filter(|c| c.rows.is_none() && c.left == pair.0 && c.right == pair.1) {
-                    comparison.rows = Some(rows);
+                    .filter(|c| c.accepts(request_id) && c.left == pair.0 && c.right == pair.1) {
+                    comparison.rows = Some(rows.map(std::sync::Arc::new));
                     cx.notify();
                 }
             });
@@ -104,5 +111,14 @@ impl Explorer {
             .map(|((target, replace), zone)| Transfer { zone, target, copy: true, keep_both: false, replace, restore_failed: false }));
         if skipped > 0 { self.status = format!("Пропущено недоступных: {skipped}"); }
         self.start_queued(cx);
+    }
+}
+
+#[cfg(test)]mod request_tests {
+    use super::*;
+    #[test]fn abandoned_same_folder_request_cannot_fill_a_reopened_comparison(){
+        let old=Comparison::new("a".into(),"b".into());let mut current=Comparison::new("a".into(),"b".into());
+        assert!(!current.accepts(old.request_id));assert!(current.accepts(current.request_id));
+        current.rows=Some(Ok(std::sync::Arc::new(Vec::new())));assert!(!current.accepts(current.request_id));
     }
 }

@@ -91,7 +91,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
     }
     fn FinishOperations(&self, hr: HRESULT) -> windows::core::Result<()> {
         if let Err(error) = hr.ok() {
-            *self.failure.lock().unwrap() = Some(error.to_string());
+            *crate::guard::lock(&self.failure) = Some(error.to_string());
         }
         Ok(())
     }
@@ -117,7 +117,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         if let Err(error) = completed(hr) {
             // An item failure is different from successful deletion without a
             // usable receipt; PerformOperations can succeed for a failed item.
-            *self.failure.lock().unwrap() = Some(error);
+            *crate::guard::lock(&self.failure) = Some(error);
             return Ok(());
         }
         let matches = item
@@ -138,7 +138,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
                         "Recycling identity unavailable: {error}. Check the Recycle Bin manually."
                     )
                 });
-            *self.capture.lock().unwrap() = Some(result);
+            *crate::guard::lock(&self.capture) = Some(result);
         }
         Ok(())
     }
@@ -162,7 +162,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
     ) -> windows::core::Result<()> {
         if self.restoring {
             if let Err(error) = completed(hr) {
-                *self.failure.lock().unwrap() = Some(error);
+                *crate::guard::lock(&self.failure) = Some(error);
                 return Ok(());
             }
             let result = hr
@@ -174,7 +174,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
                     shell_path(new, SIGDN_FILESYSPATH)
                 })
                 .map_err(|error| format!("Restoration did not complete: {error}"));
-            *self.capture.lock().unwrap() = Some(result);
+            *crate::guard::lock(&self.capture) = Some(result);
         }
         Ok(())
     }
@@ -315,14 +315,14 @@ fn recycle_sta(path: &Path) -> io::Result<Option<RecycleToken>> {
             ));
         }
     }
-    if let Some(error) = failure.lock().unwrap().take() {
+    if let Some(error) = crate::guard::lock(&failure).take() {
         return Err(io::Error::other(format!(
             "Recycling failed: {error}. Verify the original path and Recycle Bin."
         )));
     }
     // The OS has already changed disk: never report a missing receipt as an
     // untouched operation, and never guess an alternative item by name/time.
-    let captured = capture.lock().unwrap().take();
+    let captured = crate::guard::lock(&capture).take();
     if captured.is_none() && std::fs::symlink_metadata(path).is_ok() {
         return Err(io::Error::other(
             "Recycling did not complete; the original path still exists",
@@ -408,12 +408,12 @@ fn restore_sta(token: &RecycleToken) -> io::Result<PathBuf> {
             ));
         }
     }
-    if let Some(error) = failure.lock().unwrap().take() {
+    if let Some(error) = crate::guard::lock(&failure).take() {
         return Err(io::Error::other(format!(
             "Restoration failed: {error}. Verify files manually."
         )));
     }
-    match capture.lock().unwrap().take() {
+    match crate::guard::lock(&capture).take() {
         // An alternate name is a completed restoration, not a failed deletion
         // receipt that could be retried after its bin identity was consumed.
         Some(Ok(path)) => Ok(PathBuf::from(path)),

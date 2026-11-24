@@ -1,0 +1,2 @@
+Beta candidate after animation review: 50c8449
+Publish beta only after the Windows build and full test suite pass.

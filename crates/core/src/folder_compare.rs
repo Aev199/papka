@@ -35,19 +35,24 @@ pub struct Row {
 }
 
 #[derive(Default)]
-struct Entry { is_dir: bool, size: u64, modified: Option<SystemTime> }
+struct Entry { name: String, is_dir: bool, size: u64, modified: Option<SystemTime> }
 
 fn read(folder: &Path) -> io::Result<BTreeMap<String, Entry>> {
     let mut entries = BTreeMap::new();
     for item in fs::read_dir(folder)? {
-        let Ok(item) = item else { continue };
-        let Ok(meta) = item.metadata() else { continue };
-        if meta.file_type().is_symlink() { continue; }
+        let item = item.map_err(|error| at(folder, error))?;
+        let meta = item.metadata().map_err(|error| at(&item.path(), error))?;
+        crate::folder_copy::reject_link(&item.path()).map_err(|error| at(&item.path(), error))?;
         // Windows names ignore case: one key for "Отчёт.docx" and "отчёт.docx".
-        entries.insert(item.file_name().to_string_lossy().to_lowercase(),
-            Entry { is_dir: meta.is_dir(), size: meta.len(), modified: meta.modified().ok() });
+        let name = item.file_name().to_string_lossy().into_owned();
+        entries.insert(name.to_lowercase(),
+            Entry { name, is_dir: meta.is_dir(), size: meta.len(), modified: meta.modified().ok() });
     }
     Ok(entries)
+}
+
+fn at(path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("Сравнение неполное: {}: {error}", path.display()))
 }
 
 fn seconds(time: Option<SystemTime>) -> u64 {
@@ -55,7 +60,7 @@ fn seconds(time: Option<SystemTime>) -> u64 {
 }
 
 /// Every difference between `left` and `right`, sorted by path. Stops early
-/// (returning what was found) when `cancel` is set.
+/// with an error when `cancel` is set or any subtree cannot be read.
 pub fn compare(left: &Path, right: &Path, cancel: &AtomicBool) -> io::Result<Vec<Row>> {
     let mut rows = Vec::new();
     walk(left, right, Path::new(""), cancel, &mut rows)?;
@@ -63,25 +68,13 @@ pub fn compare(left: &Path, right: &Path, cancel: &AtomicBool) -> io::Result<Vec
 }
 
 fn walk(left: &Path, right: &Path, relative: &Path, cancel: &AtomicBool, rows: &mut Vec<Row>) -> io::Result<()> {
-    if cancel.load(Ordering::Relaxed) { return Ok(()); }
-    // A subfolder that cannot be read (no access on a share) is passed
-    // over; only the two folders being compared must be readable.
-    let (a, b) = match (read(&left.join(relative)), read(&right.join(relative))) {
-        (Ok(a), Ok(b)) => (a, b),
-        (Err(error), _) | (_, Err(error)) if relative.as_os_str().is_empty() => return Err(error),
-        _ => return Ok(()),
-    };
-    // Display names come from whichever side has the entry.
-    let names = |folder: &Path| -> BTreeMap<String, String> {
-        fs::read_dir(folder).map(|items| items.filter_map(Result::ok)
-            .map(|i| (i.file_name().to_string_lossy().to_lowercase(), i.file_name().to_string_lossy().into_owned())).collect())
-            .unwrap_or_default()
-    };
-    let (left_names, right_names) = (names(&left.join(relative)), names(&right.join(relative)));
+    if cancel.load(Ordering::Relaxed) { return Err(io::Error::new(io::ErrorKind::Interrupted, "Сравнение отменено")); }
+    let a = read(&left.join(relative)).map_err(|error| at(&left.join(relative), error))?;
+    let b = read(&right.join(relative)).map_err(|error| at(&right.join(relative), error))?;
     let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
     keys.sort(); keys.dedup();
     for key in keys {
-        let name = left_names.get(key).or_else(|| right_names.get(key)).cloned().unwrap_or_else(|| key.clone());
+        let name = &a.get(key).or_else(|| b.get(key)).unwrap().name;
         let path = relative.join(&name);
         let side = |e: &Entry| Side { size: e.size, modified: e.modified };
         match (a.get(key), b.get(key)) {
@@ -117,6 +110,40 @@ mod tests {
         fs::write(path, content).unwrap();
         let time = SystemTime::now() - Duration::from_secs(age_seconds);
         filetime::set_file_mtime(path, filetime::FileTime::from_system_time(time)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn links_are_reported_as_unsupported_instead_of_silently_skipped() {
+        let (left, right) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::os::unix::fs::symlink(right.path(), left.path().join("link")).unwrap();
+        assert!(compare(left.path(), right.path(), &AtomicBool::new(false)).unwrap_err().to_string().contains("link"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unreadable_subtree_never_claims_that_the_roots_match() {
+        use std::os::unix::fs::PermissionsExt;
+        let (left, right) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        for root in [left.path(), right.path()] { fs::create_dir(root.join("private")).unwrap(); }
+        fs::write(left.path().join("private/different.txt"), b"x").unwrap();
+        let blocked = right.path().join("private");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0)).unwrap();
+        // Root can read mode 000 directories, so this fixture needs an ordinary user.
+        let cannot_read = fs::read_dir(&blocked).is_err();
+        let result = compare(left.path(), right.path(), &AtomicBool::new(false));
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        if cannot_read {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(error.to_string().contains("private"));
+        }
+    }
+
+    #[test]
+    fn cancellation_is_not_a_successful_empty_comparison() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(compare(dir.path(), dir.path(), &AtomicBool::new(true)).unwrap_err().kind(), io::ErrorKind::Interrupted);
     }
 
     #[test]

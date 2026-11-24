@@ -12,6 +12,7 @@ pub(crate) const TEMPLATES_KEY: &str = "version_templates";
 pub(crate) const BUILTIN_KEY: &str = "version_builtin";
 
 /// The editor while it is open.
+#[derive(Clone)]
 pub(crate) struct Editing {
     pub builtin: bool,
     pub error: Option<String>,
@@ -81,8 +82,7 @@ impl Explorer {
                 .on_click(cx.listener(|this, _, window, cx| this.open_version_rules(window, cx))))
     }
 
-    pub(crate) fn version_rules_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let editing = self.version_editing.as_ref()?;
+    pub(crate) fn version_rules_dialog(&self, editing:&Editing, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         let builtin = editing.builtin;
         let example = |pattern: &'static str, name: &'static str| div().flex().gap_3().text_size(px(12.))
             .child(div().w(px(110.)).flex_none().text_color(rgb(TEXT)).child(pattern))
@@ -119,10 +119,11 @@ impl Explorer {
                     .on_click(cx.listener(|this, _, window, cx| this.close_version_rules(window, cx))))
                 .child(text_button("version-save", "Сохранить", ButtonKind::Primary)
                     .on_click(cx.listener(|this, _, window, cx| this.save_version_rules(window, cx)))));
-        Some(div().id("version-rules-backdrop").absolute().inset_0().flex().items_center().justify_center()
-            .bg(gpui::rgba(0x00000066))
+        div().id("version-rules-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(gpui::rgba(0x00000066)).opacity(phase.alpha)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(card)
-            .into_any_element())
+            .child(card.mt(px(6.*(1.-phase.alpha))))
+            .when(phase.closing,|view|view.child(crate::popup_motion::shield()))
+            .into_any_element()
     }
 }

@@ -27,6 +27,11 @@ fn time_ms() -> i64 {
         .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
 }
+/// A folder the walk's [`ScanPolicy`](crate::scan_policy::ScanPolicy) leaves out.
+fn skipped(policy: &crate::scan_policy::ScanPolicy, entry: &DirEntry) -> bool {
+    entry.file_type().is_dir() && (crate::scan_policy::ScanPolicy::skips_name(&entry.file_name().to_string_lossy()) || policy.skips(entry.path()))
+}
+
 fn allowed(entry: &DirEntry) -> bool {
     if entry.depth() == 0 { return true; }
     if entry.file_type().is_symlink() { return false; }
@@ -120,7 +125,8 @@ impl PersistentIndex {
             self.database.with_extension("sqlite3-shm"),
             self.database.with_extension("sqlite3-journal"),
         ];
-        for next in WalkDir::new(&root).follow_links(false).into_iter().filter_entry(allowed) {
+        let policy = crate::scan_policy::ScanPolicy::for_root(Path::new(&root));
+        for next in WalkDir::new(&root).follow_links(false).into_iter().filter_entry(|e| allowed(e) && !skipped(&policy, e)) {
             let entry = match next {
                 Ok(entry) => entry,
                 Err(_) => {
@@ -190,6 +196,7 @@ impl PersistentIndex {
         if max_entries == 0 { return Err(invalid("Index limit must be positive")); }
         let root = root_key(root)?;
         let root_path = Path::new(&root);
+        let policy = crate::scan_policy::ScanPolicy::for_root(root_path);
         let previous = self.info(root_path)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "Index root was not initialized")
         })?;
@@ -244,7 +251,7 @@ impl PersistentIndex {
             if exists {
                 // Check EVERY existing ancestor; a junction in a parent must
                 // not make the index leave the monitored root.
-                let mut valid = true;
+                let mut valid = !policy.skips(path);
                 for ancestor in path.ancestors().take_while(|part| *part != root_path) {
                     if let Ok(metadata) = fs::symlink_metadata(ancestor) {
                         if metadata.file_type().is_symlink() { valid = false; break; }
@@ -259,7 +266,7 @@ impl PersistentIndex {
                     }
                 }
                 if valid {
-                    for entry in WalkDir::new(path).follow_links(false).into_iter().filter_entry(allowed) {
+                    for entry in WalkDir::new(path).follow_links(false).into_iter().filter_entry(|e| allowed(e) && !skipped(&policy, e)) {
                         let entry = match entry {
                             Ok(entry) => entry,
                             Err(_) => { incomplete = true; continue; },

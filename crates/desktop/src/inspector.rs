@@ -43,6 +43,7 @@ impl Explorer {
                     return;
                 }
                 this.inspector.thumbnail = result.ok();
+                if this.inspector.thumbnail.is_some() { this.motion.picture_arrived(format!("inspector:{}", selected.display())); }
                 cx.notify();
             });
         })

@@ -20,6 +20,36 @@ const SHOWN: usize = 60;
 const DEPTH: usize = 3;
 const LIMIT: usize = 6000;
 
+/// Stays in folders, for Ctrl+P: a folder counts once per stay, and only
+/// when it was the active pane's on two autosave ticks running (2 s or
+/// more), not when a tick catches it on the way through.
+#[derive(Default)]
+pub(crate) struct Stays {
+    pub(crate) visits: jump::Visits,
+    noted: Option<PathBuf>,
+    seen: Option<PathBuf>,
+}
+
+impl Stays {
+    pub(crate) fn new(visits: jump::Visits) -> Self { Self { visits, ..Self::default() } }
+
+    /// The autosave tick with the active pane's folder; true when a stay
+    /// was counted (the visits are to be saved).
+    pub(crate) fn tick(&mut self, active: &std::path::Path, now_ms: i64) -> bool {
+        let stayed = self.seen.as_deref() == Some(active);
+        self.seen = Some(active.to_path_buf());
+        if !stayed {
+            // Left the folder of the last stay: coming back is a new stay.
+            if self.noted.as_deref() != Some(active) { self.noted = None; }
+            return false;
+        }
+        if self.noted.as_deref() == Some(active) { return false; }
+        self.noted = Some(active.to_path_buf());
+        self.visits.visit(active, now_ms);
+        true
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Folders {
     /// Candidates in the order they are offered without a query.
@@ -40,7 +70,7 @@ impl Explorer {
     pub(crate) fn open_jump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             // Ctrl+P again closes it, as a toggle.
-            self.palette = None;
+            self.motion.surfaces.retire_interface(self.palette.take(),None);
             window.focus(&self.focus_handle, cx);
             cx.notify();
             return;
@@ -49,6 +79,9 @@ impl Explorer {
         let current = self.pane_path(self.active_side());
         for path in &self.favorites { folders.add(path.clone(), "Избранное"); }
         for path in &self.recent { folders.add(path.clone(), "Недавние"); }
+        // Folders of daily work, however deep or far (a share): offered even
+        // when the walk below does not reach them.
+        for path in self.stays.visits.top(80, crate::now_ms()) { folders.add(path, "Частые"); }
         for group in &self.browser.groups {
             for tab in &group.tabs { folders.add(tab.active().path.clone(), "Вкладка"); }
         }
@@ -108,8 +141,10 @@ impl Explorer {
             results.extend(folders.items.iter().filter(|(_, source)| *source != "Вложенная").take(SHOWN).cloned());
             return results;
         }
+        // Folders opened often and lately rank above equal matches.
+        let now = crate::now_ms();
         let mut scored: Vec<(i64, usize)> = folders.items.iter().enumerate()
-            .filter_map(|(index, (path, _))| jump::score(query, path).map(|score| (score, index)))
+            .filter_map(|(index, (path, _))| jump::score(query, path).map(|score| (score + self.stays.visits.bonus(path, now), index)))
             .collect();
         // Better match first; among equals, the order of the sources.
         scored.sort_by_key(|(score, index)| (-score, *index));
@@ -118,7 +153,7 @@ impl Explorer {
     }
 
     pub(crate) fn jump_to(&mut self, path: PathBuf, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
+        self.motion.surfaces.retire_interface(self.palette.take(),None);
         window.focus(&self.focus_handle, cx);
         if !path.is_dir() {
             self.status = format!("Папка недоступна: {}", path.display());
@@ -171,4 +206,27 @@ impl Explorer {
 pub(crate) fn field(palette: &Palette) -> Input {
     Input::new(&palette.input).appearance(false)
         .prefix(gpui::svg().path("fm/folder-fill.svg").size(px(14.)).text_color(rgb(TEXT_MUTED)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn a_stay_counts_once_and_a_pass_not_at_all() {
+        let mut stays = Stays::default();
+        let work = Path::new("/p/work");
+        // First tick in a folder: maybe just passing through.
+        assert!(!stays.tick(work, 1));
+        // Still there on the next tick: one stay.
+        assert!(stays.tick(work, 2));
+        assert!(!stays.tick(work, 3));
+        // Through another folder and back: a new stay after two ticks.
+        assert!(!stays.tick(Path::new("/p/other"), 4));
+        assert!(!stays.tick(work, 5));
+        assert!(stays.tick(work, 6));
+        assert!(stays.visits.bonus(work, 6) > 0);
+        assert_eq!(stays.visits.bonus(Path::new("/p/other"), 6), 0);
+    }
 }

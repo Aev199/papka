@@ -12,7 +12,7 @@ use crate::{Explorer, FolderView, GroupId};
 actions!(filemanager, [
     PaletteEnter, SettingsToggle, SettingsApply, OpenPalette, OpenSettings, Back, Forward, Up, NewTab, CloseTab, NextTab, PrevTab, Split, Refresh, Stage, Find,
     AddressBar, RenameSelected, NewFolder, DismissOverlay, SelectNext, SelectPrev,
-    SelectFirst, SelectLast, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
+    SelectFirst, SelectLast, SelectPageDown, SelectPageUp, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
     SplitRight, SplitDown, ClosePane, ReopenTab, PreviousPane, PaneLeft, PaneRight, PaneUp, PaneDown,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
     CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
@@ -24,6 +24,16 @@ const CONTEXT: &str = "Filemanager";
 
 pub fn bind(cx: &mut App) {
     cx.bind_keys([
+        // The component only supplies document-edge shortcuts on macOS.
+        // Keep the standard Windows/Linux keys inside text inputs.
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-home", gpui_component::input::MoveToStart, Some("Input")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-end", gpui_component::input::MoveToEnd, Some("Input")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-home", gpui_component::input::SelectToStart, Some("Input")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-end", gpui_component::input::SelectToEnd, Some("Input")),
         KeyBinding::new("up", SelectPrev, Some("CommandPalette > Input")),
         KeyBinding::new("down", SelectNext, Some("CommandPalette > Input")),
         KeyBinding::new("enter", PaletteEnter, Some("CommandPalette > Input")),
@@ -82,6 +92,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("up", SelectPrev, Some(CONTEXT)),
         KeyBinding::new("home", SelectFirst, Some(CONTEXT)),
         KeyBinding::new("end", SelectLast, Some(CONTEXT)),
+        KeyBinding::new("pagedown", SelectPageDown, Some(CONTEXT)),
+        KeyBinding::new("pageup", SelectPageUp, Some(CONTEXT)),
         KeyBinding::new("enter", OpenSelected, Some(CONTEXT)),
         KeyBinding::new("left", ColumnLeft, Some(CONTEXT)),
         KeyBinding::new("right", ColumnRight, Some(CONTEXT)),
@@ -132,18 +144,23 @@ impl Explorer {
         // The quick filter applies to the focused pane's folder only.
         let filter = if group == self.browser.active && folder == self.pane_path(group) { self.filter.clone() } else { String::new() };
         let spec = self.sort_for(group);
+        let manual_revision = self.manual_orders.revision_for(folder);
+        let manual = self.manual_orders.enabled(folder);
         let sizes = if spec.key == filemanager_core::sort::SortKey::Size { self.sizes.revision } else { 0 };
         let label_filter = self.label_filter(group);
         let labels_rev = if label_filter.is_some() { self.labels.revision } else { 0 };
+        let kind_filter = self.kinds.get(group);
         if let Some(view) = self.folder_views.get(&(group,folder.to_path_buf())) {
             if Arc::ptr_eq(&view.listing, &listing)
                 && view.spec == spec
+                && view.manual_revision == manual_revision
                 && view.sizes == sizes
                 && view.show_hidden == self.show_hidden
                 && view.filter == filter
                 && view.stacks_rev == self.stacks_rev
                 && view.label_filter == label_filter
                 && view.labels_rev == labels_rev
+                && view.kind_filter == kind_filter
             {
                 return Some((listing, Arc::clone(&view.indices)));
             }
@@ -157,8 +174,12 @@ impl Explorer {
             // Folders stay, so the way to labelled files stays open.
             indices.retain(|&row| listing.entries[row].is_directory || self.label_of(&listing.entries[row].path) == Some(label));
         }
-        // Versions of one document fold into its newest file.
-        let (indices, stacks) = if self.stack_versions {
+        if let Some(kind) = kind_filter {
+            indices.retain(|&row| listing.entries[row].is_directory || filemanager_core::kinds::Kind::of(&listing.entries[row].path) == Some(kind));
+        }
+        if manual { self.manual_orders.apply(folder, &listing.entries, &mut indices); }
+        // Versions of one document fold into its newest file unless manual order is enabled.
+        let (indices, stacks) = if self.stack_versions && !manual {
             let name_of = |row: usize| { let entry = &listing.entries[row]; (!entry.is_directory).then(|| entry.name.clone()) };
             let open = |key: &str| self.open_stacks.contains(&(folder.to_path_buf(), key.to_owned()));
             let (order, roles) = filemanager_core::versions::stack(&indices, &name_of, &open);
@@ -168,15 +189,31 @@ impl Explorer {
             (indices, std::collections::HashMap::new())
         };
         let indices = Arc::new(indices);
+        let motion_key=(group,folder.to_path_buf());
+        let before=self.folder_views.get(&motion_key).filter(|v|Arc::ptr_eq(&v.listing,&listing) && v.stacks_rev==self.stacks_rev
+            && (v.spec!=spec || v.show_hidden!=self.show_hidden || v.filter!=filter || v.label_filter!=label_filter || v.labels_rev!=labels_rev || v.kind_filter!=kind_filter))
+            .map(|v|v.indices.clone());
+        if let Some(before)=before {
+            self.motion.rows.remove(&motion_key);
+            let old=self.motion.lists.remove(&motion_key);
+            self.motion.lists.retain(|(id,_),_|*id!=group);
+            if crate::theme::animations() && !self.miller(group) && !self.thumbs_view(group) && !self.renaming && !self.file_drag && self.marquee.is_none() {
+                if let Some(motion)=crate::list_motion::ListMotion::new(listing.clone(),&before,&indices,old.as_ref(),std::time::Instant::now()) {
+                    self.motion.lists.insert(motion_key,motion);
+                }
+            }
+        }
         self.folder_views.insert((group,folder.to_path_buf()), FolderView {
             listing: Arc::clone(&listing),
             spec,
+            manual_revision,
             sizes,
             show_hidden: self.show_hidden,
             filter,
             stacks_rev: self.stacks_rev,
             label_filter,
             labels_rev,
+            kind_filter,
             indices: Arc::clone(&indices),
             stacks: Arc::new(stacks),
         });
@@ -190,9 +227,39 @@ impl Explorer {
 
     /// Opens or closes the stack of versions `key` in `folder`.
     pub(crate) fn toggle_stack(&mut self, folder: &Path, key: &str, cx: &mut Context<Self>) {
+        let sides=self.browser.leaves().into_iter().filter(|&side| !self.miller(side) && !self.thumbs_view(side) && self.pane_path(side)==folder).collect::<Vec<_>>();
+        let before=sides.into_iter().filter_map(|side| {
+            let (listing,order)=self.folder_view(side,folder)?;
+            let roles=self.folder_views.get(&(side,folder.to_path_buf()))?.stacks.clone();
+            Some((side,listing,order,roles))
+        }).collect::<Vec<_>>();
         let id = (folder.to_path_buf(), key.to_owned());
-        if !self.open_stacks.remove(&id) { self.open_stacks.insert(id); }
+        let closing=self.open_stacks.remove(&id);
+        if !closing { self.open_stacks.insert(id); }
+        if closing {
+            if let Some((_,_,_,roles))=before.first() {
+                let head=roles.iter().find_map(|(path,role)|matches!(role,filemanager_core::versions::Stacked::Head{key:family,..} if family==key).then(||path.clone()));
+                if let Some(head)=head {
+                    let hidden=roles.iter().filter_map(|(path,role)|matches!(role,filemanager_core::versions::Stacked::Member{key:family,..} if family==key).then(||path.clone())).collect();
+                    self.marked.collapse_to_head(&mut self.selected,&mut self.anchor,&hidden,&head);
+                }
+            }
+        }
         self.stacks_rev += 1;
+        let now=std::time::Instant::now();
+        for(side,listing,order,roles)in before {
+            let Some((_,after))=self.folder_view(side,folder)else{continue};
+            let id=(side,folder.to_path_buf());self.motion.lists.remove(&id);let old=self.motion.rows.remove(&id);
+            let mut roles=(*roles).clone();
+            if let Some(view)=self.folder_views.get(&(side,folder.to_path_buf())) {roles.extend(view.stacks.iter().map(|(p,r)|(p.clone(),r.clone())));}
+            let roles=Arc::new(roles);
+            if !crate::theme::animations() || self.renaming || self.marquee.is_some() || self.dragging_files(cx) {continue;}
+            let motion=if let Some(mut old)=old.filter(|old|Arc::ptr_eq(&old.listing,&listing)) {
+                let merged=Arc::make_mut(&mut old.roles);merged.extend(roles.iter().map(|(p,r)|(p.clone(),r.clone())));
+                old.retarget(&after,now);Some(old)
+            }else{crate::row_motion::RowMotion::new(listing,roles,&order,&after,now)};
+            if let Some(motion)=motion{self.motion.rows.insert(id,motion);}
+        }
         cx.notify();
     }
 
@@ -218,6 +285,11 @@ impl Explorer {
     /// would count as a "triple" one. A double click is the second of a
     /// pair (an even count) on the item the first click of the pair hit.
     pub(crate) fn is_double_click(&mut self, event: &gpui::ClickEvent, path: &Path) -> bool {
+        let modifiers = event.modifiers();
+        if modifiers.control || modifiers.platform || modifiers.shift {
+            self.last_click = None;
+            return false;
+        }
         let count = event.click_count();
         let double = count >= 2 && count % 2 == 0 && self.last_click.as_deref() == Some(path);
         self.last_click = if double { None } else { Some(path.to_path_buf()) };
@@ -245,6 +317,7 @@ impl Explorer {
         select: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        self.leave_project_card(side, cx);
         self.marquee=None;
         self.focus_group(side,cx);
         let tab = self.browser.active_mut();
@@ -272,12 +345,14 @@ impl Explorer {
         if self.marked.is_empty() {
             self.selected.iter().cloned().collect()
         } else {
-            self.marked.clone()
+            self.marked.to_vec()
         }
     }
 
     pub(crate) fn is_selected(&self, path: &Path) -> bool {
-        self.selected.as_deref() == Some(path) || self.marked.iter().any(|p| p == path)
+        // Asked per visible row only: a full path comparison is cheap here and
+        // treats `C:/a` and `C:\\a` alike (a path typed in the address bar).
+        self.selected.as_deref() == Some(path) || self.marked.contains(path)
     }
 
     /// Paths of `folder` in display order.
@@ -297,22 +372,18 @@ impl Explorer {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
+        self.motion.cancel_plate();
         let same_folder = self.anchor.as_deref().and_then(Path::parent) == Some(folder)
             && side == self.active_side();
         if modifiers.shift && same_folder {
             let anchor = self.anchor.clone().unwrap_or_else(|| path.clone());
             let order = self.ordered_paths(folder);
-            self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &path);
+            self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &path).into();
             self.selected = Some(path);
         } else if (modifiers.control || modifiers.platform) && same_folder {
-            if self.marked.is_empty() {
-                self.marked.extend(self.selected.clone());
-            }
-            selection::toggle(&mut self.marked, &path);
             // Keep display order for batch operations.
             let order = self.ordered_paths(folder);
-            self.marked.sort_by_key(|p| order.iter().position(|o| o == p));
-            self.selected = Some(path.clone());
+            self.marked.toggle_selection(&mut self.selected, &path, &order);
             self.anchor = Some(path);
         } else {
             self.navigate_side(side, folder, Some(path), cx);
@@ -346,16 +417,40 @@ impl Explorer {
         cx.notify();
     }
 
+    /// A far jump of the selection (Home, End, a page, a found file) glides
+    /// the list there, as the wheel does, instead of a cut; near moves and a
+    /// list not laid out yet scroll at once. True when it glides.
+    fn glide_to_row(&self, side: GroupId, folder: &Path, handle: &gpui::UniformListScrollHandle, item: usize) -> bool {
+        if !crate::theme::animations() || (self.motion.rows.contains_key(&(side,folder.to_path_buf())) || self.motion.lists.contains_key(&(side,folder.to_path_buf()))) { return false; }
+        let state = handle.0.borrow();
+        // GPUI's `last_item_size.item` is the list's visible area, not a row.
+        let Some(size) = state.last_item_size else { return false };
+        let view = f32::from(size.item.height);
+        let base = state.base_handle.clone();
+        drop(state);
+        let row = crate::layout::row_height();
+        if row <= 0. || view <= 0. { return false; }
+        let offset = f32::from(base.offset().y);
+        let (top, bottom) = (item as f32 * row, item as f32 * row + row);
+        let target = if top < -offset { -top } else if bottom > -offset + view { -(bottom - view) } else { return true };
+        if (target - offset).abs() <= 3. * row { return false; }
+        let key = format!("list-{}-{}", side.0, folder.display()).into();
+        self.smooth.glide_to(key, &base, target);
+        true
+    }
+
     /// Scrolls the list holding the selection so it is visible.
     pub(crate) fn reveal_selected(&mut self) {
         let Some(selected) = self.selected.clone() else { return };
         let Some(folder) = selected.parent().map(Path::to_path_buf) else { return };
         let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
-        if let Some(position) = indices.iter().position(|&i| listing.entries[i].path == selected) {
+        if let Some(position) = position_of(&listing, &indices, &selected) {
             // In tiles the list's items are rows of them.
             let side = self.browser.active;
             let item = if self.thumbs_view(side) { position / self.thumb_columns.get(&side).copied().unwrap_or(1).max(1) } else { position };
-            self.scroll_handle(side, &folder).scroll_to_item(item, ScrollStrategy::Nearest);
+            let handle = self.scroll_handle(side, &folder);
+            if !self.thumbs_view(side) && self.glide_to_row(side, &folder, &handle, item) { return; }
+            handle.scroll_to_item(item, ScrollStrategy::Nearest);
         }
     }
 
@@ -364,7 +459,7 @@ impl Explorer {
         let selected = self.selected.clone()?;
         let folder = selected.parent()?.to_path_buf();
         let (listing, _) = self.folder_view(self.browser.active, &folder)?;
-        listing.entries.iter().find(|entry| entry.path == selected).cloned()
+        entry_at(&listing, &selected).cloned()
     }
 
     fn extend_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -380,7 +475,7 @@ impl Explorer {
         let next = (current as isize + delta).clamp(0, order.len() as isize - 1) as usize;
         let anchor = self.anchor.clone().filter(|a| a.parent() == Some(folder.as_path()))
             .unwrap_or_else(|| order[current].clone());
-        self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &order[next]);
+        self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &order[next]).into();
         self.anchor = Some(anchor);
         self.selected = Some(order[next].clone());
         self.reveal_selected();
@@ -402,7 +497,7 @@ impl Explorer {
             return;
         }
         let current = self.selected.as_ref()
-            .and_then(|selected| indices.iter().position(|&i| &listing.entries[i].path == selected));
+            .and_then(|selected| position_of(&listing, &indices, selected));
         let last = indices.len() as isize - 1;
         let position = match (edge, current) {
             (Some(false), _) => 0,
@@ -411,6 +506,12 @@ impl Explorer {
             (None, Some(current)) => (current as isize + delta).clamp(0, last),
         } as usize;
         let path = listing.entries[indices[position]].path.clone();
+        // A step of a few rows slides the selection there (not in tiles,
+        // nor with several items marked).
+        match current.filter(|_| !self.thumbs_view(side) && self.marked.len() <= 1 && !self.motion.rows.contains_key(&(side,folder.clone())) && !self.motion.lists.contains_key(&(side,folder.clone()))) {
+            Some(from) => self.motion.plate_moved(side, &folder, from, position),
+            None => self.motion.plate_moved(side, &folder, position, position),
+        }
         self.navigate_side(side, &folder, Some(path), cx);
     }
 
@@ -438,15 +539,37 @@ impl Explorer {
         let side = self.active_side();
         let current = self.pane_path(side);
         if let Some(parent) = current.parent().map(Path::to_path_buf) {
+            self.light_left_folder(side, &current);
             self.navigate_side(side, &parent, Some(current), cx);
         }
     }
 
+    /// The folder just left lights up in its parent, so the eye finds the
+    /// way back. Columns show the parent beside it already: no light there.
+    fn light_left_folder(&self, side: GroupId, left: &Path) {
+        if !self.miller(side) {
+            self.motion.flash_as(crate::motion::Flash::Left, [left.to_path_buf()]);
+        }
+    }
+
     pub(crate) fn go_back(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let side = self.active_side();
+        let before = self.pane_path(side);
         let pane = self.browser.active_mut().active_mut();
         let moved = if forward { pane.forward() } else { pane.back() };
         if moved {
             self.selected = None; self.marked.clear(); self.anchor = None;
+            // Back out to a parent: the subfolder it came from is selected
+            // and lit, as after «Наверх».
+            let now = self.pane_path(side);
+            let came_from = before.strip_prefix(&now).ok().filter(|_| before != now)
+                .and_then(|rest| rest.components().next()).map(|first| now.join(first));
+            if let Some(child) = came_from {
+                self.light_left_folder(side, &child);
+                self.anchor = Some(child.clone());
+                self.selected = Some(child);
+                self.reveal_selected();
+            }
             self.close_search();
             cx.notify();
         }
@@ -458,6 +581,7 @@ impl Explorer {
     }
 
     pub(crate) fn switch_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.leave_project_card(self.browser.active, cx);
         self.marquee=None;
         if index < self.browser.active_group().tabs.len() {
             self.browser.active_group_mut().active_tab = index;
@@ -479,6 +603,26 @@ impl Explorer {
             cx.notify();
             return;
         }
+        let group = self.browser.active;
+        if self.motion.layout.closing.is_some() {return;}
+        if crate::theme::animations() && self.browser.groups.len()>1 && self.browser.active_group().tabs.len()==1 {
+            self.motion.layout.begin_close(group);
+            if let Some(next)=self.browser.leaves().into_iter().find(|id|*id!=group){self.browser.focus(next);}
+            self.selected=None;self.marked.clear();self.anchor=None;self.context_menu=None;
+            cx.spawn(async move|this,cx|{
+                for tick in 0..64 {
+                    cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                    let done=this.update(cx,|this,cx|{
+                        if !this.motion.layout.close_finished() && !this.search.active && tick<63 {return false;}
+                        this.browser.close_group(group);this.motion.layout.finish_close();this.prune_group_state();cx.notify();true
+                    }).unwrap_or(true);
+                    if done {break;}
+                }
+            }).detach();
+            cx.notify();return;
+        }
+        let width = self.tab_scroll.get(&group).and_then(|scroll| scroll.bounds_for_item(index)).map_or(120., |tab| f32::from(tab.size.width));
+        self.motion.tab_closed(group, index, width);
         self.browser.close_tab(self.browser.active, index);
         self.prune_group_state();
         self.selected = None; self.marked.clear(); self.anchor = None;
@@ -633,7 +777,13 @@ impl Explorer {
 
     /// The file panes have the keyboard (no field, dialog or overlay).
     pub(crate) fn list_focused(&self, window: &Window) -> bool {
-        !self.interface_modal() && self.focus_handle.is_focused(window)
+        !self.interface_modal() && !self.card_covers_list() && self.focus_handle.is_focused(window)
+    }
+
+    /// The active pane shows its project card: keys meant for the file
+    /// list must not act on the list hidden under it.
+    pub(crate) fn card_covers_list(&self) -> bool {
+        self.cards.shown_in(self.browser.active)
     }
 
     /// Alt+C / Alt+M: the selection goes to the folder of the other pane,
@@ -675,6 +825,7 @@ impl Explorer {
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
         if self.version_editing.is_some() { self.close_version_rules(window, cx); return; }
         if self.close_error.take().is_some() {cx.notify();return;}
+        if self.dismiss_project_card(cx) {return;}
         if std::mem::take(&mut self.about_open) {cx.notify();return;}
         if std::mem::take(&mut self.updates.dialog) {cx.notify();return;}
         if self.feed.editing.take().is_some() {
@@ -683,10 +834,11 @@ impl Explorer {
             cx.notify();
             return;
         }
-        if self.quick_look.take().is_some() {cx.notify();return;}
+        if self.quick_look.is_some() {self.close_quick_look(cx);return;}
         if self.comparison.take().is_some() {cx.notify();return;}
         if self.tour.is_some() {self.close_tour(cx);return;}
         self.dock_hover=None;
+        self.motion.tab_reorder.clear();
         if cx.stop_active_drag(window) { cx.notify(); return; }
         if let Some(resize) = self.column_resize.take() {
             self.pane_column_widths.insert(resize.group, resize.start_width);
@@ -710,7 +862,7 @@ impl Explorer {
         }
         self.renaming = false;
         self.bulk_rename = None;
-        self.bulk_rename_errors.clear();
+        self.bulk_rename_errors = Arc::default();
         self.bulk_rename_generation = self.bulk_rename_generation.wrapping_add(1);
         self.creating_folder = false;
         self.saving_workspace = false;
@@ -777,7 +929,7 @@ impl Explorer {
         if self.filter.is_empty() { return; }
         let folder = self.pane_path(self.active_side());
         let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
-        let visible = self.selected.as_ref().is_some_and(|selected| indices.iter().any(|&i| &listing.entries[i].path == selected));
+        let visible = self.selected.as_ref().is_some_and(|selected| position_of(&listing, &indices, selected).is_some());
         if visible { return; }
         let first = indices.first().map(|&i| listing.entries[i].path.clone());
         self.anchor = first.clone();
@@ -800,6 +952,25 @@ impl Explorer {
     }
     pub(crate) fn key_select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(false), cx); }
     pub(crate) fn key_select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(true), cx); }
+    /// PageDown / PageUp: the selection a screenful of rows on (the list
+    /// glides there).
+    pub(crate) fn key_select_page_down(&mut self, _: &SelectPageDown, _: &mut Window, cx: &mut Context<Self>) { let page = self.page_rows(); self.move_selection(page, None, cx); }
+    pub(crate) fn key_select_page_up(&mut self, _: &SelectPageUp, _: &mut Window, cx: &mut Context<Self>) { let page = self.page_rows(); self.move_selection(-page, None, cx); }
+
+    /// Rows that fit in the active list, less one kept for context.
+    fn page_rows(&mut self) -> isize {
+        let side = self.active_side();
+        let folder = self.pane_path(side);
+        let view = self.scroll_handle(side, &folder).0.borrow().last_item_size.map_or(0., |size| f32::from(size.item.height));
+        if self.thumbs_view(side) {
+            // Tiles: whole rows of them.
+            let rows = (view / (crate::thumbs::tile_height() + crate::thumbs::TILE_GAP)).floor() as isize;
+            let columns = self.thumb_columns.get(&side).copied().unwrap_or(1).max(1) as isize;
+            return (rows - 1).max(1) * columns;
+        }
+        let rows = (view / crate::layout::row_height()).floor() as isize;
+        (rows - 1).max(1)
+    }
 
     pub(crate) fn key_open(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
         // Enter in a name, path or search field belongs to that field: the
@@ -883,10 +1054,19 @@ impl Explorer {
         self.pane_column_widths.retain(|id,_|ids.contains(id));
         self.column_scroll_handles.retain(|id,_|ids.contains(id));
         self.thumbs.groups.retain(|id| ids.contains(id));
+        self.motion.grids.retain(|id,_| ids.contains(id));
+        self.motion.rows.retain(|(id,_),_| ids.contains(id));
+        self.motion.lists.retain(|(id,_),_| ids.contains(id));
+        self.motion.tab_reorder.prune(&ids);
+        self.motion.docks.retain(|id,_| ids.contains(id));
+        self.motion.modes.retain(|id,_| ids.contains(id));
+        self.motion.spatial.retain(|id,_| ids.contains(id));
+        self.manual_drag.prune(&ids);
         self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));
         self.folder_views.retain(|(id,_),_|ids.contains(id));
+        self.kinds.retain(&ids);
         self.tab_scroll.retain(|id,_|ids.contains(id));
         self.tab_reveal.retain(|id,_|ids.contains(id));
     }
@@ -936,7 +1116,7 @@ impl Explorer {
         if order.is_empty() { return; }
         self.anchor = order.first().cloned();
         self.selected = order.first().cloned();
-        self.marked = order;
+        self.marked = order.into();
         cx.notify();
     }
 
@@ -948,4 +1128,27 @@ impl Explorer {
 
     pub(crate) fn key_extend_next(&mut self, _: &ExtendNext, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(1, cx); }
     pub(crate) fn key_extend_prev(&mut self, _: &ExtendPrev, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(-1, cx); }
+}
+
+/// Whether `entry` is the one at `path` of the same folder. Names, not
+/// whole paths, are compared: on Windows a path comparison parses both
+/// paths (std skips its byte-wise shortcut for paths with a drive or server
+/// prefix), and these run over whole folders on every frame.
+pub(crate) fn is_entry(entry: &browser::Entry, name: &str) -> bool { entry.name == name }
+
+/// The name `path` has in its folder's listing.
+pub(crate) fn listing_name(path: &Path) -> Option<String> {
+    path.file_name().map(|name| name.to_string_lossy().into_owned())
+}
+
+/// The entry at `path` in `listing` (the listing of its folder).
+pub(crate) fn entry_at<'a>(listing: &'a browser::Listing, path: &Path) -> Option<&'a browser::Entry> {
+    let name = listing_name(path)?;
+    listing.entries.iter().find(|entry| is_entry(entry, &name))
+}
+
+/// Where `path` stands among `indices` of `listing`.
+pub(crate) fn position_of(listing: &browser::Listing, indices: &[usize], path: &Path) -> Option<usize> {
+    let name = listing_name(path)?;
+    indices.iter().position(|&i| is_entry(&listing.entries[i], &name))
 }

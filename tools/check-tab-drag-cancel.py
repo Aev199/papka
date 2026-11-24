@@ -5,7 +5,9 @@ import tempfile
 
 repo = Path(__file__).resolve().parents[1]
 source = (repo / "crates/desktop/src/keys.rs").read_text()
-prelude = source.split("pub(crate) fn key_dismiss(", 1)[1].split("{", 1)[1].split("if let Some(resize)", 1)[0]
+body = source.split("pub(crate) fn key_dismiss(", 1)[1].split("if let Some(resize)", 1)[0]
+# Only the drag part: the dialogs closed before it need the whole window state.
+prelude = "self.dock_hover=None;" + body.split("self.dock_hover=None;", 1)[1]
 with tempfile.TemporaryDirectory(prefix="filemanager-drag-cancel-") as folder:
     path = Path(folder)
     (path / "test.rs").write_text("""

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use filemanager_core::update::{self, Channel, Origin, Update};
-use gpui::{AnimationExt, AnyElement, Context, MouseButton, div, prelude::*, px};
+use gpui::{AnyElement, Context, MouseButton, div, prelude::*, px};
 
 use crate::Explorer;
 use crate::theme::*;
@@ -61,6 +61,8 @@ pub(crate) struct Updates {
     pub(crate) note: Option<String>,
     /// Looking in Downloads for the file the browser is fetching.
     watching: bool,
+    /// Files in Downloads refused as they are now: not compared again.
+    refused: Arc<Mutex<std::collections::HashSet<update::FileStamp>>>,
 }
 
 fn now() -> u64 {
@@ -147,6 +149,9 @@ impl Explorer {
         let channel = self.updates.channel;
         // A skipped version is passed over, not allowed to hide newer ones.
         let skipped = (!manual).then(|| self.updates.skipped.clone()).flatten();
+        // A check asked for by hand looks at every file again.
+        if manual { if let Ok(mut known) = self.updates.refused.lock() { known.clear(); } }
+        let refused_files = self.updates.refused.clone();
         let task = cx.background_spawn(async move {
             // Every source is asked; the newest offer wins.
             let mut best: Option<Update> = None;
@@ -158,14 +163,17 @@ impl Explorer {
             };
             // A file waiting in Downloads is worth a request of its own:
             // it is compared with the release it claims to be.
+            let known = refused_files.lock().map(|known| known.clone()).unwrap_or_default();
             let downloads = update::downloads_dir();
             let waiting = downloads.as_ref()
-                .is_some_and(|downloads| !update::downloaded_candidates(downloads, VERSION, &update::exe_version).is_empty());
+                .is_some_and(|downloads| !update::fresh_candidates(downloads, VERSION, &update::exe_version, &known).is_empty());
             let list = (online || waiting).then(|| update::fetch(&update::releases_url(), &mut |_, _| {}));
             let mut refused = None;
             if let Some(downloads) = downloads.as_ref().filter(|_| waiting) {
-                match update::downloaded_offer(downloads, VERSION, &update::exe_version,
-                    list.as_ref().and_then(|list| list.as_deref().ok()), &update::fetch) {
+                let found = update::downloaded_offer(downloads, VERSION, &update::exe_version,
+                    list.as_ref().and_then(|list| list.as_deref().ok()), &update::fetch, &known);
+                if let Ok(mut known) = refused_files.lock() { known.extend(found.refused); }
+                match found.offer {
                     Some(Ok(found)) => consider(found),
                     Some(Err(error)) => refused = Some(error.to_string()),
                     None => {}
@@ -225,13 +233,18 @@ impl Explorer {
             let started = std::time::Instant::now();
             while started.elapsed() < WATCH {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
-                let found = cx.background_spawn(async {
+                let refused_files = this.update(cx, |this, _| this.updates.refused.clone()).ok();
+                let found = cx.background_spawn(async move {
+                    let refused_files = refused_files?;
+                    let known = refused_files.lock().map(|known| known.clone()).unwrap_or_default();
                     let downloads = update::downloads_dir()?;
-                    if update::downloaded_candidates(&downloads, VERSION, &update::exe_version).is_empty() { return None; }
+                    if update::fresh_candidates(&downloads, VERSION, &update::exe_version, &known).is_empty() { return None; }
                     // GitHub is usually out of reach here; if it answers
                     // after all, the file is compared with its release.
                     let list = update::fetch(&update::releases_url(), &mut |_, _| {}).ok();
-                    update::downloaded_offer(&downloads, VERSION, &update::exe_version, list.as_deref(), &update::fetch)
+                    let found = update::downloaded_offer(&downloads, VERSION, &update::exe_version, list.as_deref(), &update::fetch, &known);
+                    if let Ok(mut known) = refused_files.lock() { known.extend(found.refused); }
+                    found.offer
                 }).await;
                 let stop = this.update(cx, |this, cx| {
                     let found = match found {
@@ -384,8 +397,7 @@ impl Explorer {
             .into_any_element())
     }
 
-    pub(crate) fn update_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.updates.dialog { return None; }
+    pub(crate) fn update_dialog(&self, state: &Phase, popup: crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div().id(id).h(px(28.)).px_3().flex().items_center().rounded(px(4.)).cursor_pointer()
                 .when(primary, |button| button.bg(rgb(ACCENT)).text_color(rgb(SELECTION_TEXT)))
@@ -406,7 +418,7 @@ impl Explorer {
             list
         };
         let current = format!("Сейчас установлена {VERSION}");
-        match &self.updates.phase {
+        match state {
             Phase::Available(found) => {
                 card = card.child(heading(format!("Доступна версия {}{}", found.version, if found.prerelease { " (бета)" } else { "" })))
                     .child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child(current))
@@ -468,16 +480,17 @@ impl Explorer {
                         .child(button("update-later", "Закрыть", false).on_click(cx.listener(move |this, _, _, cx| close(this, cx))))
                         .child(button("update-retry", "Повторить", true).on_click(cx.listener(|this, _, _, cx| this.download_update(cx)))));
             }
-            Phase::Idle | Phase::Checking => return None,
+            Phase::Idle | Phase::Checking => return div().into_any_element(),
         }
-        Some(div().id("update-backdrop").absolute().inset_0().flex().items_start().justify_center().pt(px(80.))
+        let backdrop = div().id("update-backdrop").absolute().inset_0().flex().items_start().justify_center().pt(px(80.))
             .bg(gpui::rgba(0x00000066))
+            .opacity(popup.alpha)
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                 // A running download keeps its dialog closable but not cancelled.
                 close(this, cx);
             }))
-            .child(card.with_animation("update-card", crate::theme::motion(160), |card, delta| card.mt(px(-8. * (1. - delta)))))
-            .with_animation("update-appear", crate::theme::motion(130), |this, delta| this.opacity(delta))
-            .into_any_element())
+            .child(card.mt(px(-8. * (1. - popup.alpha))))
+            .when(popup.closing, |view| view.child(crate::popup_motion::shield()));
+        backdrop.into_any_element()
     }
 }

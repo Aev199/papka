@@ -14,11 +14,10 @@ use filemanager_core::labels::Label;
 use gpui::{
     anchored, deferred, div, img, rgb_to_hsla, ObjectFit, prelude::*, px, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
-    ExternalPaths, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Transformation, Window,
+    ExternalPaths, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Window,
 };
 use gpui_component::input::Input;
 use gpui_component::Sizable;
-use gpui_component::resizable::{h_resizable, v_resizable, resizable_panel};
 use filemanager_core::panes::{Node, Axis, Edge, tab_titles};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::Theme;
@@ -41,6 +40,43 @@ const LIST_LEFT: f32 = 12.;
 const LIST_GAP: f32 = 8.;
 const LIST_ICON: f32 = 24.;
 const LIST_RIGHT: f32 = 20.;
+
+/// What lies under a row or tile's content: the light of a new item and
+/// the fill of a folder about to open under dragged files.
+fn item_overlays(flash: Option<(crate::motion::Flash, f32)>, fill: Option<f32>) -> Vec<gpui::AnyElement> {
+    use crate::motion::Flash;
+    let mut layers = Vec::new();
+    if let Some((kind, strength)) = flash {
+        // New: the accent; changed by others: half as strong; the folder
+        // just left: a pale light that shows on its selected row too.
+        let colour = match kind {
+            Flash::New => accent_alpha((strength * 110.) as u8),
+            Flash::Changed => accent_alpha((strength * 55.) as u8),
+            Flash::Left | Flash::Found => text_alpha((strength * 70.) as u8),
+            Flash::Failed => danger_alpha((strength * 120.) as u8),
+        };
+        layers.push(div().absolute().top_0().left_0().size_full().bg(colour).into_any_element());
+    }
+    if let Some(fill) = fill {
+        layers.push(div().absolute().top_0().left_0().h_full().w(gpui::relative(fill)).bg(accent_alpha(70)).into_any_element());
+    }
+    layers
+}
+
+/// Keep the logical slot in the virtual list while its visible content moves.
+fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElement, width: Option<f32>, height: f32) -> Div {
+    let offset = frame.offset(path, std::time::Instant::now());
+    let record = frame.clone();
+    let path = path.to_path_buf();
+    div().relative().h(px(height)).when_some(width, |slot, width| slot.w(px(width)))
+        .when(width.is_none(), |slot| slot.w_full())
+        .child(div().relative().w_full().h_full().left(px(offset.x)).top(px(offset.y)).child(body))
+        .on_prepaint(move |bounds, _, _| {
+            record.record(path.clone(), crate::spatial_motion::Position {
+                x: bounds.origin.x / px(1.), y: bounds.origin.y / px(1.),
+            }, offset);
+        })
+}
 
 fn column_scroll_area<I: Into<gpui::ElementId>>(id: I, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<I> {
     div().id(id).relative().track_scroll(scroll).flex_1().min_w_0().min_h_0()
@@ -115,25 +151,28 @@ pub(crate) fn icon_button(
     active: bool,
     enabled: bool,
 ) -> Stateful<Div> {
+    let id=id.into();
     let color = if !enabled { TEXT_DIM } else if active { ACCENT } else { TEXT_MUTED };
-    div().id(id).flex_none().size(px(30.)).rounded(px(4.)).flex().items_center().justify_center()
+    div().id(id.clone()).relative().overflow_hidden().flex_none().size(px(30.)).rounded(px(4.)).flex().items_center().justify_center()
         .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
-        .when(enabled, |this| this.cursor_pointer()
-            .hover(|style| style.bg(rgb(HOVER)))
-            .active(|style| style.bg(rgb(PRESSED))))
-        .child(icon(icon_path, color))
+        .when(enabled, |this| this.cursor_pointer().on_hover(|_,window,_|window.refresh())
+            .active(|style| style.opacity(0.75)))
+        .when(enabled,|this|this.child(div().absolute().inset_0().child(crate::button_motion::background(id, if active {Some(themed(ACCENT_SOFT))}else{None}, themed(HOVER)))))
+        .child(icon(icon_path, color).relative())
         .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
 }
 
 /// Text button for dialogs and panels.
 /// Small icon button of the bottom bar, like the corner icons in Atlas.
 fn bar_button(id: &'static str, path: &'static str, tip: &'static str, active: bool) -> Stateful<Div> {
-    div().id(id).flex_none().size(px(24.)).rounded_sm().flex().items_center().justify_center()
+    div().id(id).relative().overflow_hidden().flex_none().size(px(24.)).rounded_sm().flex().items_center().justify_center()
         .cursor_pointer()
         .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
-        .hover(|style| style.bg(rgb(HOVER)))
+        .on_hover(|_,window,_|window.refresh())
+        .active(|style|style.opacity(0.75))
+        .child(div().absolute().inset_0().child(crate::button_motion::background(id.into(),if active {Some(themed(ACCENT_SOFT))}else{None},themed(HOVER))))
         .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
-        .child(svg().path(path).size(px(14.)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
+        .child(svg().relative().path(path).size(px(14.)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
 }
 
 /// «Версия 1.6», or «Исходный» for the file without a suffix.
@@ -146,12 +185,15 @@ pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
         ButtonKind::Danger => (0x9E3A43, 0xB8454F, 0xFFFFFF, 0x9E3A43),
         ButtonKind::Ghost => (RAISED, HOVER, TEXT, BORDER_STRONG),
     };
-    div().id(id).flex_none().h(px(28.)).px_3().rounded(px(4.)).flex().items_center()
+    let id=id.into();
+    div().id(id.clone()).relative().overflow_hidden().flex_none().h(px(28.)).px_3().rounded(px(4.)).flex().items_center()
         .justify_center().bg(rgb(bg)).border_1().border_color(rgb(frame)).text_color(rgb(fg)).cursor_pointer()
-        .hover(move |style| style.bg(rgb(hover)))
+        .on_hover(|_,window,_|window.refresh())
+        .active(|style|style.opacity(0.8))
+        .child(div().absolute().inset_0().child(crate::button_motion::background(id,Some(themed(bg)),themed(hover))))
         // A label longer than its button ends in "…" instead of running
         // out of both edges.
-        .child(div().min_w_0().truncate().child(label.into()))
+        .child(div().relative().min_w_0().truncate().child(label.into()))
 }
 
 #[derive(Clone, Copy)]
@@ -193,7 +235,25 @@ impl Explorer {
             scroll.scroll_to_item(active_index); self.tab_reveal.insert(group,reveal);
         }
         let wheel = scroll.clone();
-        let mut strip = div().id(SharedString::from(format!("tabs-{}",group.0)))
+        let gap = self.motion.tab_gap(group);
+        let widths=(0..tabs.len()).map(|i|crate::motion::tab_place(&scroll,i).map_or(120.,|(_,w)|w)).collect::<Vec<_>>();
+        let (tab_offsets,extra_width,reordering)=self.motion.tab_reorder.sample(group,&widths,std::time::Instant::now(),crate::theme::animations());
+        if reordering {self.motion.late_frame.set(true);}
+        let preview=self.motion.tab_reorder.target.filter(|t|t.to==group);
+        let drag_scroll=scroll.clone();
+        let count=tabs.len();
+        // The active tab's line slides from tab to tab. Where the tabs are is
+        // known from the last frame's layout, kept by the strip's scroll
+        // handle (GPUI hands a scrolled strip's children nowhere else); while
+        // that does not match the tabs (one just opened or closing) the tab
+        // draws its own line in place.
+        let focused_strip = group==self.browser.active && !self.cards.shown_in(group);
+        let laid_out = self.motion.tabs_drawn(group, tabs.len());
+        let line = (focused_strip && gap.is_none() && laid_out && preview.is_none() && !reordering)
+            .then(|| crate::motion::tab_place(&scroll, active_index)).flatten()
+            .map(|(x, width)| self.motion.tab_line(group, x + 10., (width - 20.).max(0.)));
+        let mut strip = div()
+            .id(SharedString::from(format!("tabs-{}",group.0)))
             .flex_1().min_w_0().h_full().flex().items_end().gap_1().px_1()
             .overflow_x_scroll().track_scroll(&scroll)
             .on_scroll_wheel(move |event,window,cx| {
@@ -204,20 +264,47 @@ impl Explorer {
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,event: &MouseDownEvent,_,cx| {
                 if event.click_count==2 { this.focus_group(group,cx); this.add_tab(cx); }
             }))
+            .drag_over::<TabDrag>(|style,_,_,_|style)
+            .on_drag_move::<TabDrag>(cx.listener(move |this,event:&gpui::DragMoveEvent<TabDrag>,window,cx| {
+                if this.browser.group(group).is_none_or(|g|g.tabs.len()!=count) {this.motion.tab_reorder.reset();cx.stop_active_drag(window);return;}
+                if this.motion.tab_gap(group).is_some() {return;}
+                let drag=event.drag(cx);
+                // Direct children are stationary layout slots; their contents can move.
+                let x=(event.event.position.x-event.bounds.origin.x-drag_scroll.offset().x)/px(1.);
+                let boundary=(0..count).find(|&i|crate::motion::tab_place(&drag_scroll,i).is_some_and(|(left,width)|x<left+width/2.)).unwrap_or(count);
+                let width=this.tab_scroll.get(&drag.group).and_then(|scroll|crate::motion::tab_place(scroll,drag.index)).map_or(120.,|(_,w)|w);
+                let target=crate::tab_reorder::Target{from:drag.group,index:drag.index,to:group,boundary,width};
+                if this.motion.tab_reorder.set_target(target) {cx.notify();}
+            }))
             .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {
-                let end=this.browser.group(group).map(|g|g.tabs.len()).unwrap_or(0);
-                this.move_tab_to(drag,group,end,cx);
+                cx.stop_propagation();
+                let count=this.browser.group(group).map(|g|g.tabs.len()).unwrap_or(0);
+                let index=this.motion.tab_reorder.destination(group,drag.group,drag.index,count).unwrap_or(count);
+                this.move_tab_to(drag,group,index,cx);
             }));
         let focused=group==self.browser.active;
+        // With the project card open no tab is the current one: the card is.
+        let card_open=self.cards.shown_in(group);
         for (index,tab) in tabs.iter().enumerate() {
-            let active=index==active_index;
+            if let Some((_, width)) = gap.filter(|(at, _)| *at == index) {
+                strip = strip.child(div().flex_none().h(px(32.)).w(px(width)));
+            }
+            let opening = self.motion.tab_opening(group, index);
+            let active=index==active_index && !card_open;
             let closable=(tabs.len()>1 || self.browser.groups.len()>1) && !tab.pinned;
             let tip=tab.pane.path.display().to_string();
-            strip=strip.child(div().id(("tab",index)).group("tab").relative().flex_none().h(px(32.))
+            let offset=tab_offsets.get(index).copied().unwrap_or(0.);
+            let dragged=preview.is_some_and(|t|t.from==group && t.index==index);
+            let tab_element=div().id(("tab",index)).group("tab").relative().flex_none().h(px(32.))
                 .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
-                .rounded_t(px(4.)).cursor_pointer()
+                .rounded_t(px(4.)).cursor_pointer().left(px(offset))
+                .when(dragged,|tab|tab.opacity(0.3))
+                // Held under dragged files it fills up until it opens.
+                .children(item_overlays(None, self.spring_fill(&crate::spring::SpringTarget::Tab(group, index))))
+                // A new tab widens into its place.
+                .when_some(opening,|tab,open|tab.min_w(px(96.*open)).max_w(px(200.*open)).overflow_hidden().opacity(open))
                 .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(if focused {TEXT} else {TEXT_MUTED})))
-                .when(active && focused,|row|row.child(div().absolute().bottom_0().left(px(10.)).right(px(10.)).h(px(2.))
+                .when(active && focused && line.is_none(),|row|row.child(div().absolute().bottom_0().left(px(10.)).right(px(10.)).h(px(2.))
                     .rounded(px(1.)).bg(rgb(ACCENT))))
                 .when(!active,|row|row.text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
                 .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
@@ -231,25 +318,44 @@ impl Explorer {
                     .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);}))))
                 .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.switch_group_tab(group,index,cx);} ))
                 .when(index!=active_index,|tab|tab.on_mouse_move(cx.listener(move |this,_,_,cx| this.spring_hover(crate::spring::SpringTarget::Tab(group,index),cx))))
+                // A tab only opens under dragged files; releasing there does nothing.
+                .on_mouse_move(cx.listener(|this,_,_,cx| this.drag_over(crate::DropAt::Nothing,cx)))
                 .on_drag(TabDrag {group,index,title:titles[index].clone()},|drag: &TabDrag,position,_,cx|
-                    cx.new(|_|FileDragPreview {name:drag.title.clone(),position}))
-                .drag_over::<TabDrag>(|style,_,_,_|style.border_l_2().border_color(rgb(ACCENT)))
-                .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {cx.stop_propagation();this.move_tab_to(drag,group,index,cx);} ))
+                    cx.new(|_|FileDragPreview::new(drag.title.clone(),position,None)))
                 .on_mouse_down(MouseButton::Middle,cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);} ))
                 .on_mouse_down(MouseButton::Left,cx.listener(|_,_,_,cx|cx.stop_propagation()))
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx| {
                     this.focus_group(group,cx);
                     this.open_menu(event.position,MenuTarget::Tab(group,index),cx);
-                })));
+                }));
+            strip=strip.child(div().id(("tab-slot",index)).relative().flex_none().h(px(32.)).child(tab_element));
+        }
+        if extra_width>0.01 {strip=strip.child(div().flex_none().h(px(32.)).w(px(extra_width)));}
+        if let Some((_, width)) = gap.filter(|(at, _)| *at >= tabs.len()) {
+            strip = strip.child(div().flex_none().h(px(32.)).w(px(width)));
+        }
+        if let Some(target)=preview.filter(|t|t.from!=group) {
+            let boundary=target.boundary.min(tabs.len());
+            let x=crate::motion::tab_place(&scroll,boundary).map(|(x,_)|x)
+                .or_else(||tabs.len().checked_sub(1).and_then(|i|crate::motion::tab_place(&scroll,i)).map(|(x,w)|x+w+4.)).unwrap_or(4.);
+            strip=strip.relative().child(div().absolute().left(px(x)).bottom_0().w(px(target.width)).h(px(30.))
+                .rounded_t(px(4.)).bg(crate::theme::accent_alpha(0x18)).border_1().border_color(rgb(ACCENT)));
+        }
+        if let Some((x, width)) = line {
+            strip = strip.relative().child(div().absolute().bottom_0().left(px(x)).w(px(width)).h(px(2.)).rounded(px(1.)).bg(rgb(ACCENT)));
         }
         // A project lives in this pane: its name leads the tab strip.
         let project = self.browser.group(group).and_then(|g|g.project.as_ref()).map(|p|p.name.clone());
         // Never wider than its pane: overflowing tabs scroll inside the strip.
         div().h(px(34.)).w_full().flex_none().min_w_0().overflow_hidden().flex().items_center().bg(rgb(WINDOW))
             .when_some(project, |bar,name| bar.child(div().id(SharedString::from(format!("project-{}",group.0)))
-                .flex_none().max_w(px(180.)).h(px(24.)).ml_1().pl_2().pr_0p5().flex().items_center().gap_1p5()
-                .rounded(px(4.)).bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT))
-                .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(format!("Проект «{name}» открыт в этой панели")).build(window,cx)})
+                .relative().flex_none().max_w(px(180.)).h(px(24.)).ml_1().pl_2().pr_0p5().flex().items_center().gap_1p5()
+                .rounded(px(4.)).bg(rgb(if card_open {SURFACE} else {ACCENT_SOFT})).text_size(px(12.)).text_color(rgb(TEXT)).cursor_pointer()
+                // Open card: the name is the current "tab", marked like one.
+                .when(card_open && focused,|chip|chip.child(div().absolute().bottom(px(-5.)).left(px(10.)).right(px(10.)).h(px(2.))
+                    .rounded(px(1.)).bg(rgb(ACCENT))))
+                .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(if card_open {format!("Проект «{name}»: щелчок — вернуться к папкам")} else {format!("Проект «{name}»: щелчок — карточка проекта")}).build(window,cx)})
+                .on_click(cx.listener(move |this,_,_,cx|this.toggle_project_card(group,cx)))
                 .child(small_icon("fm/layers.svg",ACCENT))
                 .child(div().min_w_0().truncate().child(name))
                 .child(div().id(SharedString::from(format!("project-close-{}",group.0))).flex_none().size(px(20.)).rounded_sm()
@@ -258,6 +364,19 @@ impl Explorer {
                     .tooltip(|window,cx|Tooltip::new("Закрыть проект — вернуть прежние вкладки").build(window,cx))
                     .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.close_project(group,cx);})))))
             .child(strip)
+            // After the strip is laid out: a line behind its tab (renamed,
+            // added, the window resized), or a strip just changed, asks for
+            // one more frame.
+            .child({
+                let (lines, waiting, drawn) = (self.motion.tab_lines.clone(), focused_strip && !laid_out, line.is_some());
+                gpui::canvas(move |_, window, _| {
+                    // Only the strip that draws the line: another pane's old
+                    // line must not ask for frames forever.
+                    let behind = drawn && crate::motion::tab_place(&scroll, active_index)
+                        .is_some_and(|(x, width)| crate::motion::line_behind(&lines, group, x + 10., (width - 20.).max(0.)));
+                    if waiting || behind { window.request_animation_frame(); }
+                }, |_, _, _, _| {}).absolute().size_0()
+            })
             .child(icon_button("new-tab","fm/plus.svg","Новая вкладка (Ctrl+T)",false,true)
                 .on_click(cx.listener(move |this,_,_,cx| {this.focus_group(group,cx);this.add_tab(cx);})))
             .child(icon_button("tab-list","fm/chevron-down.svg","Все вкладки",false,true)
@@ -269,47 +388,93 @@ impl Explorer {
     }
 
     fn move_tab_to(&mut self, drag: &TabDrag, group: GroupId, index: usize, cx: &mut Context<Self>) {
+        self.motion.tab_reorder.reset();
         if let Err(error)=self.browser.move_tab(drag.group,drag.index,group,index) {self.status=error.to_string();}
         self.prune_group_state(); self.selected=None; self.marked.clear(); self.anchor=None;
         self.marquee=None; self.context_menu=None; self.clear_filter=!self.filter.is_empty(); self.close_search(); cx.notify();
     }
 
     fn group_view(&mut self, group: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        let now=std::time::Instant::now();
+        let (opacity,commit)=self.motion.modes.get_mut(&group).map_or((1.,None),|m|{
+            let (opacity,_,commit)=m.transition.sample(now,crate::theme::animations());
+            if m.transition.active(){self.motion.late_frame.set(true);} (opacity,commit)
+        });
+        let reveal=commit.and_then(|mode|{
+            let current=self.pane_path(group);
+            let saved=self.motion.modes.get(&group).and_then(|m|(m.folder==current).then(||m.anchor.clone()).flatten());
+            let anchor=if group==self.active_side(){self.selected.clone().filter(|p|p.parent()==Some(current.as_path())).or(saved)}else{saved};
+            let animate=crate::theme::animations() && !self.renaming && self.marquee.is_none() && !self.dragging_files(cx);
+            if let Some(spatial)=self.motion.spatial.get(&group) {
+                if animate {spatial.begin(&current,now);}else{spatial.cancel();}
+            }
+            self.commit_view(group,mode);anchor.map(|anchor|(current,anchor))
+        });
+        let weak=cx.weak_entity();
         let tabs=self.tab_strip(group,cx);
-        let navigation=self.nav_row(group,cx).into_any_element();
-        let body=self.pane(group,cx);
+        // The project card takes the pane's place: no address row, no list.
+        let card=self.cards.shown_in(group);
+        let navigation=if card {div().into_any_element()} else {self.nav_row(group,cx).into_any_element()};
+        if card {self.motion.spatial.remove(&group);}
+        let body=if card {self.project_card_view(cx)} else {self.pane(group,cx)};
         div().id(SharedString::from(format!("group-{}",group.0))).size_full().min_w_0().min_h_0()
             .flex().flex_col().overflow_hidden().border_1()
             .border_color(rgb(if group==self.browser.active && self.browser.leaves().len()>1 {ACTIVE_PANE} else {BORDER}))
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx|this.focus_group(group,cx)))
-            .child(tabs).child(navigation).child(div().flex_1().min_h_0().child(body)).into_any_element()
+            .child(tabs).child(navigation).child(div().flex_1().min_h_0().opacity(opacity).child(body))
+            .when_some(reveal,move|root,(folder,anchor)|root.on_prepaint(move|_,_,cx|cx.defer(move|cx|{
+                let _=weak.update(cx,|this,cx|{
+                    if this.pane_path(group)!=folder{return;}
+                    if let Some((listing,order))=this.folder_view(group,&folder){
+                        if let Some(position)=order.iter().position(|&i|listing.entries[i].path==anchor){
+                            let columns=if this.thumbs_view(group){this.thumb_columns.get(&group).copied().unwrap_or(1).max(1)}else{1};
+                            this.scroll_handle(group,&folder).scroll_to_item(position/columns,gpui::ScrollStrategy::Nearest);cx.notify();
+                        }
+                    }
+                });
+            })))
+            .into_any_element()
     }
 
-    fn layout_view(&mut self, node: &Node, path: Vec<bool>, width: f32, height: f32, cx: &mut Context<Self>) -> AnyElement {
-        match node {
-            Node::Leaf(id)=>self.group_view(*id,cx),
-            Node::Split {axis,ratio,first,second}=>{
-                let horizontal=*axis==Axis::Horizontal;
-                let mut a=path.clone();a.push(false);let mut b=path.clone();b.push(true);
-                let one=self.layout_view(first,a,if horizontal {width*ratio} else {width},if horizontal {height} else {height*ratio},cx);
-                let two=self.layout_view(second,b,if horizontal {width*(1.-ratio)} else {width},if horizontal {height} else {height*(1.-ratio)},cx);
-                let key=SharedString::from(format!("split-{}-{:?}",self.browser.signature(),path));
-                // Each pane draws its own frame. The divider's built-in line
-                // would cover the left or top edge of the active pane's frame,
-                // so it paints nothing; dragging still works.
-                let group=if horizontal {h_resizable(key)} else {v_resizable(key)}
-                    .with_handle_appearance(std::rc::Rc::new(|_,_,_| Some(div().into_any_element())));
-                let available=if horizontal {width} else {height};
-                group.child(resizable_panel().size(px(available*ratio)).size_range(px(240.)..px(10000.)).child(one))
-                    .child(resizable_panel().size(px(available*(1.-ratio))).size_range(px(240.)..px(10000.)).child(two))
-                    .on_resize(cx.listener(move |this,state: &gpui::Entity<gpui_component::resizable::ResizableState>,_,cx| {
-                        let sizes=state.read(cx).sizes();
-                        if sizes.len()==2 && sizes[0]+sizes[1]>px(0.) {
-                            this.browser.set_ratio(&path,sizes[0]/(sizes[0]+sizes[1])); cx.notify();
-                        }
-                    })).into_any_element()
+    fn layout_view(&mut self, node: &Node, viewport:(u32,u32), instant:bool, cx: &mut Context<Self>) -> AnyElement {
+        let (rects,moving)=self.motion.layout.sample(node,viewport,instant,std::time::Instant::now());
+        if moving {self.motion.late_frame.set(true);}
+        let weak=cx.weak_entity();
+        let mut scene=div().id("pane-scene").relative().size_full().min_w_0().min_h_0().overflow_hidden()
+            .bg(rgb(SURFACE)).on_prepaint(move |bounds,_,cx| {
+                let weak=weak.clone();cx.defer(move |cx|{let _=weak.update(cx,|this,_|this.motion.layout.bounds=Some(bounds));});
+            });
+        for id in self.browser.leaves() {
+            let Some(r)=rects.get(&id) else {continue};
+            scene=scene.child(div().id(SharedString::from(format!("pane-slot-{}",id.0))).absolute()
+                .left(gpui::relative(r.x)).top(gpui::relative(r.y)).w(gpui::relative(r.w)).h(gpui::relative(r.h))
+                .overflow_hidden().child(self.group_view(id,cx))
+                .when(self.motion.layout.closing==Some(id),|v|v.child(div().absolute().inset_0().occlude()
+                    .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right,|_,_,cx|cx.stop_propagation()))));
+        }
+        // Dividers use the same live geometry; while panels are travelling a
+        // drag first settles them, then resizes directly without easing.
+        if !moving && self.motion.layout.closing.is_none() {
+            for d in crate::layout_motion::geometry(node).1 {
+                let horizontal=d.axis==Axis::Horizontal;let r=d.rect;
+                let handle=div().id(SharedString::from(format!("pane-divider-{:?}",d.path))).absolute()
+                    .when(horizontal,|v|v.left(gpui::relative(r.x+r.w*d.ratio)).top(gpui::relative(r.y))
+                        .ml(px(-3.)).w(px(6.)).h(gpui::relative(r.h)).cursor_col_resize())
+                    .when(!horizontal,|v|v.top(gpui::relative(r.y+r.h*d.ratio)).left(gpui::relative(r.x))
+                        .mt(px(-3.)).h(px(6.)).w(gpui::relative(r.w)).cursor_row_resize())
+                    .hover(|v|v.bg(rgb(BORDER_STRONG)))
+                    .on_mouse_down(MouseButton::Left,cx.listener(move|this,event:&MouseDownEvent,_,cx|{
+                        cx.stop_propagation();if this.interface_modal(){return;}
+                        let Some(bounds)=this.motion.layout.bounds else{return};
+                        let span=if horizontal {bounds.size.width/px(1.)*r.w}else{bounds.size.height/px(1.)*r.h};
+                        this.motion.layout.drag=Some(crate::layout_motion::Drag::Split{path:d.path.clone(),axis:d.axis,
+                            start:if horizontal {event.position.x/px(1.)}else{event.position.y/px(1.)},ratio:d.ratio,span});
+                    }));
+                scene=scene.child(handle);
             }
         }
+        scene.into_any_element()
     }
 
     /// Ends a list column drag and keeps the widths for the next start.
@@ -359,7 +524,7 @@ impl Explorer {
     }
     /// One page of the main moves, keys on the left: read at a glance,
     /// closed with one button or Esc.
-    fn tour_view(&self, _step: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn tour_view(&self, _step: usize, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         let mut list = div().flex().flex_col().gap_3();
         for (heading, rows) in TOUR {
             let mut group = div().flex().flex_col()
@@ -384,14 +549,13 @@ impl Explorer {
                     .on_click(cx.listener(|this,_,_,cx| this.close_tour(cx)))));
         div().id("tour-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x0000008C))
-            .child(card)
-            .with_animation("tour-appear", motion(130), |this, delta| this.opacity(delta))
+            .child(card.mt(px(6.*(1.-phase.alpha))))
+            .opacity(phase.alpha).when(phase.closing,|view|view.child(crate::popup_motion::shield()))
             .into_any_element()
     }
 
-    fn comparison_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn comparison_view(&self, comparison:&crate::compare::Comparison, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         use filemanager_core::folder_compare::Difference::*;
-        let comparison = self.comparison.as_ref().unwrap();
         let (to_right, to_left) = (comparison.count(true), comparison.count(false));
         let side = |side: &Option<filemanager_core::folder_compare::Side>, is_dir: bool| match side {
             Some(s) if is_dir => "папка".to_string(),
@@ -437,7 +601,7 @@ impl Explorer {
                 .child(div().w(px(170.)).flex_none().child("Слева")).child(div().w(px(170.)).flex_none().child("Справа")))
             .child(body)
             .child(div().p_3().flex().items_center().gap_2().border_t_1().border_color(rgb(BORDER))
-                .child(div().flex_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                     .child("Сравниваются имена, размеры и даты. Новый файл заменяет старый, старый уходит в Корзину."))
                 .child(text_button("comparison-again", "Сравнить снова", ButtonKind::Ghost)
                     .on_click(cx.listener(|this,_,_,cx| this.rerun_comparison(cx))))
@@ -449,22 +613,23 @@ impl Explorer {
                     .on_click(cx.listener(|this,_,_,cx| {this.comparison=None;cx.notify();}))));
         div().id("comparison-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x0000008C))
-            .child(card.with_animation("comparison-card", motion(170), |card, delta| card.mt(px(12. * (1. - delta)))))
-            .with_animation("comparison-appear", motion(150), |this, delta| this.opacity(delta))
+            .child(card.mt(px(6.*(1.-phase.alpha))))
+            .opacity(phase.alpha).when(phase.closing,|view|view.child(crate::popup_motion::shield()))
             .into_any_element()
     }
 
-    fn quick_look_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn quick_look_view(&self, shell_alpha:f32, content_alpha:f32, loading:bool, cx: &mut Context<Self>) -> AnyElement {
         use crate::quick_look::QuickContent;
         let look = self.quick_look.as_ref().unwrap();
         let path = look.path.clone();
         let name = browser::display_name(&path);
         // A picture or a page: the wheel enlarges it around the cursor, a
         // drag moves it, a double click switches between fitted and ×2.
-        let zoomed = |file: &std::path::PathBuf| -> AnyElement {
+        let zoomed = |file: &std::path::PathBuf, pose:(f32,gpui::Point<f32>)| -> AnyElement {
+            let (zoom,pan)=pose;
             let weak = cx.weak_entity();
             div().id("quick-look-frame").relative().size_full().overflow_hidden()
-                .when(look.zoom > 1., |frame| frame.cursor_grab())
+                .when(zoom > 1., |frame| frame.cursor_grab())
                 .on_prepaint(move |bounds, _, cx| {
                     let weak = weak.clone();
                     cx.defer(move |cx| { let _ = weak.update(cx, |this, _| {
@@ -499,22 +664,33 @@ impl Explorer {
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
                     if let Some(look) = this.quick_look.as_mut() { look.grab = None; }
                 }))
-                .child(img(file.clone()).absolute().left(px(look.pan.x)).top(px(look.pan.y))
-                    .w(gpui::relative(look.zoom)).h(gpui::relative(look.zoom)).object_fit(ObjectFit::Contain))
+                .child(img(file.clone()).absolute().left(px(pan.x)).top(px(pan.y))
+                    .w(gpui::relative(zoom)).h(gpui::relative(zoom)).object_fit(ObjectFit::Contain))
                 .into_any_element()
         };
-        let body: AnyElement = match &look.content {
+        let render_body = |content:&QuickContent,pose:(f32,gpui::Point<f32>)| -> AnyElement { match content {
             QuickContent::Loading => div().text_color(rgb(TEXT_DIM)).child("Загрузка…").into_any_element(),
-            QuickContent::Image(file) => zoomed(file),
+            QuickContent::Image(file) => zoomed(file,pose),
             QuickContent::Text(text) => div().id("quick-look-text").size_full().overflow_y_scroll().p_3()
                 .font_family("Consolas").text_size(px(12.)).line_height(px(18.)).text_color(rgb(TEXT))
                 .child(text.clone()).into_any_element(),
+            QuickContent::Word(preview) => div().id("quick-look-word").size_full().overflow_y_scroll().p_4()
+                .text_size(px(15.)).line_height(px(23.)).text_color(rgb(TEXT))
+                .child(if preview.text.is_empty() { "В документе нет доступного текста".into() } else { preview.text.clone() })
+                .into_any_element(),
             QuickContent::Message(message) => div().max_w(px(420.)).text_color(rgb(TEXT_MUTED)).child(message.clone()).into_any_element(),
-            QuickContent::Pdf { image, .. } => zoomed(image),
+            QuickContent::Pdf { image, .. } => zoomed(image,pose),
             QuickContent::Table(table) => Self::quick_table(table),
+        }
         };
+        let body=div().relative().size_full()
+            .when_some(look.previous.as_ref(),|body,previous|body.child(div().absolute().inset_0().opacity(1.-content_alpha).child(render_body(previous,look.previous_pose))))
+            .child(div().absolute().inset_0().opacity(content_alpha).child(render_body(&look.content,(look.zoom,look.pan))));
         // Under a PDF: pages; under a workbook: its sheets.
         let footer: AnyElement = match &look.content {
+            QuickContent::Word(preview) => div().child(if preview.truncated {
+                "Начало документа · без исходного оформления"
+            } else { "Текст документа · без исходного оформления" }).into_any_element(),
             QuickContent::Pdf { page, pages, .. } => div().flex().items_center().gap_2()
                 .child(icon_button("quick-look-prev", "fm/arrow-left.svg", "Предыдущая страница (← или PageUp)", false, *page > 0)
                     .on_click(cx.listener(|this,_,_,cx| this.quick_look_page(-1, cx))))
@@ -551,10 +727,11 @@ impl Explorer {
                         this.open_entry(open.clone(), open.is_dir(), side, cx);
                     })))
                 .child(icon_button("quick-look-close","fm/x.svg","Закрыть (Пробел, Esc)",false,true)
-                    .on_click(cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))))
+                    .on_click(cx.listener(|this,_,_,cx| {this.close_quick_look(cx);}))))
             .child(div().flex_1().min_h_0().p_2().flex().items_center().justify_center().child(body))
             .child(div().h(px(30.)).flex_none().px_3().flex().items_center().gap_3().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                 .child(div().flex_1().min_w_0().child(footer))
+                .when(loading,|bar|bar.child("Загрузка…"))
                 .child(div().flex_none().child(if look.zoomable() {
                     "Колесо — крупнее · двойной щелчок — ×2 · ↑ ↓ — соседние файлы · Пробел, Esc — закрыть"
                 } else {
@@ -562,10 +739,10 @@ impl Explorer {
                 })));
         div().id("quick-look-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x00000080))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.close_quick_look(cx);}))
             // Like Quick Look on a Mac: the window rises a little as it fades in.
-            .child(card.with_animation("quick-look-card", motion(180), |card, delta| card.mt(px(16. * (1. - delta)))))
-            .with_animation("quick-look-appear", motion(140), |this, delta| this.opacity(delta))
+            .child(card.mt(px(16. * (1.-shell_alpha))))
+            .opacity(shell_alpha)
             .into_any_element()
     }
 
@@ -600,7 +777,7 @@ impl Explorer {
 
     /// «О программе» under its titlebar button, as in SoilStiffness:
     /// a click elsewhere or Esc closes it.
-    fn about_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn about_panel(&self, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         let data = filemanager_core::path_utils::app_data_dir().display().to_string();
         div().id("about-backdrop").absolute().inset_0()
             .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.about_open=false;cx.notify();}))
@@ -630,7 +807,8 @@ impl Explorer {
                     .when(crate::updates::Updates::previous_exists(), |row| row.child(text_button("about-rollback", "Вернуть предыдущую версию", ButtonKind::Ghost)
                         .on_click(cx.listener(|this,_,_,cx| {this.about_open=false;this.rollback_update(cx);})))))
                 .when_some(self.updates.note.clone(), |panel, note| panel.child(div().text_color(rgb(TEXT)).child(note))))
-            .with_animation("about-appear", motion(130), |this, delta| this.opacity(delta).mt(px(-6. * (1. - delta))))
+            .mt(px(-6.*(1.-phase.alpha)))
+            .opacity(phase.alpha).when(phase.closing,|surface|surface.child(crate::popup_motion::shield()))
             .into_any_element()
     }
 
@@ -694,14 +872,16 @@ impl Explorer {
                 continue;
             }
             if index > 0 {
-                crumbs = crumbs.child(small_icon("fm/chevron-right.svg", TEXT_DIM));
+                crumbs = crumbs.child(self.crumb_chevron(side, index, chain[index - 1].clone(), Some(folder.clone()), cx));
             }
             let last = index + 1 == chain.len();
             let target = folder.clone();
             crumbs = crumbs.child(
                 // The current folder is only as wide as its name: the empty
                 // rest of the bar belongs to the bar and opens the path input.
-                div().id(("crumb", index)).when(last,|crumb|crumb.min_w_0())
+                div().id(("crumb", index)).relative().overflow_hidden()
+                    .children(item_overlays(None, self.spring_fill(&crate::spring::SpringTarget::Folder(side, target.clone()))))
+                    .when(last,|crumb|crumb.min_w_0())
                     .when(!last,|crumb|crumb.flex_none()).max_w(px(220.)).truncate().px_1p5().py_0p5()
                     .rounded_sm().cursor_pointer()
                     .text_color(rgb(if last { TEXT } else { TEXT_MUTED }))
@@ -713,11 +893,73 @@ impl Explorer {
                         this.navigate_side(side, &target, None, cx);
                     }}))
                     .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        this.drag_over(crate::DropAt::Nothing, cx);
                         this.spring_hover(crate::spring::SpringTarget::Folder(side, target.clone()), cx);
                     })))
             );
         }
+        // After the current folder: its own subfolders.
+        if let Some(current) = chain.last() {
+            crumbs = crumbs.child(self.crumb_chevron(side, chain.len(), current.clone(), None, cx));
+        }
         crumbs.into_any_element()
+    }
+
+    /// A › of the path bar: a click lists the subfolders of `parent`, so a
+    /// sibling of the next folder (or a subfolder of the current one) is
+    /// one click away, without going up first.
+    fn crumb_chevron(&self, side: GroupId, index: usize, parent: PathBuf, next: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.context_menu.as_ref().is_some_and(|menu| matches!(&menu.target,
+            MenuTarget::Children(group, folder, _) if *group == side && *folder == parent));
+        div().id(("crumb-next", index)).flex_none().size(px(18.)).rounded_sm().flex().items_center().justify_center()
+            .cursor_pointer().hover(|style| style.bg(rgb(PRESSED)))
+            .when(open, |chevron| chevron.bg(rgb(PRESSED)))
+            .child(small_icon(if open { "fm/chevron-down.svg" } else { "fm/chevron-right.svg" }, if open { TEXT } else { TEXT_DIM }))
+            // No tip over its own open menu.
+            .when(!open, |chevron| chevron.tooltip(|window, cx| Tooltip::new("Папки здесь").build(window, cx)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.focus_group(side, cx);
+                // The folder may not be read yet: the menu fills in when it is.
+                this.load_directory(parent.clone(), false, cx);
+                let at = gpui::point(event.position.x - px(8.), event.position.y + px(12.));
+                this.open_menu(at, MenuTarget::Children(side, parent.clone(), next.clone()), cx);
+            }))
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .into_any_element()
+    }
+
+    /// The subfolders listed under a › of the path bar, by name.
+    fn crumb_children(&self, side: GroupId, parent: &Path, next: Option<&Path>, mut list: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let Some(listing) = self.dirs.cache.get(parent) else {
+            let text = match self.dirs.errors.get(parent) {
+                Some(error) => format!("Не удалось прочитать: {error}"),
+                None => "Загрузка…".to_string(),
+            };
+            return list.child(div().h(px(28.)).px_2().flex().items_center().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child(text));
+        };
+        let mut folders: Vec<&Entry> = listing.entries.iter()
+            .filter(|entry| entry.is_directory && (self.show_hidden || !entry.hidden)).collect();
+        folders.sort_by_cached_key(|entry| entry.name.to_lowercase());
+        if folders.is_empty() {
+            return list.child(div().h(px(28.)).px_2().flex().items_center().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Вложенных папок нет"));
+        }
+        let next_name = next.and_then(crate::keys::listing_name);
+        for (index, entry) in folders.into_iter().enumerate() {
+            let here = next_name.as_deref() == Some(entry.name.as_str());
+            let path = entry.path.clone();
+            list = list.child(div().id(("crumb-child", index)).h(px(28.)).flex_none().px_2().flex().items_center().gap_2().rounded(px(4.))
+                .text_size(px(13.)).text_color(rgb(TEXT)).cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
+                .when(here, |row| row.bg(rgb(ACCENT_SOFT)))
+                .child(small_icon("fm/folder-fill.svg", FOLDER))
+                .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                    this.context_menu = None;
+                    // Ctrl: in a new tab, as with links elsewhere.
+                    if event.modifiers().control { this.open_in_new_tab(&path, cx); } else { this.navigate_side(side, &path, None, cx); }
+                })));
+        }
+        list
     }
 
     fn nav_row(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
@@ -753,8 +995,10 @@ impl Explorer {
         let path = place.path.clone();
         let middle=path.clone();
         let spring=path.clone();
-        div().id(id).relative().h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
+        let fill = self.spring_fill(&crate::spring::SpringTarget::Folder(self.active_side(), path.clone()));
+        div().id(id).relative().overflow_hidden().h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
             .cursor_pointer()
+            .children(item_overlays(None, fill))
             .when(active && framed, |this| this.child(focus_mark()))
             .when(framed, |this| this.mx_2())
             .when(active, |this| this.text_color(rgb(TEXT)))
@@ -768,6 +1012,8 @@ impl Explorer {
                 this.navigate_side(side, &path, None, cx);
             }))
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                // Released here, files are put aside in «Файлы для переноса».
+                this.drag_over(crate::DropAt::Stage, cx);
                 let side = this.active_side();
                 this.spring_hover(crate::spring::SpringTarget::Folder(side, spring.clone()), cx);
             }))
@@ -785,13 +1031,8 @@ impl Explorer {
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED)).font_weight(gpui::FontWeight::SEMIBOLD)
             .hover(|style| style.text_color(rgb(TEXT)))
             .child(div().flex_1().child(key))
-            // A disclosure triangle: it turns rather than swaps.
-            .child(svg().path("fm/chevron-right.svg").size(px(12.))
-                .text_color(rgb(TEXT_DIM)).when(!folded, |chevron| chevron.invisible().group_hover("section", |style| style.visible()))
-                .with_animation(SharedString::from(format!("section-turn-{key}-{folded}")), motion(160), move |chevron, delta| {
-                    let open = if folded { 1. - delta } else { delta };
-                    chevron.with_transformation(Transformation::rotate(gpui::radians(open * std::f32::consts::FRAC_PI_2)))
-                }))
+            .child(crate::disclosure_motion::chevron(SharedString::from(format!("section-turn-{key}")).into(), !folded,
+                svg().path("fm/chevron-right.svg").size(px(12.)).text_color(rgb(TEXT_DIM))))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(key, cx)))
     }
 
@@ -804,43 +1045,51 @@ impl Explorer {
             .child(self.section("Места", cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(|this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(None),cx))));
         let open = |key: &str| !self.collapsed.contains(key);
+        let height = 28. * self.places.len().max(1) as f32;
+        let mut body = div().flex_none().flex().flex_col();
         // Places are edited like favourites: right click hides, dragging reorders.
-        for (index, place) in self.places.iter().enumerate().filter(|_| open("Места")) {
+        for (index, place) in self.places.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
             let drag_name = place.label.clone();
-            side = side.child(self.place_row(("place", index), place, active, true, cx)
+            body = body.child(self.place_row(("place", index), place, active, true, cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(Some(index)),cx)))
-                .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position}))
+                .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview::new(drag_name.clone(),position,None)))
                 .drag_over::<PlaceDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &PlaceDrag,_,cx|this.move_place(data.index,index,cx))));
         }
-        if self.places.is_empty() && open("Места") {
-            side = side.child(self.sidebar_action("places-restore","fm/plus.svg","Вернуть стандартные места",
+        if self.places.is_empty() {
+            body = body.child(self.sidebar_action("places-restore","fm/plus.svg","Вернуть стандартные места",
                 cx.listener(|this,_,_,cx|this.show_all_places(cx))));
         }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Места".into(), open("Места"), height, body.into_any_element()));
         side = side.child(self.section("Избранное", cx));
-        for (index,path) in self.favorites.iter().enumerate().filter(|_| open("Избранное")) {
+        let height = 28. * (self.favorites.len() + usize::from(!self.favorites.contains(&current))) as f32;
+        let mut body = div().flex_none().flex().flex_col();
+        for (index,path) in self.favorites.iter().enumerate() {
             let target=path.clone();let tip=path.display().to_string();let name=browser::display_name(path);let drag_name=name.clone();
-            side=side.child(div().id(("favorite",index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
+            body=body.child(div().id(("favorite",index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
                 .rounded_sm().cursor_pointer().text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)))
                 .child(small_icon("fm/folder-fill.svg",FOLDER)).child(div().flex_1().min_w_0().truncate().child(name))
                 .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
                 .on_click(cx.listener(move |this,_,_,cx|this.navigate_side(this.active_side(),&target,None,cx)))
                 .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Favorite(index),cx)))
-                .on_drag(FavoriteDrag {index},move |_: &FavoriteDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position}))
+                .on_drag(FavoriteDrag {index},move |_: &FavoriteDrag,position,_,cx|cx.new(|_|FileDragPreview::new(drag_name.clone(),position,None)))
                 .drag_over::<FavoriteDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &FavoriteDrag,_,cx|this.move_favorite(data.index,index,cx))));
         }
-        if !self.favorites.contains(&current) && open("Избранное") {
-            side=side.child(self.sidebar_action("favorite-add","fm/plus.svg","Добавить папку",
+        if !self.favorites.contains(&current) {
+            body=body.child(self.sidebar_action("favorite-add","fm/plus.svg","Добавить папку",
                 cx.listener(|this,_,_,cx| {let path=this.pane_path(this.active_side());this.toggle_favorite(&path,cx);})));
         }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Избранное".into(), open("Избранное"), height, body.into_any_element()));
         let recent = self.recent_rows();
         if !recent.is_empty() {
             side = side.child(self.section("Недавние", cx));
-            for (index, path) in recent.into_iter().enumerate().filter(|_| open("Недавние")) {
+        let height = 28. * recent.len() as f32;
+        let mut body = div().flex_none().flex().flex_col();
+            for (index, path) in recent.into_iter().enumerate() {
                 let target = path.clone(); let tip = path.display().to_string(); let menu_path = path.clone();
-                side = side.child(div().id(("recent", index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
+                body = body.child(div().id(("recent", index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
                     .rounded_sm().cursor_pointer().text_color(rgb(TEXT_MUTED)).hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                     .child(small_icon("fm/history.svg", TEXT_DIM))
                     .child(div().flex_1().min_w_0().truncate().child(browser::display_name(&path)))
@@ -849,14 +1098,17 @@ impl Explorer {
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx|
                         this.open_menu(event.position, MenuTarget::Recent(menu_path.clone()), cx))));
             }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Недавние".into(), open("Недавние"), height, body.into_any_element()));
         }
         side = side.child(self.section("Диски", cx));
-        for (index, place) in self.drives.iter().enumerate().filter(|_| open("Диски")) {
+        let height = self.drives.iter().map(|p| if self.drive_space.contains_key(&p.path) {58.} else {28.}).sum::<f32>();
+        let mut body = div().flex_none().flex().flex_col();
+        for (index, place) in self.drives.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
             // The free space belongs to the drive: one highlighted block.
             let space = self.drive_space.get(&place.path).copied();
             let row = self.place_row(("drive", index), place, active, space.is_none(), cx);
-            side = side.child(match space {
+            body = body.child(match space {
                 Some((free, total)) => {
                     let used = 1. - free as f32 / total.max(1) as f32;
                     let color = if used > 0.9 { DANGER } else if active { ACCENT } else { TEXT_DIM };
@@ -865,7 +1117,7 @@ impl Explorer {
                         .when(active, |block| block.bg(rgb(ACCENT_SOFT)).child(focus_mark()))
                         .when(!active, |block| block.hover(|style| style.bg(rgb(HOVER))))
                         .child(row.when(!active, |row| row.group_hover("drive-block", |style| style.text_color(rgb(TEXT)))))
-                        .child(div().id(("drive-space", index)).pl(px(32.)).pr_2().pb_1p5().flex().flex_col().gap_1().cursor_pointer()
+                        .child(div().id(("drive-space", index)).h(px(30.)).line_height(px(16.)).pl(px(32.)).pr_2().pb_1p5().flex().flex_col().gap_1().cursor_pointer()
                             .child(div().h(px(4.)).w_full().rounded_full().bg(rgb(BORDER))
                                 .child(div().h_full().rounded_full().bg(rgb(color)).w(gpui::relative(used.clamp(0., 1.)))))
                             .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
@@ -879,14 +1131,17 @@ impl Explorer {
                 None => row.into_any_element(),
             });
         }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Диски".into(), open("Диски"), height, body.into_any_element()));
         side = side.child(div().mt_3().child(self.drop_zone(cx)));
         if !self.workspace_names.is_empty() {
             side = side.child(self.section("Проекты", cx));
         }
-        for (index, name) in self.workspace_names.iter().enumerate().filter(|_| open("Проекты")) {
+        let height = 28. * self.workspace_names.len() as f32;
+        let mut body = div().flex_none().flex().flex_col();
+        for (index, name) in self.workspace_names.iter().enumerate() {
             let open_name = name.clone();
             let delete_name = name.clone();
-            side = side.child(
+            body = body.child(
                 div().id(("workspace", index)).group("workspace").mx_2().h(px(28.)).px_2().flex().items_center()
                     .gap_2().rounded(px(4.)).cursor_pointer().text_color(rgb(TEXT_MUTED))
                     .when(self.browser.project_group(name).is_some(),|row|row.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
@@ -905,6 +1160,7 @@ impl Explorer {
                     .on_click(cx.listener(move |this, _, _, cx| this.restore_workspace(&open_name, cx)))
             );
         }
+        side = side.child(crate::disclosure_motion::reveal("sidebar-body-Проекты".into(), open("Проекты"), height, body.into_any_element()));
         side = side
             .child(self.sidebar_action("save-workspace", "fm/plus.svg", "Создать проект…",
                 cx.listener(|this, _, window, cx| this.begin_save_workspace(window, cx))))
@@ -951,7 +1207,8 @@ impl Explorer {
             .drag_over::<FileDragInfo>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
-            .on_drop(cx.listener(|this, data: &ExternalPaths, _, cx| this.stage_paths(data.paths(), cx)));
+            .on_drop(cx.listener(|this, data: &ExternalPaths, _, cx| this.stage_paths(data.paths(), cx)))
+            .on_mouse_move(cx.listener(|this, _, _, cx| this.drag_over(crate::DropAt::Stage, cx)));
         if items.is_empty() {
             zone = zone.child(
                 div().flex().items_center().gap_2().text_color(rgb(TEXT_MUTED))
@@ -963,16 +1220,16 @@ impl Explorer {
         }
         // Staged items are dragged out like files: the header carries all,
         // a row carries one, into any folder, pane or program.
-        let preview = |info: &FileDragInfo, position, _: &mut Window, cx: &mut App| {
+        let preview = |target: crate::DragTargetCell| move |info: &FileDragInfo, position, _: &mut Window, cx: &mut App| {
             let name = match info.paths.as_slice() { [single] => browser::display_name(single), many => format!("{} элементов", many.len()) };
-            cx.new(|_| FileDragPreview { name, position })
+            cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
         };
         zone = zone.child(div().id("zone-all").flex().items_center().gap_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             .cursor_grab().rounded_sm().hover(|style| style.bg(rgb(HOVER)))
             .child(div().flex_1().child(format!("Для переноса: {}", items.len())))
             .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("тяните"))
             .tooltip(|window, cx| Tooltip::new("Перетащите в папку или панель: тот же диск — перенос, другой — копия; Ctrl — копия, Shift — перенос").build(window, cx))
-            .on_drag(FileDragInfo { paths: items.to_vec() }, preview));
+            .on_drag(FileDragInfo { paths: items.to_vec(), source: None }, preview(self.drag_target.clone())));
         for (index, path) in items.iter().take(5).enumerate() {
             zone = zone.child(
                 div().id(("zone-item", index)).flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT))
@@ -980,7 +1237,7 @@ impl Explorer {
                     .child(small_icon(if self.zone.is_folder(path) { "fm/folder-fill.svg" } else { "fm/file.svg" },
                         if self.zone.is_folder(path) { FOLDER } else { TEXT_MUTED }))
                     .child(div().flex_1().min_w_0().truncate().child(browser::display_name(path)))
-                    .on_drag(FileDragInfo { paths: vec![path.clone()] }, preview)
+                    .on_drag(FileDragInfo { paths: vec![path.clone()], source: None }, preview(self.drag_target.clone()))
             );
         }
         if items.len() > 5 {
@@ -1025,7 +1282,7 @@ impl Explorer {
             .filter(|selected| {
                 selected.parent() == Some(path.as_path())
                     && self.dirs.cache.get(&path).is_some_and(|listing| {
-                        listing.entries.iter().any(|entry| &entry.path == selected && entry.is_directory)
+                        crate::keys::entry_at(listing, selected).is_some_and(|entry| entry.is_directory)
                     })
             });
         // A narrow viewport may omit the optional preview, never the trail.
@@ -1119,6 +1376,10 @@ impl Explorer {
                 .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
         };
+        let target=self.dock_hover.filter(|(id,_)|*id==side).map(|(_,zone)|
+            if self.browser.groups.len()>=filemanager_core::panes::MAX_GROUPS {crate::layout::DockZone::Center}else{zone});
+        let (dock,dock_moving)=self.motion.docks.entry(side).or_default().sample(target,std::time::Instant::now(),crate::theme::animations());
+        if dock_moving {self.motion.late_frame.set(true);}
         let weak = cx.weak_entity();
         div().relative().size_full().flex().flex_col().overflow_hidden().bg(rgb(SURFACE))
             .on_prepaint(move |bounds, _, cx| {
@@ -1157,17 +1418,13 @@ impl Explorer {
                 }
                 cx.notify();
             }))
-            .when_some(self.dock_hover.filter(|(id,_)|*id==side).map(|(_,zone)|zone),|pane,zone| {
-                use crate::layout::DockZone::*;
-                let overlay=div().absolute().bg(crate::theme::accent_alpha(0x22)).border_1().border_color(rgb(ACCENT));
-                let overlay=match zone {
-                    Left=>overlay.left_0().top_0().bottom_0().w(gpui::relative(0.5)),
-                    Right=>overlay.right_0().top_0().bottom_0().w(gpui::relative(0.5)),
-                    Top=>overlay.top_0().left_0().right_0().h(gpui::relative(0.5)),
-                    Bottom=>overlay.bottom_0().left_0().right_0().h(gpui::relative(0.5)),
-                    Center=>overlay.inset_0(),
-                };
-                pane.child(overlay)
+            .when_some(dock,|pane,(rect,opacity,zone)| {
+                pane.child(div().absolute().left(gpui::relative(rect.x)).top(gpui::relative(rect.y))
+                    .w(gpui::relative(rect.w)).h(gpui::relative(rect.h)).opacity(opacity)
+                    .bg(crate::theme::accent_alpha(0x22)).border_1().border_color(rgb(ACCENT))
+                    .flex().items_center().justify_center()
+                    .child(div().px_3().py_1().rounded(px(4.)).bg(rgb(RAISED)).text_color(rgb(TEXT)).text_size(px(12.))
+                        .child(crate::dock_motion::label(zone))))
             })
             // Files from Explorer are copied into the pane's folder.
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
@@ -1189,7 +1446,7 @@ impl Explorer {
     fn list_header(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
         let spec = self.sort_for(side);
         let header = |id: &'static str, label: &'static str, key: SortKey, cx: &mut Context<Self>| {
-            let active = spec.key == key;
+            let active = spec.key == key && !self.manual_orders.enabled(&self.pane_path(side));
             div().id(id).h_full().px_2().flex().items_center().gap_1().cursor_pointer()
                 .text_color(rgb(if active { TEXT } else { TEXT_DIM }))
                 .hover(|style| style.text_color(rgb(TEXT)))
@@ -1197,6 +1454,7 @@ impl Explorer {
                 .when(active, |this| this.child(if spec.descending { "↓" } else { "↑" }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     // Each pane sorts on its own.
+                    this.set_manual_order(side, false, cx);
                     let next = this.sort_for(side).toggled(key);
                     this.sorts.insert(side, next);
                     cx.notify();
@@ -1270,6 +1528,8 @@ impl Explorer {
 
     fn column(&mut self, folder: PathBuf, side: GroupId, trail: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
         let list_mode = !self.miller(side);
+        let mode = if self.thumbs_view(side) { 't' } else if list_mode { 'l' } else { 'c' };
+        self.motion.list_location(side, &self.pane_path(side), mode);
         if list_mode { self.auto_folder_sizes(&folder, cx); }
         let mut column = div().size_full().min_h_0().flex().flex_col()
             .when(!list_mode, |this| this.border_r_1().border_color(rgb(BORDER)));
@@ -1295,17 +1555,29 @@ impl Explorer {
             // Files dropped on the empty space or a file row land in this folder.
             .drag_over::<FileDragInfo>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener(move |this, data: &FileDragInfo, window, cx| {
-                this.drop_files(&data.paths, drop_folder.clone(), window.modifiers(), cx);
+                if !this.commit_manual_drop(side, &drop_folder, data, window.mouse_position(), window.modifiers(), cx) {
+                    this.drop_files(&data.paths, drop_folder.clone(), window.modifiers(), cx);
+                }
             }))
-            .on_mouse_move(cx.listener(move |this, _, _, _| {
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if let Some(drag) = this.right_drag.as_mut().filter(|drag| drag.active && !drag.claimed) {
                     drag.target = Some(hover_folder.clone());
                     drag.claimed = true;
                 }
+                if this.dragging_files(cx) { this.drag_over_list(&hover_folder); }
             }))
             .when(right_target, |column| column.bg(rgb(ACCENT_SOFT)));
 
         if let Some((listing, indices)) = self.folder_view(side, &folder) {
+            let motion_key=(side,folder.clone());let now=std::time::Instant::now();
+            if self.motion.rows.get(&motion_key).is_some_and(|m|!m.active(now)||!m.matches(&indices)||!std::sync::Arc::ptr_eq(&m.listing,&listing))
+                || !crate::theme::animations() || self.renaming || self.marquee.is_some() || self.dragging_files(cx) {
+                self.motion.rows.remove(&motion_key);
+            }
+            if self.motion.lists.get(&motion_key).is_some_and(|m|!m.active(now)||!m.matches(&indices)||!std::sync::Arc::ptr_eq(&m.listing,&listing))
+                || !crate::theme::animations() || self.renaming || self.marquee.is_some() || self.dragging_files(cx) {
+                self.motion.lists.remove(&motion_key);
+            }
             if indices.is_empty() {
                 return column.child(
                     div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
@@ -1313,6 +1585,8 @@ impl Explorer {
                         .child(icon("fm/folder-fill.svg", BORDER_STRONG))
                         .child(if listing.entries.is_empty() {
                             "Папка пуста".to_string()
+                        } else if let Some(kind) = self.kinds.get(side) {
+                            format!("Нет файлов «{}» — фильтр «Тип» внизу", kind.name())
                         } else if !self.filter.is_empty() && folder == self.pane_path(self.active_side()) {
                             format!("Нет имён, содержащих «{}». Enter — искать во вложенных папках", self.filter)
                         } else {
@@ -1320,44 +1594,127 @@ impl Explorer {
                         })
                 ).into_any_element();
             }
+            // Only the current folder is shared by all three presentation modes.
+            let spatial_frame=if folder==self.pane_path(side) {
+                let animate=crate::theme::animations() && !self.renaming && self.marquee.is_none() && !self.dragging_files(cx);
+                let changing=self.motion.modes.get(&side).is_some_and(|m|m.transition.active())
+                    || self.motion.spatial.get(&side).is_some_and(|m|m.active());
+                if animate && changing {
+                    let (frame,moving)=self.motion.spatial.entry(side).or_default().frame(&folder,now,true);
+                    if moving {self.motion.late_frame.set(true);}
+                    Some(frame)
+                }else{self.motion.spatial.remove(&side);None}
+            }else{None};
             let handle = self.scroll_handle(side, &folder);
+            let manual_mode = self.manual_orders.enabled(&folder);
+            let tiles = list_mode && self.thumbs_view(side);
+            let columns = if tiles { crate::thumbs::columns(self.pane_width_for(side)) } else { 1 };
+            let cell = if tiles { (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP, crate::thumbs::tile_height()+crate::thumbs::TILE_GAP) }
+                else { (self.pane_width_for(side).max(1.), row_height()) };
+            let manual = self.manual_display(side, &folder, &listing, &indices, &handle.0.borrow().base_handle, columns, cell, tiles, now, cx);
+            let (indices, manual_hidden, manual_positions, manual_geometry) = manual.map_or_else(
+                || (indices, std::sync::Arc::new(std::collections::HashSet::new()), None, None),
+                |display| (display.order, display.hidden, Some(display.logical_positions), display.geometry));
             let count = indices.len();
             let list_id = SharedString::from(format!("list-{}-{}", side.0, folder.display()));
             let background_marquee_folder=folder.clone();
+            // Dragging near the top or bottom edge scrolls the list.
+            let edge_handle = handle.0.borrow().base_handle.clone();
+            // A persistent clock survives a watcher dropping/replacing this list.
+            let (opacity, offset) = self.motion.list_appearance(side);
+            let wheel = crate::smooth_scroll::layer(self.smooth.clone(), format!("list-{}-{}", side.0, folder.display()).into(), edge_handle.clone());
+            let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {
                 // Tiles: each list item is a row of them.
                 let per_row = crate::thumbs::columns(self.pane_width_for(side));
                 self.thumb_columns.insert(side, per_row);
                 let rows = count.div_ceil(per_row);
-                return column.child(div().flex_1().min_h_0().child(
+                let list_id = SharedString::from(format!("{list_id}-grid-{per_row}-{}",crate::thumbs::size()));
+                let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some() || (self.dragging_files(cx) && !manual_mode);
+                let moving = self.motion.grids.entry(side).or_default().prepare(&folder, &listing, indices.clone(), per_row,
+                    (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP, crate::thumbs::tile_height()+crate::thumbs::TILE_GAP), instant, std::time::Instant::now());
+                if moving {self.motion.late_frame.set(true);}
+
+                return column.child(div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
                     uniform_list(list_id, rows, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
                         range.map(|row| {
                             let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
-                                .map(|position| { let entry = listing.entries[indices[position]].clone(); this.tile(&entry, &folder, side, cx) })
+                                .map(|position| { let entry = listing.entries[indices[position]].clone(); let (x,y)=this.motion.grids.get(&side).map_or((0.,0.),|grid|grid.offset(&entry.path,std::time::Instant::now()));
+                                    // The dragged item is represented by the ghost, not an invisible interactive tile.
+                                    let tile=if manual_hidden.contains(&entry.path) {
+                                        div().w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).into_any_element()
+                                    }else{this.tile(&entry, &folder, side, cx).into_any_element()};
+                                    let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
+                                    if let Some(frame)=&spatial_frame {
+                                        spatial_slot(frame,&entry.path,tile,Some(crate::thumbs::tile_width()),crate::thumbs::tile_height())
+                                            .absolute().left(left).top(px(y)).into_any_element()
+                                    }else{div().absolute().left(left).top(px(y)).w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).child(tile).into_any_element()} })
                                 .collect::<Vec<_>>();
-                            div().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP)).flex().gap(px(crate::thumbs::TILE_GAP))
+                            div().relative().w_full().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP))
                                 .children(tiles).into_any_element()
                         }).collect::<Vec<_>>()
                     }}))
                     .track_scroll(&handle)
                     .h_full()
                     .pt_2().pl_2().pr(px(12.))
+                ).opacity(opacity).left(px(offset))).into_any_element();
+            }
+            let geometry=manual_geometry.or_else(|| self.motion.rows.get(&motion_key).map(|m|m.geometry(now)))
+                .or_else(||self.motion.lists.get(&motion_key).map(|m|m.geometry(now)));
+            if let Some((geometry,total))=geometry {
+                let row_h=row_height();
+                let base=handle.0.borrow().base_handle.clone();let viewport=base.bounds().size.height/px(1.);
+                // Keyboard requests use the same logical order, but animated content coordinates.
+                if let Some(request)=handle.0.borrow_mut().deferred_scroll_to_item.take() {
+                    if let Some(row)=geometry.iter().find(|r|r.position==Some(request.item_index)) {
+                        let offset=base.offset();let top=row.top*row_h;let bottom=top+row.height*row_h;
+                        let y=if top < -offset.y/px(1.) {-top} else if bottom > -offset.y/px(1.)+viewport {viewport-bottom} else {offset.y/px(1.)};
+                        base.set_offset(gpui::point(offset.x,px(y.min(0.))));
+                    }
+                }
+                let start=-base.offset().y/px(1.);let end=start+viewport.max(row_h*2.);
+                let mut content=div().relative().w_full().h(px(total*row_h)).flex_none();
+                for row in geometry.into_iter().filter(|r|r.height>0.001 && (r.top+r.height)*row_h>=start-row_h && r.top*row_h<=end+row_h) {
+                    let entry=&listing.entries[row.index];let on_trail=trail.as_ref()==Some(&entry.path);
+                    let logical=manual_positions.as_ref().and_then(|positions|positions.get(&row.index).copied()).unwrap_or(row.position.unwrap_or(0));
+                    let body=if manual_hidden.contains(&entry.path){div().w_full().h(px(row_h)).into_any_element()}
+                        else{self.row(entry,&folder,side,logical,on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx)};
+                    let mut slot=div().id(SharedString::from(format!("disclosing-{}",entry.path.display())))
+                        .absolute().left_0().right_0().top(px(row.top*row_h)).h(px(row.height*row_h)).overflow_hidden()
+                        .opacity(if manual_hidden.contains(&entry.path){0.}else{row.opacity}).child(body);
+                    if row.position.is_none() {
+                        slot=slot.child(div().absolute().inset_0().occlude()
+                            .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
+                            .on_mouse_down(MouseButton::Right,|_,_,cx|cx.stop_propagation()));
+                    }
+                    content=content.child(slot);
+                }
+                self.motion.late_frame.set(true);
+                return column.child(div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
+                    div().id(list_id).relative().h_full().w_full().overflow_y_scroll().track_scroll(&base).pl_1().pr(px(12.))
+                        .child(content)
+                        .on_mouse_down(MouseButton::Left,cx.listener({let folder=background_marquee_folder.clone();move|this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx)}))
                 )).into_any_element();
             }
             column = column.child(
-                div().flex_1().min_h_0().child(
+                div().flex_1().min_h_0().relative().on_mouse_move(edge_listener).child(wheel).child(
                     uniform_list(list_id, count, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
                         range.map(|position| {
                             let entry = &listing.entries[indices[position]];
                             let on_trail = trail.as_ref() == Some(&entry.path);
-                            this.row(entry, &folder, side, on_trail, list_mode, list_mode && position % 2 == 1, cx)
+                            let logical=manual_positions.as_ref().and_then(|positions|positions.get(&indices[position]).copied()).unwrap_or(position);
+                            let row=if manual_hidden.contains(&entry.path){div().w_full().h(px(row_height())).into_any_element()}
+                                else{this.row(entry, &folder, side, logical, on_trail, list_mode, list_mode && position % 2 == 1, cx)};
+                            if let Some(frame)=&spatial_frame {
+                                spatial_slot(frame,&entry.path,row,None,row_height()).into_any_element()
+                            }else{row}
                         }).collect::<Vec<_>>()
                     }}))
                     .track_scroll(&handle)
                     .h_full()
                     .pl_1().pr(px(12.))
                     .on_mouse_down(MouseButton::Left,cx.listener({ let folder=background_marquee_folder.clone(); move |this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx) }))
-                )
+                ).opacity(opacity).left(px(offset))
             );
             if self.unwatched_folders.contains(&background_marquee_folder) {
                 column = column.child(
@@ -1395,7 +1752,7 @@ impl Explorer {
 
     /// A tile of the thumbnails view: the picture (or a large icon) and the
     /// name under it; clicks, drags and the menu work as on a list row.
-    fn tile(&mut self, entry: &Entry, folder: &Path, side: GroupId, cx: &mut Context<Self>) -> AnyElement {
+    fn tile(&mut self, entry: &Entry, folder: &Path, side: GroupId, cx: &mut Context<Self>) -> Stateful<Div> {
         let (picture_size, tile_h, tile_w) = (crate::thumbs::picture(), crate::thumbs::tile_height(), crate::thumbs::tile_width());
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
@@ -1411,12 +1768,16 @@ impl Explorer {
             .when(selected, |tile| tile.bg(rgb(if focused_pane { ACCENT_SOFT } else { HOVER })))
             .when(!selected && right_target, |tile| tile.bg(rgb(ACCENT_SOFT)))
             .when(!selected && !right_target, |tile| tile.hover(|style| style.bg(rgb(HOVER))))
-            .child(div().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
+            .relative().overflow_hidden()
+            .children(item_overlays(self.motion.flash_of(&path),
+                is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
+            .child(div().relative().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
                 .child(match picture {
                     Some(file) => img(file).max_w(px(tile_w - 12.)).max_h(px(picture_size)).object_fit(ObjectFit::Contain)
                         // A file that only looks like a picture keeps its icon.
                         .with_fallback(move || svg().path(icon_path).size(px((picture_size / 2.).round())).text_color(rgb(tint)).into_any_element())
-                        .when(entry.hidden, |image| image.opacity(0.55)).into_any_element(),
+                        // A thumbnail just made comes in softly.
+                        .opacity(if entry.hidden { 0.55 } else { 1. } * self.motion.picture_opacity(&format!("thumb:{}", path.display()))).into_any_element(),
                     None => svg().path(icon_path).size(px((picture_size / 2.).round())).text_color(rgb(tint))
                         .when(entry.hidden, |svg| svg.opacity(0.55)).into_any_element(),
                 }));
@@ -1431,7 +1792,7 @@ impl Explorer {
                 .child(div().min_w_0().text_center().line_clamp(2).line_height(px(16.)).child(entry.name.clone())))
         };
         if renaming {
-            return tile.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).into_any_element();
+            return tile.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         }
         if is_dir {
             let (internal_target, external_target, hover_target) = (path.clone(), path.clone(), path.clone());
@@ -1451,17 +1812,19 @@ impl Explorer {
                         drag.target = Some(hover_target.clone());
                         drag.claimed = true;
                     }
+                    this.drag_over(crate::DropAt::Folder(hover_target.clone()), cx);
                     this.spring_hover(crate::spring::SpringTarget::Folder(side, hover_target.clone()), cx);
                 }));
         }
         let (menu_path, menu_folder, column_folder) = (path.clone(), folder.to_path_buf(), folder.to_path_buf());
         let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
-        tile.on_drag(FileDragInfo { paths: drag_paths }, |info: &FileDragInfo, position, _, cx| {
+        let target = self.drag_target.clone();
+        tile.on_drag(FileDragInfo { paths: drag_paths, source: Some((side, folder.to_path_buf())) }, move |info: &FileDragInfo, position, _, cx| {
                 let name = match info.paths.as_slice() {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview { name, position })
+                cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -1482,19 +1845,29 @@ impl Explorer {
                     this.click_entry(side, &column_folder, path.clone(), event.modifiers(), cx);
                 }
             }))
-            .into_any_element()
     }
 
-    fn row(&self, entry: &Entry, folder: &Path, side: GroupId, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn row(&self, entry: &Entry, folder: &Path, side: GroupId, position: usize, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
         let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
+        // The selection sliding to this row: the part of it over each row
+        // it passes is drawn under the row's text; the row it goes to shows
+        // its own colour only once it is there.
+        let plate = self.motion.plate_at(side, folder).filter(|_| focused_pane && !self.motion.rows.contains_key(&(side,folder.to_path_buf())) && !self.motion.lists.contains_key(&(side,folder.to_path_buf())));
+        let plate_part = plate.and_then(|(at, _)| {
+            let (top, bottom) = (at.max(position as f32), (at + 1.).min(position as f32 + 1.));
+            (bottom > top).then_some((top - position as f32, bottom - top))
+        });
+        let selected_bg = selected && plate.is_none();
+        let ink = plate.map_or(if selected { 1. } else { 0. }, |(at, _)| crate::motion::plate_ink(at, position));
+        let ink_color = |normal| crate::palette::mix(themed(normal), themed(SELECTION_TEXT), ink);
         let (icon_path, tint) = entry_icon(entry);
-        let stack = self.stack_role(side, folder, &path);
-        let bg = if selected && focused_pane {
+        let stack = self.stack_role(side, folder, &path).or_else(||self.motion.rows.get(&(side,folder.to_path_buf())).and_then(|m|m.roles.get(&path).cloned()));
+        let bg = if selected_bg && focused_pane {
             Some(SELECTED)
-        } else if selected {
+        } else if selected_bg {
             Some(INACTIVE_SELECTED)
         } else if on_trail {
             Some(TRAIL)
@@ -1504,9 +1877,9 @@ impl Explorer {
         let base = if striped { STRIPE } else { SURFACE };
         let right_target = is_dir && self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&path);
         let bg = if right_target && !selected { Some(ACCENT_SOFT) } else { bg };
-        let text = if selected { SELECTION_TEXT } else if entry.hidden { TEXT_MUTED } else { TEXT };
-        let metadata_text = if selected { SELECTION_TEXT } else { TEXT_MUTED };
-        let tint = if selected { SELECTION_TEXT } else { tint };
+        let text = ink_color(if entry.hidden { TEXT_MUTED } else { TEXT });
+        let metadata_text = ink_color(TEXT_MUTED);
+        let tint = ink_color(tint);
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
             .w_full().h(px(row_height())).pl(px(6.)).pr_2().flex().items_center().gap_2()
             .border_l_2().border_color(rgb(bg.unwrap_or(base)))
@@ -1514,6 +1887,11 @@ impl Explorer {
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
+            .relative()
+            .when_some(plate_part, |row, (top, height)| row.child(div().absolute().left_0().w_full()
+                .top(px(top * row_height())).h(px(height * row_height())).bg(rgb(SELECTED))))
+            .children(item_overlays(self.motion.flash_of(&path),
+                is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
             // An older version sits indented under the newest one.
             .when(matches!(stack, Some(Stacked::Member { .. })), |row| row.child(div().w(px(16.)).flex_none()))
             .group("file-row")
@@ -1536,7 +1914,7 @@ impl Explorer {
                             // A halo in the row's colour keeps the star apart from the folder.
                             .child(svg().absolute().inset_0().path("fm/star-fill.svg").size(px(12.)).text_color(rgb(behind)))
                             .child(svg().absolute().top(px(2.)).left(px(2.)).path(if favorite { "fm/star-fill.svg" } else { "fm/star.svg" }).size(px(8.))
-                                .text_color(rgb(if favorite { FAVORITE } else if selected { SELECTION_TEXT } else { TEXT_MUTED })))
+                                .text_color(gpui::rgb(if favorite { themed(FAVORITE) } else { ink_color(TEXT_MUTED) })))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_favorite(&target, cx); })))
                         .into_any_element()
@@ -1559,7 +1937,7 @@ impl Explorer {
                 .child(Input::new(&self.rename_input).xsmall().h(px(20.)).w_full().text_size(px(13.))))
         } else {
             let badge = |text: String| div().flex_none().px_1p5().rounded_sm().text_size(px(11.))
-                .bg(rgb(if selected { SELECTED_BORDER } else { ACCENT_SOFT })).text_color(rgb(if selected { SELECTION_TEXT } else { TEXT_MUTED }))
+                .bg(rgb(crate::palette::mix(themed(ACCENT_SOFT), themed(SELECTED_BORDER), ink))).text_color(rgb(ink_color(TEXT_MUTED)))
                 .child(text);
             let name = name_cell().flex().items_center().gap_1p5()
                 .child(div().min_w_0().truncate().child(entry.name.clone()));
@@ -1571,7 +1949,10 @@ impl Explorer {
                         .flex_none().flex().items_center().gap_0p5().cursor_pointer()
                         .tooltip(move |window, cx| Tooltip::new(if expanded { "Скрыть прежние версии" } else { "Показать прежние версии" }).build(window, cx))
                         .child(badge(format!("{label} +{others}")))
-                        .child(small_icon(if expanded { "fm/chevron-down.svg" } else { "fm/chevron-right.svg" }, if selected { SELECTION_TEXT } else { TEXT_DIM }))
+                        .child(match self.motion.rows.get(&(side,folder.to_path_buf())).and_then(|m|m.openness(&key,std::time::Instant::now())) {
+                            Some(open)=>small_icon("fm/chevron-right.svg",ink_color(TEXT_DIM)).with_transformation(gpui::Transformation::rotate(gpui::radians(open*std::f32::consts::FRAC_PI_2))).into_any_element(),
+                            None=>crate::disclosure_motion::chevron(SharedString::from(format!("stack-turn-{}",path.display())).into(),expanded,small_icon("fm/chevron-right.svg",ink_color(TEXT_DIM))).into_any_element(),
+                        })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -1590,7 +1971,7 @@ impl Explorer {
                     if list_mode {
                         name.child(div().flex_none().flex().items_center().gap_1()
                             .text_size(px(11.))
-                            .text_color(if selected { rgb(SELECTION_TEXT) } else { gpui::rgb(color) })
+                            .text_color(gpui::rgb(crate::palette::mix(color, themed(SELECTION_TEXT), ink)))
                             .child(dot).child(label.name()))
                     } else {
                         name.child(dot)
@@ -1613,7 +1994,7 @@ impl Explorer {
                     .child(div().min_w_0().truncate()
                         .child(if is_dir { self.folder_size_label(&entry.path) } else { format_size(entry.size) })));
         } else if is_dir {
-            row = row.child(small_icon("fm/chevron-right.svg", if selected { SELECTION_TEXT } else { TEXT_DIM }));
+            row = row.child(small_icon("fm/chevron-right.svg", ink_color(TEXT_DIM)));
         }
         if is_dir {
             let internal_target = path.clone();
@@ -1631,6 +2012,7 @@ impl Explorer {
                         drag.target = Some(target.clone());
                         drag.claimed = true;
                     }
+                    this.drag_over(crate::DropAt::Folder(target.clone()), cx);
                     this.spring_hover(crate::spring::SpringTarget::Folder(side, target.clone()), cx);
                 }}))
                 .on_drop(cx.listener(move |this, data: &ExternalPaths, _, cx| {
@@ -1649,12 +2031,15 @@ impl Explorer {
         }
         // Dragging a selected row carries the whole selection.
         let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
-        row.on_drag(FileDragInfo { paths: drag_paths }, |info: &FileDragInfo, position, _, cx| {
+        let target = self.drag_target.clone();
+        row.when(self.motion.rows.contains_key(&(side,folder.to_path_buf())) || self.motion.lists.contains_key(&(side,folder.to_path_buf())),
+                |row|row.on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation()))
+            .on_drag(FileDragInfo { paths: drag_paths, source: Some((side, folder.to_path_buf())) }, move |info: &FileDragInfo, position, _, cx| {
                 let name = match info.paths.as_slice() {
                     [single] => browser::display_name(single),
                     many => format!("{} элементов", many.len()),
                 };
-                cx.new(|_| FileDragPreview { name, position })
+                cx.new(|_| FileDragPreview::new(name, position, info.paths.first().map(|first| crate::DropMode::new(first, &target))))
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -1744,6 +2129,7 @@ impl Explorer {
             .child(div().w(px(128.)).flex_none().child("Изменён"))
             .child(div().w(px(20.)).flex_none());
         let count = self.search.hits.len();
+        let search_wheel = crate::smooth_scroll::layer(self.smooth.clone(), "search-hits".into(), self.search.scroll.0.borrow().base_handle.clone());
         let list = uniform_list("search-hits", count, cx.processor(move |this, range: Range<usize>, _, cx| {
             let root = this.search.root.clone().unwrap_or_default();
             range.map(|index| {
@@ -1799,7 +2185,7 @@ impl Explorer {
         })).track_scroll(&self.search.scroll).flex_1().min_h_0().px_1();
         div().id("search-results").size_full().min_h_0().flex().flex_col().bg(rgb(SURFACE))
             .child(header)
-            .when(count > 0, |panel| panel.child(columns).child(list))
+            .when(count > 0, |panel| panel.child(columns).child(div().flex_1().min_h_0().flex().flex_col().relative().child(search_wheel).child(list)))
             .when(count == 0 && !busy, |panel| panel.child(
                 div().flex_1().flex().flex_col().items_center().justify_center().gap_2().px_6()
                     .text_color(rgb(TEXT_DIM)).text_size(px(12.))
@@ -1871,13 +2257,12 @@ impl Explorer {
         }
 
         if self.marked.len() > 1 {
-            let marked = self.marked.clone();
             let mut files = 0usize;
             let mut folders = 0usize;
             let mut bytes = 0u64;
-            if let Some(folder) = marked[0].parent().map(Path::to_path_buf) {
+            if let Some(folder) = self.marked[0].parent().map(Path::to_path_buf) {
                 if let Some((listing, _)) = self.folder_view(self.browser.active, &folder) {
-                    for entry in listing.entries.iter().filter(|e| marked.contains(&e.path)) {
+                    for entry in listing.entries.iter().filter(|e| self.marked.contains(&e.path)) {
                         if entry.is_directory { folders += 1 } else { files += 1; bytes += entry.size; }
                     }
                 }
@@ -1885,14 +2270,14 @@ impl Explorer {
             return panel
                 .child(div().flex().items_center().gap_2()
                     .child(icon("fm/layers.svg", TEXT_MUTED))
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Выбрано: {}", marked.len()))))
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Выбрано: {}", self.marked.len()))))
                 .child(div().flex().flex_col().gap_1p5()
                     .child(Self::property("Файлов", files.to_string()))
                     .child(Self::property("Папок", folders.to_string()))
                     .child(Self::property("Размер", format!("{} (без папок)", format_size(bytes))))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(84.)).flex_none().text_color(rgb(TEXT_MUTED)).child("Метка"))
-                        .child(self.label_picker("group-label", marked.clone(), cx))))
+                        .child(self.label_picker("group-label", self.marked.to_vec(), cx))))
                 .child(div().flex().gap_2()
                     .child(text_button("group-stage", "Отложить", ButtonKind::Ghost).flex_1()
                         .on_click(cx.listener(|this, _, _, cx| this.stage(cx))))
@@ -1905,7 +2290,7 @@ impl Explorer {
         let selected_entry = self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
             let (listing, _) = self.folder_view(self.browser.active, &folder)?;
-            listing.entries.iter().find(|entry| entry.path == selected).cloned()
+            crate::keys::entry_at(&listing, &selected).cloned()
         });
         let current = self.pane_path(self.active_side());
         let (title, icon_path, tint) = match &selected_entry {
@@ -1999,14 +2384,14 @@ impl Explorer {
         }
         let mut section = div().flex().flex_col().gap_0p5().pt_2().border_t_1().border_color(rgb(BORDER))
             .child(div().id("versions-toggle").h(px(28.)).flex().items_center().gap_1().cursor_pointer().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                .child(small_icon(if self.versions_expanded {"fm/chevron-down.svg"} else {"fm/chevron-right.svg"},TEXT_MUTED))
+                .child(crate::disclosure_motion::chevron("inspector-version-turn".into(), self.versions_expanded, small_icon("fm/chevron-right.svg",TEXT_MUTED)))
                 .child(format!("Версии · {}", self.inspector.versions.len()))
                 .on_click(cx.listener(|this,_,_,cx| {this.versions_expanded=!this.versions_expanded;cx.notify();})));
-        if !self.versions_expanded {return section.into_any_element();}
+        let mut body = div().flex_none().flex().flex_col().gap_0p5();
         for (index, member) in self.inspector.versions.iter().enumerate() {
             let current = self.selected.as_ref() == Some(&member.path);
             let path = member.path.clone();
-            section = section.child(
+            body = body.child(
                 div().id(("version", index)).h(px(24.)).px_2().rounded_sm().flex().items_center().gap_2()
                     .text_size(px(12.)).cursor_pointer()
                     .when(current, |row| row.bg(rgb(TRAIL)))
@@ -2022,6 +2407,8 @@ impl Explorer {
                     }))
             );
         }
+        section = section.child(crate::disclosure_motion::reveal("inspector-version-body".into(), self.versions_expanded,
+            self.inspector.versions.len() as f32 * 26. - 2., body.into_any_element()));
         section.into_any_element()
     }
 
@@ -2031,7 +2418,8 @@ impl Explorer {
             return div().flex().flex_col().gap_1()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Предпросмотр"))
                 .child(div().w_full().h(px(240.)).p_1().flex().items_center().justify_center()
-                    .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)))
+                    .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)
+                        .opacity(self.motion.picture_opacity(&format!("inspector:{}", entry.path.display())))))
                 .into_any_element();
         }
         if self.inspector.loading {
@@ -2073,38 +2461,24 @@ impl Explorer {
         if let Some(reason) = &self.live_watch_error {
             section = section.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(reason.clone()));
         }
-        let events: Vec<&filemanager_core::history::Event> = if self.feed.folder.as_ref() == Some(&current) { self.feed.events.iter().collect() } else { Vec::new() };
-        if events.is_empty() {
+        let rows: &[crate::feed::FeedRow] = if self.feed.folder.as_ref() == Some(&current) { &self.feed.rows } else { &[] };
+        if rows.is_empty() {
             return section.child(div().pt_1().text_size(px(12.)).text_color(rgb(TEXT_DIM))
                 .child("Изменений нет. Папка замечает изменения в папках, пока они открыты в ней; содержимое файлов не сохраняется."))
                 .into_any_element();
         }
-        // Saving a file again and again makes a run of the same entry:
-        // one row per run, with the count.
-        let mut rows: Vec<(&filemanager_core::history::Event, usize)> = Vec::new();
-        for event in events {
-            let plain = event.comment.trim().is_empty() && event.author.as_deref().is_none_or(str::is_empty);
-            if let Some((last, count)) = rows.last_mut() {
-                if plain && last.path == event.path && last.kind == event.kind && last.day_label() == event.day_label() {
-                    *count += 1;
-                    continue;
-                }
-            }
-            rows.push((event, 1));
-        }
         let mut day = String::new();
         let mut list = div().id("feed-list").max_h(px(420.)).overflow_y_scrollbar().flex().flex_col();
-        for (event, repeats) in rows {
-            let heading = event.day_label();
-            if heading != day {
+        for row in rows.iter().take(self.feed.shown) {
+            let event = &self.feed.events[row.index];
+            let repeats = row.repeats;
+            if row.day != day {
                 list = list.child(div().pt_2().pb_0p5().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT_MUTED)).child(heading.clone()));
-                day = heading;
+                    .text_color(rgb(TEXT_MUTED)).child(row.day.clone()));
+                day = row.day.clone();
             }
-            let name = browser::display_name(&event.path);
-            // Where in the folder, when not directly in it.
-            let place = event.path.parent().and_then(|parent| parent.strip_prefix(&current).ok())
-                .map(|relative| relative.display().to_string()).filter(|relative| !relative.is_empty());
+            let name = row.name.clone();
+            let place = row.place.clone();
             let tint = match event.kind.as_str() { "missing" => DANGER, "observed" | "version" => ACCENT, _ => TEXT_MUTED };
             let path = event.path.clone();
             let gone = event.kind == "missing";
@@ -2133,7 +2507,7 @@ impl Explorer {
                             this.edit_feed_comment(event_id, window, cx);
                         }))))
                 .child(div().flex().gap_1().min_w_0().text_size(px(11.))
-                    .child(div().flex_none().text_color(rgb(TEXT_DIM)).child(event.clock_label()))
+                    .child(div().flex_none().text_color(rgb(TEXT_DIM)).child(row.clock.clone()))
                     .child(div().flex_none().text_color(rgb(tint)).child(event.feed_label().to_owned()))
                     .when(repeats > 1, |row| row.child(div().flex_none().text_color(rgb(TEXT_DIM)).child(format!("×{repeats}"))))
                     .when_some(place, |row, place| row.child(div().min_w_0().truncate().text_color(rgb(TEXT_DIM)).child(format!("· {place}")))))
@@ -2150,30 +2524,40 @@ impl Explorer {
                             .on_click(cx.listener(|this, _, _, cx| this.save_feed_comment(cx))))));
             }
         }
+        let more = rows.len().saturating_sub(self.feed.shown);
+        if more > 0 {
+            list = list.child(div().pt_1().child(text_button("feed-more", format!("Показать ещё ({})", more.min(crate::feed::PAGE)), ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _, _, cx| this.show_more_feed(cx)))));
+        }
         section.child(list).into_any_element()
     }
 
     // -------------------------------------------------------- status bar
 
     fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // The project card covers the list: the bar speaks of the card.
+        let card = self.card_covers_list();
+        let card_summary = card.then(|| self.card_status()).flatten();
         let current = self.pane_path(self.active_side());
-        let count = self.folder_view(self.browser.active, &current).map(|(_, indices)| indices.len());
+        let count = if card { None } else { self.folder_view(self.browser.active, &current).map(|(_, indices)| indices.len()) };
         let marked = self.marked.len();
-        let selection = if marked > 1 { Some(format!("Выбрано: {marked}")) } else { self.selected.clone().and_then(|selected| {
+        let selection = if card { None } else if marked > 1 { Some(format!("Выбрано: {marked}")) } else { self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
             let (listing, _) = self.folder_view(self.browser.active, &folder)?;
-            listing.entries.iter().find(|entry| entry.path == selected).map(|entry| {
+            crate::keys::entry_at(&listing, &selected).map(|entry| {
                 if entry.is_directory { format!("Выбрано: {}", entry.name) }
                 else { format!("Выбрано: {} · {}", entry.name, format_size(entry.size)) }
             })
         }) };
-        let filter_shown = self.filter_open || !self.filter.is_empty();
+        let filter_shown = !card && (self.filter_open || !self.filter.is_empty());
         let split = self.browser.groups.len() > 1;
         let mut bar = div().w_full().h(px(32.)).flex_none().pl_1().pr_1().flex().items_center().gap_3()
             .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER))
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             // Atlas: a magnifier in the corner; the filter field opens in place.
-            .when(!filter_shown, |this| this.child(
+            .when_some(card_summary, |this, summary| this.child(div().flex().items_center().gap_2().pl_2()
+                .child(small_icon("fm/layers.svg", ACCENT)).child(summary)))
+            .when(!filter_shown && !card, |this| this.child(
                 bar_button("filter-open", "fm/search.svg", "Поиск во вложенных папках (Ctrl+F). Фильтр этой папки — просто начните набирать имя", false)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.key_find(&crate::keys::Find, window, cx);
@@ -2189,7 +2573,30 @@ impl Explorer {
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
             .when_some(count, |this, count| this.child(items_label(count)))
             .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
-            .when_some(self.label_filter(self.browser.active), |this, label| this.child(
+            // «Тип»: only drawings, PDF, … in this pane, in one click.
+            .when(!card, |this| this.child({
+                let active = self.kinds.get(self.browser.active).is_some();
+                let open = self.context_menu.as_ref().is_some_and(|menu| matches!(menu.target, MenuTarget::Kinds));
+                div().id("kind-filter").flex_none().size(px(24.)).rounded_sm().flex().items_center().justify_center()
+                    .cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
+                    .when(active || open, |button| button.bg(rgb(ACCENT_SOFT)))
+                    .when(!open, |button| button.tooltip(|window, cx| Tooltip::new("Показать только файлы одного типа: чертежи, PDF, документы…").build(window, cx)))
+                    .child(svg().path("fm/filter.svg").size(px(14.)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_menu(gpui::point(event.position.x, event.position.y - px(8.)), MenuTarget::Kinds, cx);
+                }))
+            }))
+            .when_some(self.kinds.get(self.browser.active).filter(|_| !card), |this, kind| this.child(
+                div().id("kind-filter-chip").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded(px(4.))
+                    .bg(rgb(HOVER)).text_color(rgb(TEXT))
+                    .child(format!("Только «{}»", kind.name()))
+                    .child(div().id("kind-filter-clear").size(px(16.)).rounded(px(4.)).flex().items_center().justify_center()
+                        .cursor_pointer().hover(|style| style.bg(rgb(PRESSED)))
+                        .child(small_icon("fm/x.svg", TEXT_MUTED))
+                        .tooltip(|window, cx| Tooltip::new("Показать файлы всех типов").build(window, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.set_kind_filter(None, cx))))))
+            .when_some(self.label_filter(self.browser.active).filter(|_| !card), |this, label| this.child(
                 div().id("label-filter").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded(px(4.))
                     .bg(rgb(HOVER)).text_color(rgb(TEXT))
                     .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(crate::labels::color(label))))
@@ -2208,7 +2615,7 @@ impl Explorer {
                 bar = bar.child(div().flex_none().flex().items_center().gap_2()
                     .child(div().w(px(140.)).h(px(6.)).rounded_full().bg(rgb(BORDER)).overflow_hidden()
                         .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT }))
-                            .w(gpui::relative(fraction.clamp(0.0, 1.0) as f32))))
+                            .w(gpui::relative(self.motion.bar().unwrap_or(fraction.clamp(0.0, 1.0) as f32)))))
                     .child(div().w(px(32.)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.0).floor() as u32))));
             }
             // With the transfer panel open its own buttons do this.
@@ -2223,11 +2630,11 @@ impl Explorer {
                     .child("Отменить передачу")
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx)))
             ); }
-        } else if let Some((items, _, _)) = self.transfers.retry.as_ref().filter(|_| !self.transfers.panel_visible()) {
+        } else if self.transfers.retry_count() > 0 && !self.transfers.panel_visible() {
             bar = bar.child(
                 div().id("retry-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
                     .hover(|style| style.bg(rgb(HOVER)))
-                    .child(format!("Повторить сбойные ({})", items.len()))
+                    .child(format!("Повторить сбойные ({})", self.transfers.retry_count()))
                     .tooltip(|window, cx| Tooltip::new("Снова скопировать или перенести файлы, которые не прошли, например при обрыве сети").build(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.retry_failed(cx)))
             );
@@ -2263,7 +2670,12 @@ impl Explorer {
             .child(bar_button("bar-columns", "fm/columns.svg", "Колонки (Ctrl+2)", self.miller(self.active_side()))
                 .on_click(cx.listener(|this, _, _, cx| this.set_view(true, false, cx))))
             .child(bar_button("bar-thumbs", "fm/grid.svg", "Миниатюры (Ctrl+3)", self.thumbs_view(self.active_side()))
-                .on_click(cx.listener(|this, _, _, cx| this.set_view(false, true, cx)))))
+                .on_click(cx.listener(|this, _, _, cx| this.set_view(false, true, cx))))
+            .child(bar_button("bar-manual-order", "fm/move.svg", "Ручной порядок файлов (версии отдельно)", self.manual_orders.enabled(&self.pane_path(self.active_side())))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let side=this.active_side();let enabled=!this.manual_orders.enabled(&this.pane_path(side));
+                    this.set_manual_order(side, enabled, cx);
+                }))))
     }
 
     // ------------------------------------------------------- context menu
@@ -2346,7 +2758,7 @@ impl Explorer {
         row
     }
 
-    fn context_menu_view(&self, menu: &ContextMenu, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn context_menu_view(&self, menu: &ContextMenu, phase:crate::popup_motion::Phase, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         // Never taller than the window: a long menu scrolls instead of
         // running past the bottom edge.
         let max_height = window.viewport_size().height - px(16.);
@@ -2359,6 +2771,31 @@ impl Explorer {
             }));
         let staged = self.zone.items().len();
         match &menu.target {
+            MenuTarget::Children(side, parent, next) => {
+                list = self.crumb_children(*side, parent, next.as_deref(), list, cx);
+            }
+            MenuTarget::Kinds => {
+                let chosen = self.kinds.get(self.browser.active);
+                let here = self.kinds_here();
+                if here.is_empty() && chosen.is_none() {
+                    list = list.child(div().h(px(28.)).px_2().flex().items_center().text_size(px(12.)).text_color(rgb(TEXT_DIM))
+                        .child("Здесь нет чертежей, PDF, документов, таблиц, изображений и архивов"));
+                }
+                for (index, (kind, count)) in here.into_iter().enumerate() {
+                    let current = chosen == Some(kind);
+                    list = list.child(div().id(("kind", index)).h(px(28.)).flex_none().px_2().flex().items_center().gap_2().rounded(px(4.))
+                        .text_size(px(13.)).text_color(rgb(TEXT)).cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
+                        .when(current, |row| row.bg(rgb(ACCENT_SOFT)))
+                        .child(small_icon(if current { "fm/check.svg" } else { "fm/filter.svg" }, if current { ACCENT } else { TEXT_MUTED }))
+                        .child(div().flex_1().min_w_0().truncate().child(kind.name()))
+                        .child(div().flex_none().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child(count.to_string()))
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_kind_filter((!current).then_some(kind), cx))));
+                }
+                if chosen.is_some() {
+                    list = list.child(Self::separator()).child(Self::menu_item("kind-all", "fm/x.svg", "Все типы", "", false, true)
+                        .on_click(cx.listener(|this, _, _, cx| this.set_kind_filter(None, cx))));
+                }
+            }
             MenuTarget::Recent(path) => {
                 let (open, tab, forget, star) = (path.clone(), path.clone(), path.clone(), path.clone());
                 list = list.child(Self::menu_item("recent-open","fm/folder-fill.svg","Открыть","",false,true)
@@ -2401,7 +2838,7 @@ impl Explorer {
             }
             MenuTarget::Entry(path) => {
                 let is_dir = self.dirs.cache.get(path.parent().unwrap_or(path))
-                    .and_then(|listing| listing.entries.iter().find(|e| &e.path == path).map(|e| e.is_directory))
+                    .and_then(|listing| crate::keys::entry_at(listing, path).map(|e| e.is_directory))
                     .unwrap_or(false);
                 let open_path = path.clone();
                 list = list.child(Self::menu_item("m-open", if is_dir { "fm/folder-fill.svg" } else { "fm/external.svg" },
@@ -2429,6 +2866,16 @@ impl Explorer {
                                 this.context_menu = None;
                                 this.open_in_other_pane(&other_path, cx);
                             })));
+                    // The pane shows a project: the folder can join its list.
+                    let project = self.browser.active_group().project.as_ref().map(|project| project.name.clone());
+                    if let Some(project) = project.filter(|_| !filemanager_core::archive::is_inside(path)) {
+                        let keep = path.clone();
+                        list = list.child(Self::menu_item("m-project-folder", "fm/layers.svg", format!("В папки проекта «{project}»"), "", false, true)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.context_menu = None;
+                                this.add_folder_to_project(&project, keep.clone(), cx);
+                            })));
+                    }
                 }
                 // Archives: the whole one next to it, or what is chosen inside
                 // one into the other pane.
@@ -2500,8 +2947,15 @@ impl Explorer {
                         .on_click(cx.listener({ let paths = copy_paths.clone(); move |this, _, _, cx| this.copy_paths(&paths, crate::CopyAs::Name, cx) })))
                     .when(is_dir || copy_paths.len() > 1, |list| {
                         // From the listing, not the disk: menus redraw every frame.
-                        let folders: Vec<PathBuf> = copy_paths.iter().filter(|p| self.dirs.cache.get(p.parent().unwrap_or(p))
-                            .is_some_and(|listing| listing.entries.iter().any(|e| &e.path == *p && e.is_directory))).cloned().collect();
+                        // Folder names per listing, once: the selection may be thousands.
+                        let mut folder_names: std::collections::HashMap<PathBuf, std::collections::HashSet<&str>> = Default::default();
+                        let folders: Vec<PathBuf> = copy_paths.iter().filter(|p| {
+                            let parent = p.parent().unwrap_or(p);
+                            let Some(listing) = self.dirs.cache.get(parent) else { return false };
+                            let names = folder_names.entry(parent.to_path_buf()).or_insert_with(|| listing.entries.iter()
+                                .filter(|e| e.is_directory).map(|e| e.name.as_str()).collect());
+                            crate::keys::listing_name(p).is_some_and(|name| names.contains(name.as_str()))
+                        }).cloned().collect();
                         let n = folders.len();
                         list.child(Self::menu_item("m-measure", "fm/drive.svg",
                             if n > 1 { format!("Посчитать размер ({n})") } else { "Посчитать размер".into() }, "", false, n > 0)
@@ -2556,6 +3010,17 @@ impl Explorer {
                                 this.context_menu = None;
                                 this.undo_last(cx);
                             })))
+                        .child(Self::separator());
+                }
+                // The pane shows a project: this folder can join its list.
+                let project = self.browser.active_group().project.as_ref().map(|project| project.name.clone());
+                if let Some(project) = project.filter(|_| !filemanager_core::archive::is_inside(folder)) {
+                    let keep = folder.clone();
+                    list = list.child(Self::menu_item("m-project-here", "fm/layers.svg", format!("Эту папку — в папки проекта «{project}»"), "", false, true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.context_menu = None;
+                            this.add_folder_to_project(&project, keep.clone(), cx);
+                        })))
                         .child(Self::separator());
                 }
                 list = list
@@ -2703,11 +3168,8 @@ impl Explorer {
                         }))));
             }
         }
-        let animated = list.with_animation(
-            ("menu-appear", menu.serial as usize),
-            motion(130),
-            |this, delta| this.opacity(delta).mt(px(-6. * (1. - delta))),
-        );
+        let animated=list.relative().opacity(phase.alpha).mt(px(-6.*(1.-phase.alpha)))
+            .when(phase.closing,|list|list.child(crate::popup_motion::shield()));
         deferred(anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(animated))
             .with_priority(1)
             .into_any_element()
@@ -2715,13 +3177,13 @@ impl Explorer {
 
     // ------------------------------------------------------------ dialogs
 
-    fn bulk_rename_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.bulk_rename_errors.is_empty() {
+    fn bulk_rename_dialog(&self, state:&crate::popup_motion::Bulk, phase:crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
+        if !state.errors.is_empty() {
             let mut rows = div().id("bulk-rename-errors").max_h(px(320.)).overflow_y_scrollbar()
                 .flex().flex_col().gap_2().text_size(px(12.));
-            for error in &self.bulk_rename_errors { rows = rows.child(error.clone()); }
-            return Some(div().id("bulk-rename-result").absolute().inset_0().flex().items_center().justify_center()
-                .bg(rgba(0x0000008C))
+            for error in state.errors.iter() { rows = rows.child(error.clone()); }
+            return div().id("bulk-rename-result").absolute().inset_0().flex().items_center().justify_center()
+                .bg(rgba(0x0000008C)).opacity(phase.alpha)
                 .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded(px(4.)).bg(rgb(RAISED))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child("Ошибки переименования группы")
@@ -2729,9 +3191,8 @@ impl Explorer {
                     .child("Завершённые действия можно отменить Ctrl+Z после закрытия этого списка.")
                     .child(text_button("bulk-result-close", "Закрыть", ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, window, cx| this.key_dismiss(&keys::DismissOverlay, window, cx)))))
-                .into_any_element());
+                .when(phase.closing,|view|view.child(crate::popup_motion::shield())).into_any_element();
         }
-        let state = self.bulk_rename.as_ref()?;
         let mut rows = div().id("bulk-rename-rows").max_h(px(320.)).overflow_y_scrollbar()
             .flex().flex_col().gap_2().p_2().rounded(px(4.)).bg(rgb(SURFACE));
         if state.loading { rows = rows.child("Проверка имён…"); }
@@ -2752,12 +3213,12 @@ impl Explorer {
                 .on_click(cx.listener(|this, _, window, cx| this.key_dismiss(&keys::DismissOverlay, window, cx))));
         if can_apply {
             buttons = buttons.child(text_button("bulk-apply", "Переименовать группу", ButtonKind::Primary)
-                .on_click(cx.listener(|this, _, _, cx| this.apply_bulk_rename(cx))));
+                .on_click(cx.listener(|this, _, window, cx| this.apply_bulk_rename(window, cx))));
         } else {
             buttons = buttons.child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Применение недоступно"));
         }
-        Some(div().id("bulk-rename-backdrop").absolute().inset_0().flex().items_center().justify_center()
-            .bg(rgba(0x0000008C))
+        div().id("bulk-rename-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C)).opacity(phase.alpha)
             .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded(px(6.))
                 .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2768,132 +3229,102 @@ impl Explorer {
                 .child(rows)
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM))
                     .child("Занятые имена и ошибки блокируют группу. Частичный успех можно отменить Ctrl+Z."))
-                .child(buttons))
-            .into_any_element())
+                .child(buttons).mt(px(6.*(1.-phase.alpha))))
+            .when(phase.closing,|view|view.child(crate::popup_motion::shield())).into_any_element()
     }
 
-    fn conflict_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (transfer, conflicts) = self.transfers.pending.as_ref()?;
-        let recycle = filemanager_core::path_utils::has_recycle_bin(&transfer.target);
-        let names: Vec<String> = conflicts.iter().take(4).map(|p| browser::display_name(p)).collect();
-        let more = conflicts.len().saturating_sub(names.len());
-        let mut list = div().flex().flex_col().gap_1().p_2().rounded(px(4.)).bg(rgb(SURFACE))
+    fn conflict_content(&self)->Option<crate::popup_motion::Conflict> {
+        let (transfer,conflicts)=self.transfers.pending.as_ref()?;
+        Some(crate::popup_motion::Conflict{
+            target:browser::display_name(&transfer.target),recycle:filemanager_core::path_utils::has_recycle_bin(&transfer.target),total:conflicts.len(),
+            lines:conflicts.iter().take(4).map(|c|(c.source_size.is_none()&&c.existing_size.is_none(),browser::display_name(&c.source),crate::transfers::conflict_note(c))).collect(),
+        })
+    }
+    fn conflict_dialog(&self,state:&crate::popup_motion::Conflict,phase:crate::popup_motion::Phase,cx:&mut Context<Self>)->AnyElement {
+        let recycle=state.recycle;
+        let mut list=div().flex().flex_col().gap_1().p_2().rounded(px(4.)).bg(rgb(SURFACE))
             .border_1().border_color(rgb(BORDER)).text_size(px(12.));
-        for name in names {
-            list = list.child(div().flex().items_center().gap_2()
-                .child(small_icon("fm/file.svg", TEXT_MUTED)).child(div().truncate().child(name)));
+        for (folder,name,note) in &state.lines {
+            list=list.child(div().flex().items_center().gap_2()
+                .child(small_icon(if *folder{"fm/folder-fill.svg"}else{"fm/file.svg"},TEXT_MUTED))
+                .child(div().flex().flex_col().min_w_0().child(div().truncate().child(name.clone()))
+                    .when(!note.is_empty(),|d|d.child(div().truncate().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(note.clone())))));
         }
-        if more > 0 {
-            list = list.child(div().text_color(rgb(TEXT_DIM)).child(format!("и ещё {more}")));
-        }
-        let dialog = div().id("conflict-dialog").w(px(460.)).p_4().flex().flex_col().gap_3()
-            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(format!("Совпадают имена: {}", conflicts.len())))
-            .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                .child(format!("В папке «{}» уже есть объекты с такими именами. {} Каталоги не заменяются.",
-                    browser::display_name(&transfer.target),
-                    if recycle { "При замене прежние файлы отправляются в Корзину." }
-                    else { "Здесь нет Корзины (сетевая папка или съёмный диск): прежние файлы заменятся безвозвратно, как в Проводнике." })))
+        let more=state.total.saturating_sub(state.lines.len());
+        if more>0 {list=list.child(div().text_color(rgb(TEXT_DIM)).child(format!("и ещё {more}")));}
+        let dialog=div().id("conflict-dialog").w(px(460.)).p_4().flex().flex_col().gap_3()
+            .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).mt(px(6.*(1.-phase.alpha)))
+            .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
+            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Совпадают имена: {}",state.total)))
+            .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("В папке «{}» уже есть объекты с такими именами. {} Каталоги не заменяются.",state.target,
+                if recycle{"При замене прежние файлы отправляются в Корзину."}else{"Здесь нет Корзины (сетевая папка или съёмный диск): прежние файлы заменятся безвозвратно, как в Проводнике."})))
             .child(list)
-            .child(text_button("conflict-replace", if recycle { "Заменить файлы — прежние в Корзину" } else { "Заменить файлы безвозвратно" }, ButtonKind::Ghost)
-                .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Replace, cx))))
+            .child(text_button("conflict-replace",if recycle{"Заменить файлы — прежние в Корзину"}else{"Заменить файлы безвозвратно"},ButtonKind::Ghost)
+                .on_click(cx.listener(|this,_,_,cx|this.resolve_transfer(crate::ConflictChoice::Replace,cx))))
             .child(div().flex().justify_end().gap_2()
-                .child(text_button("conflict-cancel", "Отмена", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Cancel, cx))))
-                .child(text_button("conflict-skip", "Пропустить", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Skip, cx))))
-                .child(text_button("conflict-keep", "Сохранить оба", ButtonKind::Primary)
-                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::KeepBoth, cx)))))
-            .with_animation("conflict-appear",
-                motion(150),
-                |this, delta| this.opacity(delta).mt(px(12. * (1. - delta))));
-        Some(
-            div().id("conflict-backdrop").absolute().inset_0().flex().items_center().justify_center()
-                .bg(rgba(0x0000008C))
-                .child(dialog)
-                .into_any_element()
-        )
+                .child(text_button("conflict-cancel","Отмена",ButtonKind::Ghost).on_click(cx.listener(|this,_,_,cx|this.resolve_transfer(crate::ConflictChoice::Cancel,cx))))
+                .child(text_button("conflict-skip","Пропустить",ButtonKind::Ghost).on_click(cx.listener(|this,_,_,cx|this.resolve_transfer(crate::ConflictChoice::Skip,cx))))
+                .child(text_button("conflict-keep","Сохранить оба",ButtonKind::Primary).on_click(cx.listener(|this,_,_,cx|this.resolve_transfer(crate::ConflictChoice::KeepBoth,cx)))));
+        div().id("conflict-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C)).opacity(phase.alpha).child(dialog)
+            .when(phase.closing,|view|view.child(crate::popup_motion::shield())).into_any_element()
     }
 
-    fn dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (title, body, confirm, kind): (&str, AnyElement, &str, ButtonKind) = if let Some(error)=&self.close_error {
-            ("Сеанс не сохранён", div().flex().flex_col().gap_2()
+    fn dialog_content(&self)->Option<crate::popup_motion::Prompt> {
+        use crate::popup_motion::Prompt::*;
+        if let Some(error)=&self.close_error {Some(CloseError(error.clone()))}
+        else if self.creating_folder {Some(NewItem{file:self.creating_file,path:self.pane_path(self.active_side()).display().to_string()})}
+        else if self.saving_workspace {Some(Project{count:self.browser.active_group().tabs.len(),error:self.project_error.clone()})}
+        else {self.confirm_recycle.as_ref().map(|plans|Delete{
+            what:match plans.as_slice(){[(path,_) ]=>format!("«{}»",browser::display_name(path)),many=>format!("Элементов: {} («{}» и другие)",many.len(),many.first().map(|(p,_)|browser::display_name(p)).unwrap_or_default())},
+            permanent:plans.iter().filter(|(_,plan)|plan.action==filemanager_core::operations::Action::Delete).count(),total:plans.len(),
+        })}
+    }
+
+    fn dialog(&self,state:&crate::popup_motion::Prompt,phase:crate::popup_motion::Phase,cx:&mut Context<Self>)->AnyElement {
+        use crate::popup_motion::Prompt::*;
+        let (title,body,confirm,kind):(&str,AnyElement,&str,ButtonKind)=match state {
+            CloseError(error)=>("Сеанс не сохранён",div().flex().flex_col().gap_2()
                 .child("Остаться и повторить сохранение или закрыть окно без сохранения последних изменений?")
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(error.clone()))
-                .into_any_element(), "Закрыть без сохранения", ButtonKind::Danger)
-        } else if self.creating_folder {
-            (if self.creating_file { "Новый файл" } else { "Новая папка" }, div().flex().flex_col().gap_2()
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(format!("В папке: {}", self.pane_path(self.active_side()).display())))
-                .child(Input::new(&self.folder_input)).into_any_element(), "Создать", ButtonKind::Primary)
-        } else if self.saving_workspace {
-            ("Создать проект", div().flex().flex_col().gap_2()
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(format!("Вкладки активной панели: {}", self.browser.active_group().tabs.len())))
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(error.clone())).into_any_element(),"Закрыть без сохранения",ButtonKind::Danger),
+            NewItem{file,path}=>(if *file{"Новый файл"}else{"Новая папка"},div().flex().flex_col().gap_2()
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("В папке: {path}")))
+                .child(Input::new(&self.folder_input)).into_any_element(),"Создать",ButtonKind::Primary),
+            Project{count,error}=>("Создать проект",div().flex().flex_col().gap_2()
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("Вкладки активной панели: {count}")))
                 .child(Input::new(&self.workspace_input))
-                .when_some(self.project_error.clone(), |body,error|body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error)))
-                .into_any_element(), "Сохранить", ButtonKind::Primary)
-        } else if let Some(plans) = &self.confirm_recycle {
-            let what = match plans.as_slice() {
-                [(path, _)] => format!("«{}»", browser::display_name(path)),
-                many => format!("Элементов: {} («{}» и другие)", many.len(),
-                    many.first().map(|(p, _)| browser::display_name(p)).unwrap_or_default()),
-            };
-            let permanent = plans.iter().filter(|(_, plan)| plan.action == filemanager_core::operations::Action::Delete).count();
-            let (title, note, confirm) = if permanent == 0 {
-                ("Удалить в Корзину?", "Объект можно будет восстановить из Корзины Windows.".to_owned(), "В Корзину")
-            } else if permanent == plans.len() {
-                ("Удалить безвозвратно?", "Здесь нет Корзины Windows (сетевая папка или съёмный диск). \
-                    Удалённое нельзя будет восстановить, Ctrl+Z не поможет.".to_owned(), "Удалить навсегда")
-            } else {
-                ("Удалить?", format!("{permanent} из {} — в папках без Корзины Windows: они будут удалены \
-                    безвозвратно. Остальные — в Корзину.", plans.len()), "Удалить")
-            };
-            (title, div().flex().flex_col().gap_1().text_size(px(13.))
-                .child(div().text_color(rgb(TEXT)).child(what))
-                .child(div().text_size(px(12.)).text_color(rgb(if permanent == 0 { TEXT_MUTED } else { DANGER })).child(note))
-                .into_any_element(), confirm, ButtonKind::Danger)
-        } else {
-            return None;
+                .when_some(error.clone(),|body,error|body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error)))
+                .into_any_element(),"Сохранить",ButtonKind::Primary),
+            Delete{what,permanent,total}=>{
+                let (title,note,confirm)=if *permanent==0 {("Удалить в Корзину?","Объект можно будет восстановить из Корзины Windows.".to_owned(),"В Корзину")}
+                    else if permanent==total {("Удалить безвозвратно?","Здесь нет Корзины Windows (сетевая папка или съёмный диск). Удалённое нельзя будет восстановить, Ctrl+Z не поможет.".to_owned(),"Удалить навсегда")}
+                    else {("Удалить?",format!("{permanent} из {total} — в папках без Корзины Windows: они будут удалены безвозвратно. Остальные — в Корзину."),"Удалить")};
+                (title,div().flex().flex_col().gap_1().text_size(px(13.))
+                    .child(div().text_color(rgb(TEXT)).child(what.clone()))
+                    .child(div().text_size(px(12.)).text_color(rgb(if *permanent==0{TEXT_MUTED}else{DANGER})).child(note)).into_any_element(),confirm,ButtonKind::Danger)
+            }
         };
-        let dialog = div().id("dialog").w(px(420.)).p_4().flex().flex_col().gap_3()
+        let dialog=div().id("dialog").w(px(420.)).p_4().flex().flex_col().gap_3()
             .rounded(px(4.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .mt(px(6.*(1.-phase.alpha)))
+            .on_mouse_down(MouseButton::Left,|_,_,cx|cx.stop_propagation())
             .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(body)
             .child(div().flex().justify_end().gap_2()
-                .child(text_button("dialog-cancel", "Отмена", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.key_dismiss(&keys::DismissOverlay, window, cx);
-                    })))
-                .child(text_button("dialog-confirm", confirm, kind)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.close_error.take().is_some() {
-                            this.close_document_preview(cx);window.remove_window();return;
-                        } else if this.saving_workspace {
-                            this.save_named_workspace(cx);
-                        } else if this.creating_folder {
-                            this.create_folder(cx);
-                        } else {
-                            this.recycle(cx);
-                        }
-                        let handle = this.focus_handle.clone();
-                        window.focus(&handle, cx);
-                    }))))
-            .with_animation("dialog-appear",
-                motion(150),
-                |this, delta| this.opacity(delta).mt(px(12. * (1. - delta))));
-        Some(
-            div().id("dialog-backdrop").absolute().inset_0().flex().items_center().justify_center()
-                .bg(rgba(0x0000008C))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                    this.key_dismiss(&keys::DismissOverlay, window, cx);
-                }))
-                .child(dialog)
-                .into_any_element()
-        )
+                .child(text_button("dialog-cancel","Отмена",ButtonKind::Ghost)
+                    .on_click(cx.listener(|this,_,window,cx|this.key_dismiss(&keys::DismissOverlay,window,cx))))
+                .child(text_button("dialog-confirm",confirm,kind)
+                    .on_click(cx.listener(|this,_,window,cx|{
+                        if this.close_error.take().is_some(){this.close_document_preview(cx);window.remove_window();return;}
+                        else if this.saving_workspace{this.save_named_workspace(cx);}
+                        else if this.creating_folder{this.create_folder(cx);}
+                        else{this.recycle(cx);}
+                        window.focus(&this.focus_handle,cx);
+                    }))));
+        div().id("dialog-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C)).opacity(phase.alpha)
+            .on_mouse_down(MouseButton::Left,cx.listener(|this,_,window,cx|this.key_dismiss(&keys::DismissOverlay,window,cx)))
+            .child(dialog).when(phase.closing,|surface|surface.child(crate::popup_motion::shield())).into_any_element()
     }
 }
 
@@ -2902,7 +3333,12 @@ impl Render for Explorer {
         #[cfg(windows)]
         if self.hwnd.is_none() { self.hwnd = crate::window_hwnd(window); }
         if self.interface_focus_pending {self.interface_focus_pending=false;window.focus(&self.focus_handle,cx);}
+        let tab_counts=self.browser.groups.iter().map(|g|(g.id,g.tabs.len())).collect::<Vec<_>>();
+        if self.motion.tab_reorder.invalidate_changed_counts(&tab_counts) {cx.stop_active_drag(window);}
         self.validate_marquee(cx);
+        self.motion.progress(self.transfers.fraction);
+        let edge_moving = self.edge_scroll_frame(cx);
+        if self.motion.wants_frame(self.transfers.fraction) || self.spring_filling() || edge_moving { window.request_animation_frame(); }
         if self.clear_filter {
             self.clear_filter = false;
             self.filter.clear();
@@ -2930,50 +3366,114 @@ impl Render for Explorer {
         }
 
         let window_width=window.viewport_size().width/px(1.);
-        let sidebar_width=if self.show_sidebar {SIDEBAR_WIDTH} else {0.};
-        let inspector_width=if self.show_inspector {300.} else {0.};
+
+        let desired=if self.motion.layout.inspector_width>0. {self.motion.layout.inspector_width}else{300.};
+
+        let viewport=(window_width as u32,(window.viewport_size().height/px(1.)) as u32);
+        let resizing=self.motion.layout.drag.is_some();
+        let window_changed=self.motion.layout.window_changed(viewport);
+        let instant=!crate::theme::animations() || window_changed || resizing || self.file_drag || self.renaming || self.marquee.is_some();
+        let (sidebar_width,sidebar_moving)=self.motion.layout.sidebar.sample(if self.show_sidebar {SIDEBAR_WIDTH}else{0.},
+            instant || !self.motion.layout.sidebar_initialized,std::time::Instant::now(),180);
+        self.motion.layout.sidebar_initialized=true;
+        if sidebar_moving {window.request_animation_frame();}
+        let desired=desired.min((window_width-sidebar_width-240.).max(0.));
+        let (inspector_width,panel_moving)=self.motion.layout.inspector.sample(if self.show_inspector {desired}else{0.},instant,
+            std::time::Instant::now(),160);
+        if panel_moving {window.request_animation_frame();}
         let pane_width=(window_width-sidebar_width-inspector_width).max(240.);
         self.pane_width=pane_width/self.browser.groups.len() as f32;
-        let height=(window.viewport_size().height/px(1.)-64.).max(240.);
-        let group_id=format!("main-{}-{}-{}",self.browser.signature(),self.show_inspector,self.search.active);
-        let mut panels=h_resizable(SharedString::from(group_id));
         let body=if self.search.active {self.search_results(cx).into_any_element()} else {
-            self.layout_view(&self.browser.root.clone(),Vec::new(),pane_width,height,cx)
+            self.layout_view(&self.browser.root.clone(),viewport,instant,cx)
         };
-        panels=panels.child(resizable_panel().size(px(pane_width)).size_range(px(240.)..px(10000.)).child(body));
-        if self.show_inspector {
-            panels = panels.child(resizable_panel().size(px(inspector_width)).size_range(px(220.)..px(520.))
-                .child(self.inspector(cx)));
+        let mut panels=div().id("workspace-panels").size_full().flex().min_w_0().min_h_0()
+            .child(div().id("workspace-body").flex_1().min_w_0().min_h_0().overflow_hidden().child(body));
+        if self.show_inspector || panel_moving {
+            let opacity=if desired>0. {(inspector_width/desired).clamp(0.,1.)}else{1.};
+            let inspector=self.inspector(cx);
+            panels=panels.child(div().id("inspector-shell").relative().w(px(inspector_width)).flex_none().h_full().overflow_hidden()
+                .child(div().w(px(desired)).h_full().opacity(opacity).child(inspector))
+                .child(div().id("inspector-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
+                    .hover(|v|v.bg(rgb(BORDER_STRONG)))
+                    .on_mouse_down(MouseButton::Left,cx.listener(move|this,event:&MouseDownEvent,_,cx|{
+                        cx.stop_propagation();if this.interface_modal(){return;}
+                        this.motion.layout.drag=Some(crate::layout_motion::Drag::Inspector{start:event.position.x/px(1.),width:desired});
+                    }))));
         }
 
+        // Something that learnt only while drawing that it moves (the tab
+        // line) asks here for the next frame.
+        let late = self.motion.late_frame.clone();
+        let late_frame = gpui::canvas(move |_, window, _| { if late.replace(false) { window.request_animation_frame(); } }, |_, _, _, _| {})
+            .absolute().size_0();
         let mut root = div().relative().size_full().flex().flex_col().bg(rgb(WINDOW))
+            .child(late_frame)
             .text_color(rgb(TEXT)).text_size(px(13.))
             .key_context("Filemanager")
+            .capture_key_down(cx.listener(|this,event:&gpui::KeyDownEvent,_,cx|{
+                let held=&this.motion.surfaces;
+                let closing=crate::popup_motion::blocks_input(&[
+                    (this.version_editing.is_some(),held.versions.retained()),
+                    (this.palette.is_some()||this.settings.is_some(),held.interface.closing||held.palette.is_some()||held.settings.is_some()),
+                    (this.tour.is_some(),held.tour.retained()),
+                    (this.updates.dialog,held.update.retained()),
+                    (this.about_open,held.about.retained()),
+                    (this.comparison.is_some(),held.comparison.retained()),
+                    (this.quick_look.is_some(),false),
+                    (this.bulk_rename.is_some()||!this.bulk_rename_errors.is_empty(),held.bulk.retained()),
+                    (this.transfers.pending.is_some(),held.conflict.retained()),
+                    (this.dialog_content().is_some(),held.prompt.retained()),
+                    (this.context_menu.is_some(),held.menu.retained()),
+                ]);
+                let reopen=event.keystroke.modifiers.control && matches!(event.keystroke.key.as_str(),"k"|"p"|",");
+                if closing && !reopen {cx.stop_propagation();}
+            }))
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this,_: &keys::PaletteEnter,window,cx|this.palette_enter(window,cx)))
             .on_action(cx.listener(|this,_: &keys::SettingsToggle,_,cx|this.settings_toggle(cx)))
             .on_action(cx.listener(|this,_: &keys::SettingsApply,_,cx|this.apply_settings(cx)))
             .on_drag_move::<TabDrag>(cx.listener(|this,event: &gpui::DragMoveEvent<TabDrag>,_,cx| {
                 this.file_drag = false;
+                this.manual_drag.pointer = None;
+                if this.motion.tab_reorder.target.is_some_and(|target|this.tab_scroll.get(&target.to).is_none_or(|scroll|!scroll.bounds().contains(&event.event.position))) {
+                    if this.motion.tab_reorder.clear() {cx.notify();}
+                }
                 if !this.pane_bounds.values().any(|bounds|bounds.contains(&event.event.position)) && this.dock_hover.take().is_some() {cx.notify();}
             }))
             // Leaving the window hands the files to Windows for other programs.
+            // Ctrl or Shift pressed mid-drag: the word on the files changes at once.
+            .on_modifiers_changed(cx.listener(|this,_: &gpui::ModifiersChangedEvent,window,cx| {
+                if this.dragging_files(cx) {
+                    let modifiers=window.modifiers();
+                    this.manual_drag.transfer_modifier=modifiers.control || modifiers.shift;
+                    window.refresh();
+                }
+            }))
             .on_drag_move::<ExternalPaths>(cx.listener(|this,_: &gpui::DragMoveEvent<ExternalPaths>,_,_| {
                 this.file_drag = true;
                 this.drag_paths.clear();
+                this.manual_drag.pointer = None;
             }))
             .on_drag_move::<FileDragInfo>(cx.listener(|this,event: &gpui::DragMoveEvent<FileDragInfo>,window,cx| {
                 this.file_drag = true;
                 let paths = &event.drag(cx).paths;
                 if &this.drag_paths != paths { this.drag_paths = paths.clone(); }
+                let modifiers=window.modifiers();
+                this.manual_drag.transfer_modifier=modifiers.control || modifiers.shift;
+                let pointer=event.drag(cx).source.clone().filter(|(_,folder)| this.manual_orders.enabled(folder))
+                    .map(|source|crate::manual_drag::Pointer{source,position:event.event.position});
+                if pointer!=this.manual_drag.pointer {this.manual_drag.pointer=pointer;cx.notify();}
                 if outside_window(event.event.position, window) {
                     let paths = event.drag(cx).paths.clone();
+                    this.manual_drag.pointer=None;
                     this.drag_out(paths, window, cx);
                 }
             }))
             .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,window,cx| {
                 // Root runs after rows and columns: they have claimed the target.
                 this.spring_settle();
+                this.edge_scroll_settle();
+                this.drag_target_settle();
                 if let Some(drag) = this.right_drag.as_mut() {
                     if event.pressed_button == Some(MouseButton::Right) {
                         if drag.active && outside_window(event.position, window) {
@@ -2989,6 +3489,19 @@ impl Render for Explorer {
                         if drag.active { cx.notify(); }
                         return;
                     }
+                }
+                if let Some(drag)=&this.motion.layout.drag {
+                    if !event.dragging() {this.motion.layout.drag=None;return;}
+                    match drag {
+                        crate::layout_motion::Drag::Inspector{start,width}=>{
+                            this.motion.layout.inspector_width=(*width+*start-event.position.x/px(1.)).clamp(220.,520.);
+                        }
+                        crate::layout_motion::Drag::Split{path,axis,start,ratio,span}=>{
+                            let at=if *axis==Axis::Horizontal{event.position.x/px(1.)}else{event.position.y/px(1.)};
+                            this.browser.set_ratio(path,(*ratio+(at-*start)/span.max(1.)).clamp(0.15,0.85));
+                        }
+                    }
+                    cx.notify();return;
                 }
                 if let Some((side, index, start, width)) = this.list_resize {
                     if !event.dragging() { this.finish_list_resize(); return; }
@@ -3009,8 +3522,8 @@ impl Render for Explorer {
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.motion.tab_reorder.clear();this.file_drag=false;this.manual_drag.pointer=None;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.motion.tab_reorder.clear();this.file_drag=false;this.manual_drag.pointer=None;this.motion.layout.drag=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,window,cx| {
                 let Some(drag)=this.right_drag.take() else {return};
                 if !drag.active && event.modifiers.shift {
@@ -3037,20 +3550,20 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,_: &keys::LabelObsolete,_,cx| this.key_label(Some(Label::Obsolete), cx)))
             .on_action(cx.listener(|this,_: &keys::LabelImportant,_,cx| this.key_label(Some(Label::Important), cx)))
             .on_action(cx.listener(|this,_: &keys::LabelClear,_,cx| this.key_label(None, cx)))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_back(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_forward(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_up(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_back(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_forward(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_up(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_new_tab(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_close_tab(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_next_tab(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_prev_tab(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_split(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_refresh(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_stage(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_find(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_stage(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_find(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_address(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_rename(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_new_folder(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_rename(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_new_folder(this,event,window,cx); } }))
             // Only from the file list: a rename or a filter being typed
             // never sends files elsewhere.
             .on_action(cx.listener(|this,_: &keys::NewFile,window,cx| { if this.list_focused(window) { this.begin_new_file(window,cx); } }))
@@ -3059,16 +3572,18 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,_: &keys::Terminal,window,cx| { if this.list_focused(window) { this.open_terminal(false,cx); } }))
             .on_action(cx.listener(|this,_: &keys::TerminalAdmin,window,cx| { if this.list_focused(window) { this.open_terminal(true,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { Self::key_dismiss(this,event,window,cx); }))
-            .on_action(cx.listener(|this,event,window,cx| { Self::key_select_next(this,event,window,cx); }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_filter_enter(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_filter_search(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { Self::key_select_prev(this,event,window,cx); }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_first(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_last(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_open(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_column_left(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_column_right(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_recycle(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.card_covers_list() || this.palette.is_some() || this.settings.is_some() { Self::key_select_next(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_filter_enter(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_filter_search(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.card_covers_list() || this.palette.is_some() || this.settings.is_some() { Self::key_select_prev(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_first(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_page_down(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_page_up(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_last(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_open(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_column_left(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_column_right(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_recycle(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_toggle_hidden(this,event,window,cx); } }))
             .on_action(cx.listener(|this,_: &keys::SplitRight,window,cx| {if !this.interface_modal() {this.split_group(this.browser.active,Edge::Right,None,window,cx);}}))
             .on_action(cx.listener(|this,_: &keys::SplitDown,window,cx| {if !this.interface_modal() {this.split_group(this.browser.active,Edge::Bottom,None,window,cx);}}))
@@ -3085,18 +3600,18 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_view_list(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_view_columns(this,event,window,cx); } }))
             .on_action(cx.listener(|this,_: &keys::ViewThumbs,_,cx| { if !this.interface_modal() { this.set_view(false,true,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_copy_path(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_all(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_clipboard_copy(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_clipboard_cut(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_clipboard_paste(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_copy_path(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_select_all(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_clipboard_copy(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_clipboard_cut(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_clipboard_paste(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_undo(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_extend_next(this,event,window,cx); } }))
-            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_extend_prev(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_extend_next(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() && !this.card_covers_list() { Self::key_extend_prev(this,event,window,cx); } }))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 // Only when the file panes have focus, never inside inputs.
                 let modifiers = event.keystroke.modifiers;
-                if this.interface_modal() || !this.focus_handle.is_focused(window)
+                if this.interface_modal() || !this.focus_handle.is_focused(window) || this.card_covers_list()
                     || modifiers.control || modifiers.alt || modifiers.platform {
                     return;
                 }
@@ -3120,21 +3635,37 @@ impl Render for Explorer {
             // Atlas: the sidebar runs the full height; tabs, navigation,
             // panes and the bottom bar sit to its right.
             .child(div().flex_1().min_h_0().w_full().flex()
-                .when(self.show_sidebar, |row| row.child(self.sidebar(cx)))
+                .when(self.show_sidebar || sidebar_moving, |row| row.child(
+                    div().id("sidebar-shell").w(px(sidebar_width)).flex_none().h_full().overflow_hidden()
+                        .child(self.sidebar(cx))))
                 .child(div().flex_1().min_w_0().h_full().flex().flex_col()
                     .child(self.title_bar(window,cx))
                         .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
                     .child(self.status_bar(cx))));
-        if let Some(menu) = self.context_menu.clone() {
-            root = root.child(self.context_menu_view(&menu, window, cx));
+        let now=std::time::Instant::now();let animate=crate::theme::animations();
+        if self.context_menu.is_none() && (self.palette.is_some() || self.settings.is_some() || self.dialog_content().is_some() || self.tour.is_some() || self.comparison.is_some() || self.about_open || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty() || self.transfers.pending.is_some() || self.updates.dialog || self.version_editing.is_some()) {
+            self.motion.surfaces.menu=Default::default();
         }
-        if let Some(dialog) = self.dialog(cx) {
-            root = root.child(dialog);
+        if let Some((menu,phase))=self.motion.surfaces.menu.sample_identity(self.context_menu.clone().map(|menu|(menu.serial,menu)),now,animate) {
+            if phase.active {window.request_animation_frame();}
+            root=root.child(self.context_menu_view(&menu,phase,window,cx));
         }
-        if let Some(dialog) = self.conflict_dialog(cx) {
-            root = root.child(dialog);
+        let prompt=self.dialog_content();
+        if let Some((state,phase))=self.motion.surfaces.prompt.sample(prompt,now,animate) {
+            if phase.active {window.request_animation_frame();}
+            root=root.child(self.dialog(&state,phase,cx));
         }
-        if let Some(dialog) = self.bulk_rename_dialog(cx) { root = root.child(dialog); }
+        let conflict=self.conflict_content();
+        if let Some((state,phase))=self.motion.surfaces.conflict.sample(conflict,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.conflict_dialog(&state,phase,cx));
+        }
+        let bulk=(self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty()).then(||crate::popup_motion::Bulk{
+            preview:self.bulk_rename.as_ref().and_then(|s|s.preview.clone()),loading:self.bulk_rename.as_ref().is_some_and(|s|s.loading),
+            error:self.bulk_rename.as_ref().and_then(|s|s.error.clone()),errors:self.bulk_rename_errors.clone(),
+        });
+        if let Some((state,phase))=self.motion.surfaces.bulk.sample(bulk,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.bulk_rename_dialog(&state,phase,cx));
+        }
         if let Some(rect)=self.marquee_rectangle() {root=root.child(rect);}
         if let Some(drag)=self.right_drag.as_ref().filter(|drag| drag.active) {
             let name = match drag.paths.as_slice() {
@@ -3146,14 +3677,43 @@ impl Render for Explorer {
                 .text_color(rgb(SELECTION_TEXT)).text_size(px(13.)).child(name));
         }
         self.follow_quick_look(cx);
-        if self.quick_look.is_some() { root=root.child(self.quick_look_view(cx)); }
-        if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
-        if self.about_open { root=root.child(self.about_panel(cx)); }
-        if let Some(panel)=self.transfer_panel(cx) { root=root.child(panel); }
-        if let Some(dialog)=self.update_dialog(cx) { root=root.child(dialog); }
-        if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
-        if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
-        if let Some(dialog)=self.version_rules_dialog(cx) { root=root.child(dialog); }
+        self.prepare_quick_look(window,cx);
+        if let Some(look)=self.quick_look.as_mut() {
+            let (shell,content,loading,active,finished)=look.sample(std::time::Instant::now(),crate::theme::animations());
+            if active {window.request_animation_frame();}
+            if finished {self.quick_look=None;} else {root=root.child(self.quick_look_view(shell,content,loading,cx));}
+        }
+        if let Some((state,phase))=self.motion.surfaces.comparison.sample(self.comparison.clone(),now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.comparison_view(&state,phase,cx));
+        }
+        if let Some((_,phase))=self.motion.surfaces.about.sample(self.about_open.then_some(()),now,animate) {
+            if phase.active {window.request_animation_frame();}
+            root=root.child(self.about_panel(phase,cx));
+        }
+        let transfer=self.transfer_panel_presentation(self.motion.surfaces.transfer.last());
+        if let Some((state,phase))=self.motion.surfaces.transfer.sample(transfer,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.transfer_panel(&state,phase,cx));
+        }
+        let update=(self.updates.dialog && !matches!(self.updates.phase,crate::updates::Phase::Idle|crate::updates::Phase::Checking)).then(||self.updates.phase.clone());
+        if let Some((state,phase))=self.motion.surfaces.update.sample(update,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.update_dialog(&state,phase,cx));
+        }
+        if let Some((step,phase))=self.motion.surfaces.tour.sample(self.tour,now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.tour_view(step,phase,cx));
+        }
+        let live_interface=self.palette.is_some() || self.settings.is_some();
+        let replaced=self.about_open || self.tour.is_some() || self.comparison.is_some() || self.creating_folder || self.saving_workspace || self.confirm_recycle.is_some() || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty() || self.transfers.pending.is_some() || self.updates.dialog;
+        if live_interface || replaced {self.motion.surfaces.palette=None;self.motion.surfaces.settings=None;}
+        if replaced && !live_interface {self.motion.surfaces.interface=Default::default();}
+        if let Some(phase)=self.motion.surfaces.interface.sample(live_interface,now,animate) {
+            if phase.active {window.request_animation_frame();}
+            let palette=self.palette.as_ref().or(self.motion.surfaces.palette.as_ref());
+            let settings=self.settings.as_ref().or(self.motion.surfaces.settings.as_ref());
+            if let Some(overlay)=self.interface_overlay(palette,settings,phase,cx) {root=root.child(overlay);}
+        } else {self.motion.surfaces.palette=None;self.motion.surfaces.settings=None;}
+        if let Some((state,phase))=self.motion.surfaces.versions.sample(self.version_editing.clone(),now,animate) {
+            if phase.active {window.request_animation_frame();}root=root.child(self.version_rules_dialog(&state,phase,cx));
+        }
         root
     }
 }

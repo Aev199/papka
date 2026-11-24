@@ -16,6 +16,17 @@ pub struct WorkspaceStore {
     path: PathBuf,
 }
 
+/// "p-" and 16 hex digits, unlike any other project's: the name, the
+/// time and the process's own random seed go into it.
+fn new_project_id(name: &str) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write(name.as_bytes());
+    hasher.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.as_nanos()));
+    hasher.write_u32(std::process::id());
+    format!("p-{:016x}", hasher.finish())
+}
+
 fn db_error(err: rusqlite::Error) -> io::Error {
     io::Error::other(err)
 }
@@ -124,6 +135,7 @@ impl WorkspaceStore {
             CREATE TABLE IF NOT EXISTS project_session (id INTEGER PRIMARY KEY CHECK(id=1),name TEXT);
             CREATE TABLE IF NOT EXISTS app_flags (name TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS app_values (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS project_info (name TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, root TEXT);
             CREATE TABLE IF NOT EXISTS pane_projects (
                 workspace_name TEXT NOT NULL, group_id INTEGER NOT NULL, project TEXT NOT NULL,
                 previous_active INTEGER NOT NULL, previous_miller INTEGER NOT NULL,
@@ -303,7 +315,33 @@ impl WorkspaceStore {
         Self::valid_name(name)?;
         let conn = self.connection()?;
         let removed = conn.execute("DELETE FROM workspaces WHERE name=?1", params![name]).map_err(db_error)?;
+        // The project's card goes with it: a new project of the same name
+        // starts with a clean one.
+        conn.execute("DELETE FROM app_values WHERE name=?1", params![crate::project_card::storage_key(name)]).map_err(db_error)?;
+        conn.execute("DELETE FROM project_info WHERE name=?1", params![name]).map_err(db_error)?;
         Ok(removed > 0)
+    }
+
+    /// A project's lasting number and the object's folder set by hand. The
+    /// number is made the first time it is asked for and never changes:
+    /// other programs refer to the project by it, not by its name.
+    pub fn project_identity(&self, name: &str) -> io::Result<(String, Option<PathBuf>)> {
+        Self::valid_name(name)?;
+        let conn = self.connection()?;
+        let found = conn.query_row("SELECT id,root FROM project_info WHERE name=?1", params![name],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))).optional().map_err(db_error)?;
+        if let Some((id, root)) = found { return Ok((id, root.map(PathBuf::from))); }
+        let id = new_project_id(name);
+        conn.execute("INSERT INTO project_info(name,id,root) VALUES(?1,?2,NULL)", params![name, id]).map_err(db_error)?;
+        Ok((id, None))
+    }
+
+    /// Sets (or with `None` clears) the object's folder of a project.
+    pub fn set_project_root(&self, name: &str, root: Option<&Path>) -> io::Result<()> {
+        self.project_identity(name)?;
+        self.connection()?.execute("UPDATE project_info SET root=?2 WHERE name=?1",
+            params![name, root.map(|root| root.to_string_lossy().into_owned())]).map_err(db_error)?;
+        Ok(())
     }
 
     /// Missing folders are skipped. A damaged/empty workspace is not used.

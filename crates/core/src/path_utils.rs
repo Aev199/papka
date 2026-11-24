@@ -124,6 +124,15 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Whether `path` lies somewhere inside `folder` (not `folder` itself),
+/// with the same rules as [`same_path`].
+pub fn is_inside(path: &Path, folder: &Path) -> bool {
+    let (path, folder) = (normalize_extended_path(path), normalize_extended_path(folder));
+    let key = |p: &Path| if cfg!(windows) { PathBuf::from(p.to_string_lossy().to_lowercase()) } else { p.to_path_buf() };
+    let (path, folder) = (key(&path), key(&folder));
+    path != folder && path.starts_with(&folder)
+}
+
 /// Whether deleting here can go to the Windows Recycle Bin. Network shares
 /// and removable drives have none: Explorer deletes there permanently after
 /// asking, and so does the program.
@@ -246,6 +255,20 @@ pub fn free_name(folder: &Path, name: &str) -> String {
     (2..10_000).map(|n| format!("{stem} ({n}){ext}"))
         .find(|candidate| !folder.join(candidate).exists())
         .unwrap_or_else(|| name.to_owned())
+}
+
+/// Replaces `path` with `bytes` whole: a temporary file beside it, then a
+/// rename, so no reader ever sees half of it. The temporary file is named
+/// like Papka's other ones (`.papka-replacing-….tmp`), which the history
+/// and the search index pass over.
+pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let folder = path.parent().ok_or_else(|| std::io::Error::other("у файла нет папки"))?;
+    let mut file = tempfile::Builder::new().prefix(".papka-replacing-").suffix(".tmp").tempfile_in(folder)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 #[cfg(test)]
