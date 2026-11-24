@@ -36,6 +36,12 @@ pub(crate) const STATUS_BAR_HEIGHT: f32 = 32.;
 pub(crate) const NAV_BAR_HEIGHT: f32 = 36.;
 pub(crate) const SIDEBAR_ROW_HEIGHT: f32 = 28.;
 
+/// Compact status information without removing commands or shrinking their hit targets.
+pub(crate) fn compact_status(width:f32)->bool {width<850.}
+pub(crate) fn status_filter_width(width:f32)->f32 {
+    if compact_status(width) {(width*0.24).clamp(100.,160.)} else {200.}
+}
+
 /// Top inset and available content height in logical pixels. Cap the list
 /// height but never assume a large monitor.
 pub(crate) fn palette_geometry(viewport_height: f32) -> (f32,f32,f32) {
@@ -80,6 +86,15 @@ mod tests {
             assert!(list <= available);
         }
         assert_eq!(palette_geometry(1080.).2,380.);
+    }
+
+    #[test]
+    fn status_filter_reserves_space_in_narrow_windows() {
+        assert_eq!(status_filter_width(400.),100.);
+        assert_eq!(status_filter_width(600.),144.);
+        assert_eq!(status_filter_width(800.),160.);
+        assert_eq!(status_filter_width(850.),200.);
+        assert!(!compact_status(1200.));
     }
 
     #[test]

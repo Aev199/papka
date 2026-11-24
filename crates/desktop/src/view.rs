@@ -2689,7 +2689,8 @@ impl Explorer {
 
     // -------------------------------------------------------- status bar
 
-    fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn status_bar(&mut self, width:f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact=ui::compact_status(width);
         // The project card covers the list: the bar speaks of the card.
         let card = self.card_covers_list();
         let card_summary = card.then(|| self.card_status()).flatten();
@@ -2706,8 +2707,9 @@ impl Explorer {
         }) };
         let filter_shown = !card && (self.filter_open || !self.filter.is_empty());
         let split = self.browser.groups.len() > 1;
-        let mut bar = div().w_full().h(px(ui::STATUS_BAR_HEIGHT)).flex_none().pl_1().pr_1().flex().items_center().gap_3()
-            .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER))
+        let mut bar = div().id("status-information").flex_1().min_w_0().h_full().flex().items_center()
+            .gap(px(if compact {4.} else {12.})).overflow_x_scroll()
+            .bg(rgb(WINDOW))
             .text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED))
             // Atlas: a magnifier in the corner; the filter field opens in place.
             .when_some(card_summary, |this, summary| this.child(div().flex().min_w_0().max_w(px(240.)).items_center().gap_2().pl_2()
@@ -2718,7 +2720,7 @@ impl Explorer {
                         this.key_find(&crate::keys::Find, window, cx);
                     }))))
             .when(filter_shown, |this| this.child(
-                div().id("filter-field").key_context("QuickFilter").flex_none().w(px(200.))
+                div().id("filter-field").key_context("QuickFilter").flex_none().w(px(ui::status_filter_width(width)))
                     .tooltip({ let search = self.search_mode; move |window, cx| Tooltip::new(if search {
                         "Поиск в этой папке и во всех вложенных: Enter — найти, ↑ ↓ — выбор, Esc — закрыть."
                     } else {
@@ -2726,8 +2728,10 @@ impl Explorer {
                     }).build(window, cx) })
                     .child(Input::new(&self.search_input).h(px(24.)).text_size(px(12.))
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
-            .when_some(count, |this, count| this.child(items_label(count)))
-            .when_some(selection, |this, text| this.child(div().min_w_0().max_w(px(360.)).truncate().child(text)))
+            .when_some(count, |this, count| this.child(div().flex_none().child(items_label(count))))
+            .when_some(selection, |this, text| this.child(div().id("status-selection").min_w_0()
+                .max_w(px(if compact {140.}else{360.})).truncate().child(text.clone())
+                .tooltip(move|window,cx|Tooltip::new(text.clone()).build(window,cx))))
             // «Тип»: only drawings, PDF, … in this pane, in one click.
             .when(!card, |this| this.child({
                 let active = self.kinds.get(self.browser.active).is_some();
@@ -2745,7 +2749,7 @@ impl Explorer {
             .when_some(self.kinds.get(self.browser.active).filter(|_| !card), |this, kind| this.child(
                 div().id("kind-filter-chip").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded(px(4.))
                     .bg(rgb(HOVER)).text_color(rgb(TEXT))
-                    .child(format!("Только «{}»", kind.name()))
+                    .child(div().max_w(px(if compact {68.}else{180.})).truncate().child(format!("Только «{}»", kind.name())))
                     .child(div().id("kind-filter-clear").size(px(16.)).rounded(px(4.)).flex().items_center().justify_center()
                         .cursor_pointer().hover(|style| style.bg(rgb(PRESSED)))
                         .child(small_icon("fm/x.svg", TEXT_MUTED))
@@ -2755,20 +2759,23 @@ impl Explorer {
                 div().id("label-filter").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded(px(4.))
                     .bg(rgb(HOVER)).text_color(rgb(TEXT))
                     .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(crate::labels::color(label))))
-                    .child(format!("Только «{}»", label.name()))
+                    .child(div().max_w(px(if compact {68.}else{180.})).truncate().child(format!("Только «{}»", label.name())))
                     .child(div().id("label-filter-clear").size(px(16.)).rounded(px(4.)).flex().items_center().justify_center()
                         .cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
                         .child(small_icon("fm/x.svg", TEXT_MUTED))
                         .tooltip(|window, cx| Tooltip::new("Показать все файлы").build(window, cx))
                         .on_click(cx.listener(|this, _, _, cx| this.set_label_filter(None, cx))))))
-            .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM))
-                .child(crate::messages::localize(&self.status)));
+            .child({
+                let status=crate::messages::localize(&self.status);
+                div().id("status-message").flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM))
+                    .child(status.clone()).tooltip(move|window,cx|Tooltip::new(status.clone()).build(window,cx))
+            });
         if self.transfers.copying {
             let paused = self.transfers.control.as_ref().is_some_and(|control| control.is_paused());
             // A capsule like Finder's: fills as the copy goes, dims on pause.
             if let Some(fraction) = self.transfers.fraction {
                 bar = bar.child(div().flex_none().flex().items_center().gap_2()
-                    .child(div().w(px(140.)).h(px(6.)).rounded_full().bg(rgb(BORDER)).overflow_hidden()
+                    .child(div().w(px(if compact {64.}else{140.})).h(px(6.)).rounded_full().bg(rgb(BORDER)).overflow_hidden()
                         .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT }))
                             .w(gpui::relative(self.motion.bar().unwrap_or(fraction.clamp(0.0, 1.0) as f32)))))
                     .child(div().w(px(32.)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.0).floor() as u32))));
@@ -2803,11 +2810,11 @@ impl Explorer {
         if !self.zone.items().is_empty() {
             bar = bar.child(div().flex().items_center().gap_1()
                 .child(small_icon("fm/inbox.svg", ACCENT))
-                .child(format!("Для переноса: {}", self.zone.items().len())));
+                .child(if compact {self.zone.items().len().to_string()}else{format!("Для переноса: {}", self.zone.items().len())}));
         }
         if self.watched_root.is_some() {
             bar = bar.child(div().flex().items_center().gap_1().text_color(rgb(SUCCESS))
-                .child(small_icon("fm/eye-watch.svg", SUCCESS)).child("Наблюдение"));
+                .child(small_icon("fm/eye-watch.svg", SUCCESS)).when(!compact,|item|item.child("Наблюдение")));
         }
         if let Some(summary) = self.motion.lab.summary() {
             bar = bar.child(div().id("motion-lab").flex_none().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_MUTED))
@@ -2815,7 +2822,10 @@ impl Explorer {
                 .tooltip(|window,cx| Tooltip::new("Motion Lab: интервалы вызовов render и время построения UI, не GPU FPS. Нажмите для сброса.").build(window,cx))
                 .on_click(cx.listener(|this,_,_,cx| { this.motion.lab.reset(); cx.notify(); })));
         }
-        bar.child(div().flex_none().flex().items_center().gap_0p5()
+        // Commands stay pinned; only the information lane can overflow.
+        div().w_full().h(px(ui::STATUS_BAR_HEIGHT)).flex_none().px_1().flex().items_center().gap_1()
+            .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER)).child(bar)
+            .child(div().flex_none().flex().items_center().gap_0p5()
             .child(bar_button("bar-new-folder", "fm/folder-plus.svg", "Новая папка (Ctrl+Shift+N)", false)
                 .on_click(cx.listener(|this, _, window, cx| this.begin_new_folder(window, cx))))
             .child(bar_button("bar-split", "fm/split.svg", "Разделить окно (Ctrl+\\)", split)
@@ -3808,7 +3818,7 @@ impl Render for Explorer {
                 .child(div().flex_1().min_w_0().h_full().flex().flex_col()
                     .child(self.title_bar(window,cx))
                         .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
-                    .child(self.status_bar(cx))));
+                    .child(self.status_bar((window_width-sidebar_width).max(0.),cx))));
         let now=std::time::Instant::now();let animate=crate::theme::animations();
         if self.context_menu.is_none() && (self.palette.is_some() || self.settings.is_some() || self.dialog_content().is_some() || self.tour.is_some() || self.comparison.is_some() || self.about_open || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty() || self.transfers.pending.is_some() || self.updates.dialog || self.version_editing.is_some()) {
             self.motion.surfaces.menu=Default::default();

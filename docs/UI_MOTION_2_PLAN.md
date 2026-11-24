@@ -199,3 +199,11 @@ query may contribute the direct result. Recursive folder scan and input callback
 validate the palette entity identity. Async results preserve selection by path;
 closing folder palettes render their own retained results, not the current
 palette's list. Explicit navigation still uses the existing path validation.
+
+### Stage 9 follow-up — responsive status chrome
+Separate the scrollable status/information lane from pinned view commands.
+Compact the information lane below 850 logical pixels: filter width, label chips,
+progress width and passive counters. Preserve view buttons and all transfer
+commands; long selected names and messages have tooltips. No row-density or
+file-operation changes. Added pure tests of compact geometry. Narrow-window
+interaction and DPI checks remain part of the manual matrix.
