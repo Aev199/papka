@@ -1,4 +1,5 @@
 //! Palette/preferences overlays and selection gestures.
+use crate::ui_tokens as ui;
 use crate::{
     Explorer,
     theme::{self, *},
@@ -377,11 +378,11 @@ impl Explorer {
         let body = if let Some(palette) = palette.filter(|palette| palette.folders.is_some()) {
             let (list, footer) = self.jump_list(palette, cx);
             div().flex().flex_col().p_0()
-                .child(div().h(px(44.)).px_2().flex().items_center().border_b_1().border_color(rgb(BORDER))
+                .child(div().h(px(ui::PALETTE_HEADER_HEIGHT)).px_2().flex().items_center().border_b_1().border_color(rgb(BORDER))
                     .child(crate::jump::field(palette)))
                 .child(list)
-                .child(div().h(px(28.)).px_4().flex().items_center().gap_4().border_t_1().border_color(rgb(BORDER))
-                    .text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                .child(div().h(px(ui::PALETTE_FOOTER_HEIGHT)).px_4().flex().items_center().gap_4().border_t_1().border_color(rgb(BORDER))
+                    .text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM))
                     .child(div().flex_1().child(footer))
                     .child("↑ ↓ выбор")
                     .child("Enter перейти")
@@ -402,7 +403,7 @@ impl Explorer {
                 if command.group != group {
                     group = command.group;
                     list = list.child(
-                        div().px_4().pt_2().pb_1().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(group),
+                        div().px_4().pt_2().pb_1().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM)).child(group),
                     );
                 }
                 let enabled = self.command_enabled(&command);
@@ -412,13 +413,13 @@ impl Explorer {
                     div()
                         .id(("palette-command", index))
                         .mx_1()
-                        .h(px(30.))
+                        .h(px(ui::PALETTE_ROW_HEIGHT))
                         .px_3()
                         .flex()
                         .items_center()
                         .gap_3()
                         .relative()
-                        .rounded(px(4.))
+                        .rounded(px(ui::CONTROL_RADIUS))
                         // A quiet highlight with the accent mark, not a filled bar.
                         .when(chosen, |row| row.bg(rgb(ACCENT_SOFT)).child(crate::view::focus_mark()))
                         .text_color(rgb(fg))
@@ -426,12 +427,12 @@ impl Explorer {
                         .when(enabled, |row| {
                             row.cursor_pointer().when(!chosen, |row| row.hover(|s| s.bg(rgb(HOVER))))
                         })
-                        .child(gpui::svg().path(command_icon(command.id)).size(px(14.)).flex_none()
+                        .child(gpui::svg().path(command_icon(command.id)).size(px(ui::SMALL_ICON_SIZE)).flex_none()
                             .text_color(rgb(if chosen { ACCENT } else { TEXT_MUTED })))
                         .child(div().flex_1().min_w_0().truncate().child(command.label))
                         .when(!command.shortcut.is_empty(), |row| row.child(
                             div().flex_none()
-                                .text_size(px(11.))
+                                .text_size(px(ui::CAPTION_TEXT))
                                 .text_color(rgb(TEXT_MUTED))
                                 .child(command.shortcut)))
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -444,14 +445,14 @@ impl Explorer {
                 .flex_col()
                 .p_0()
                 .child(
-                    div().h(px(44.)).px_2().flex().items_center().border_b_1().border_color(rgb(BORDER))
+                    div().h(px(ui::PALETTE_HEADER_HEIGHT)).px_2().flex().items_center().border_b_1().border_color(rgb(BORDER))
                         .child(Input::new(&palette.input).appearance(false)
-                            .prefix(gpui::svg().path("fm/search.svg").size(px(14.)).text_color(rgb(TEXT_MUTED)))),
+                            .prefix(gpui::svg().path("fm/search.svg").size(px(ui::SMALL_ICON_SIZE)).text_color(rgb(TEXT_MUTED)))),
                 )
                 .child(list)
                 .child(
-                    div().h(px(28.)).px_4().flex().items_center().gap_4().border_t_1().border_color(rgb(BORDER))
-                        .text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                    div().h(px(ui::PALETTE_FOOTER_HEIGHT)).px_4().flex().items_center().gap_4().border_t_1().border_color(rgb(BORDER))
+                        .text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM))
                         .child(div().flex_1().child(format!("Команд: {count}")))
                         .child("↑ ↓ выбор")
                         .child("Enter выполнить")
@@ -461,12 +462,12 @@ impl Explorer {
             // A check box row; arrows walk them, Space toggles.
             let check = |index: usize, cx: &mut Context<Self>| {
                 let on = flag_value(settings, index);
-                div().id(("preference", index)).relative().h(px(30.)).px_2().rounded(px(4.)).cursor_pointer()
+                div().id(("preference", index)).relative().h(px(ui::SETTINGS_ROW_HEIGHT)).px_2().rounded(px(ui::CONTROL_RADIUS)).cursor_pointer()
                     .flex().items_center().gap_2()
                     .when(index == settings.selected, |row| row.bg(rgb(ACCENT_SOFT)).child(crate::view::focus_mark()))
                     .when(index != settings.selected, |row| row.hover(|row| row.bg(rgb(HOVER))))
-                    .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
-                        .when(on, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
+                    .child(div().size(px(ui::CHECKBOX_SIZE)).flex_none().rounded_sm().flex().items_center().justify_center()
+                        .when(on, |b| b.bg(rgb(SELECTED)).child(gpui::svg().path("fm/check.svg").size(px(ui::CHECKMARK_SIZE)).text_color(rgb(SELECTION_TEXT))))
                         .when(!on, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
                     .child(div().min_w_0().truncate().child(SETTING_FLAGS[index]))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -479,9 +480,9 @@ impl Explorer {
             };
             // Plain groups under a heading, not cards inside the dialog.
             let section = |title: &'static str| div().flex().flex_col().gap_0p5()
-                .child(div().px_2().pt_1().pb_0p5().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(div().px_2().pt_1().pb_0p5().text_size(px(ui::CAPTION_TEXT)).font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT_DIM)).child(title));
-            let mut body = div().flex().flex_col().gap_3().text_size(px(13.));
+            let mut body = div().flex().flex_col().gap_3().text_size(px(ui::BODY_TEXT));
 
             // Appearance, with the accent colours chosen separately for each theme.
             let mut look = section("ОФОРМЛЕНИЕ").child(check(0, cx)).child(check(8, cx)).child(check(1, cx)).child(check(2, cx));
@@ -500,21 +501,17 @@ impl Explorer {
                             }
                         }))
                 });
-                look = look.child(div().h(px(30.)).px_2().flex().items_center().gap_2()
+                look = look.child(div().h(px(ui::SETTINGS_ROW_HEIGHT)).px_2().flex().items_center().gap_2()
                     .child(div().flex_1().child(label))
                     .child(div().flex().gap_1p5().children(swatches)));
             }
             // Row density and tile size: a row of choices each.
             let choices = |id: &'static str, label: &'static str, names: &[&'static str], chosen: usize, pick: fn(&mut Settings, usize), cx: &mut Context<Self>| {
-                div().h(px(30.)).px_2().flex().items_center().gap_1()
+                div().h(px(ui::SETTINGS_ROW_HEIGHT)).px_2().flex().items_center().gap_1()
                     .child(div().flex_1().child(label))
                     .children(names.iter().enumerate().map(|(index, name)| {
                         let on = index == chosen;
-                        div().id((id, index)).h(px(24.)).px_2().flex().flex_none().items_center().rounded(px(4.)).cursor_pointer()
-                            .text_size(px(12.)).border_1()
-                            .when(on, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
-                            .when(!on, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED)).hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))))
-                            .child(*name)
+                        crate::view::choice_chip((id, index), *name, on)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { pick(s, index); cx.notify(); }
                             }))
@@ -527,13 +524,13 @@ impl Explorer {
                 div().id(("folder-color", index)).size(px(20.)).flex_none().rounded_full().cursor_pointer()
                     .flex().items_center().justify_center()
                     .when(index == settings.folder_color, |dot| dot.border_2().border_color(rgb(TEXT)))
-                    .child(gpui::svg().path("fm/folder-fill.svg").size(px(14.)).text_color(gpui::rgb(colour)))
+                    .child(gpui::svg().path("fm/folder-fill.svg").size(px(ui::SMALL_ICON_SIZE)).text_color(gpui::rgb(colour)))
                     .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(*name).build(window, cx))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.folder_color = index; cx.notify(); }
                     }))
             });
-            look = look.child(div().h(px(30.)).px_2().flex().items_center().gap_2()
+            look = look.child(div().h(px(ui::SETTINGS_ROW_HEIGHT)).px_2().flex().items_center().gap_2()
                 .child(div().flex_1().child("Цвет папок"))
                 .child(div().flex().gap_1p5().children(folder_swatches)));
             look = look.child(choices("tile-size", "Размер миниатюр", &crate::thumbs::SIZES, settings.tile_size, |s, i| s.tile_size = i, cx));
@@ -545,15 +542,10 @@ impl Explorer {
             {
                 use filemanager_core::update::Channel;
                 let channel = settings.update_channel;
-                let chip = |id: &'static str, label: &'static str, chosen: bool| div().id(id).h(px(24.)).px_2().flex().flex_none()
-                    .items_center().rounded(px(4.)).cursor_pointer().text_size(px(12.)).border_1()
-                    .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
-                    .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
-                        .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))))
-                    .child(label);
+                let chip = |id: &'static str, label: &'static str, chosen: bool| crate::view::choice_chip(id, label, chosen);
                 body = body.child(section("ОБНОВЛЕНИЯ")
                     .child(check(7, cx))
-                    .child(div().h(px(30.)).px_2().flex().items_center().gap_2()
+                    .child(div().h(px(ui::SETTINGS_ROW_HEIGHT)).px_2().flex().items_center().gap_2()
                         .child(div().flex_1().child("Канал"))
                         .children([Channel::Stable, Channel::Beta].into_iter().map(|option| {
                             chip(option.key(), option.label(), option == channel)
@@ -561,18 +553,18 @@ impl Explorer {
                                     if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_channel = option; cx.notify(); }
                                 }))
                         })))
-                    .child(div().px_2().pb_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                    .child(div().px_2().pb_1().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM))
                         .child("Если программе закрыт интернет, обновление берётся из файла Papka.exe, скачанного браузером в «Загрузки».")));
             }
             if let Some(error) = settings.error.as_ref() {
-                body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error.clone()));
+                body = body.child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(DANGER)).child(error.clone()));
             }
             // Only the options scroll; the title and the buttons stay put.
-            div().flex().flex_col().gap_3().min_h_0().text_size(px(13.))
-                .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Настройки"))
+            div().flex().flex_col().gap_3().min_h_0().text_size(px(ui::BODY_TEXT))
+                .child(div().text_size(px(ui::DIALOG_TITLE_TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child("Настройки"))
                 .child(div().id("settings-options").flex_1().min_h_0().overflow_y_scroll().child(body))
                 .child(div().flex().items_center().gap_2()
-                    .child(div().flex_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                    .child(div().flex_1().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM))
                         .child("↑ ↓ выбор · Пробел переключить · Enter сохранить"))
                     .child(crate::view::text_button("cancel-settings", "Отмена", crate::view::ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, window, cx| { this.dismiss_interface(window, cx); })))
@@ -614,7 +606,7 @@ impl Explorer {
                         // The settings scroll on a small screen.
                         .when(palette.is_none(), |body| body.p_4().max_h(gpui::relative(0.82)).flex().flex_col())
                         .when(palette.is_some(), |body| body.overflow_hidden())
-                        .rounded(px(6.))
+                        .rounded(px(ui::PANEL_RADIUS))
                         .bg(rgb(RAISED))
                         .border_1()
                         .border_color(rgb(BORDER_STRONG))

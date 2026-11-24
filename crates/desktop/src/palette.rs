@@ -27,6 +27,8 @@ pub const TEXT_DIM: u32 = 0x8D8D94;
 
 pub const FOLDER: u32 = 0xE6B54A;
 pub const DANGER: u32 = 0xEF6F7A;
+/// Background of a hovered destructive command, not a selection.
+pub const DANGER_SOFT: u32 = 0x3A2128;
 pub const WARNING: u32 = 0xE5BD62;
 /// A lit favourite star.
 pub const FAVORITE: u32 = 0xF5C04A;
@@ -121,6 +123,7 @@ pub fn resolve(light: bool, color: u32) -> u32 {
             TEXT_DIM => 0x626D80,
             FOLDER => 0xB9831B,
             DANGER => 0xBD3343,
+            DANGER_SOFT => 0xFCE8EB,
             WARNING => 0x896000,
             FAVORITE => 0xC98A00,
             SUCCESS => 0x24734A,
@@ -191,6 +194,16 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn destructive_command_hover_is_readable_in_both_themes() {
+        for light in [false, true] {
+            let fg = luminance(resolve(light, DANGER));
+            let bg = luminance(resolve(light, DANGER_SOFT));
+            let contrast = (fg.max(bg) + 0.05) / (fg.min(bg) + 0.05);
+            assert!(contrast >= 4.5, "light={light}: contrast={contrast}");
+        }
+    }
+
     #[test]
     fn every_accent_scheme_keeps_selection_readable_and_distinct() {
         for scheme in 0..ACCENT_SCHEMES.len() {

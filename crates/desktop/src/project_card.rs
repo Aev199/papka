@@ -22,6 +22,7 @@ use gpui_component::tooltip::Tooltip;
 
 use crate::Explorer;
 use crate::theme::*;
+use crate::ui_tokens as ui;
 use crate::view::{ButtonKind, icon_button, small_icon, text_button};
 
 fn display_text(text: &str) -> String {
@@ -819,7 +820,7 @@ impl Explorer {
             .child(div().flex_none().max_w(px(260.)).truncate().text_color(rgb(if missing { TEXT_DIM } else { ACCENT }))
                 .when(missing, |name| name.line_through())
                 .child(title.unwrap_or_else(|| browser::display_name(path))))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(full.clone()))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM)).child(full.clone()))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| this.open_card_link(target.clone(), cx)))
     }
@@ -831,8 +832,8 @@ impl Explorer {
         div().flex().flex_col().gap_1()
             .child(div().h(px(28.)).flex().items_center().gap_2()
                 .child(match heading {
-                    Some(heading) => div().flex_1().min_w_0().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(heading),
-                    None if with_title => div().flex_1().min_w_0().ml(px(-10.)).text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD)
+                    Some(heading) => div().flex_1().min_w_0().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(heading),
+                    None if with_title => div().flex_1().min_w_0().ml(px(-10.)).text_size(px(ui::SECTION_TITLE_TEXT)).font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(Input::new(&self.cards.title_input).appearance(false)),
                     None => div().flex_1(),
                 })
@@ -842,7 +843,7 @@ impl Explorer {
                 .child(text_button("card-save", "Готово", ButtonKind::Primary)
                     .tooltip(|window, cx| Tooltip::new("Сохранить (Esc тоже сохраняет)").build(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.save_card_section(cx)))))
-            .when(with_text, |fields| fields.child(div().mx(px(-12.)).rounded(px(4.)).bg(rgb(HOVER)).text_size(px(13.))
+            .when(with_text, |fields| fields.child(div().mx(px(-12.)).rounded(px(4.)).bg(rgb(HOVER)).text_size(px(ui::BODY_TEXT))
                 .child(Textarea::new(&self.cards.text_input).appearance(false))))
     }
 
@@ -863,12 +864,12 @@ impl Explorer {
         let mut text = div().flex_1().min_w_0().flex().flex_col().gap_0p5()
             .child(if captioning {
                 div().flex().items_center().gap_2()
-                    .child(div().flex_1().min_w_0().ml(px(-10.)).text_size(px(13.)).child(Input::new(&self.cards.title_input).appearance(false)))
+                    .child(div().flex_1().min_w_0().ml(px(-10.)).text_size(px(ui::BODY_TEXT)).child(Input::new(&self.cards.title_input).appearance(false)))
                     .child(text_button("card-caption-save", "Готово", ButtonKind::Primary)
                         .on_click(cx.listener(|this, _, _, cx| this.save_card_section(cx))))
                     .into_any_element()
             } else {
-                div().id(("card-inbox-title", index)).text_size(px(13.)).cursor_text()
+                div().id(("card-inbox-title", index)).text_size(px(ui::BODY_TEXT)).cursor_text()
                     .text_color(rgb(if unsigned && entry.sidecar.kind == Kind::Image { TEXT_MUTED } else { TEXT }))
                     .child(if unsigned && entry.sidecar.kind == Kind::Image { "Снимок без подписи — щёлкните, чтобы подписать".to_string() } else { entry.title() })
                     .tooltip(|window, cx| Tooltip::new("Щёлкните, чтобы изменить подпись").build(window, cx))
@@ -876,20 +877,20 @@ impl Explorer {
                         this.begin_edit(Target::Caption(sidecar.clone()), false, current.clone(), String::new(), window, cx)))
                     .into_any_element()
             })
-            .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+            .child(div().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM))
                 .child(if source.is_empty() { entry.when() } else { format!("{} · {source}", entry.when()) }));
         if entry.sidecar.kind == Kind::Text {
             // Without the line already shown as the title.
             let title = entry.title();
             let preview: Vec<&str> = entry.sidecar.text.as_deref().unwrap_or_default().lines()
                 .filter(|line| !line.trim().is_empty() && line.trim() != title).take(4).collect();
-            text = text.child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(preview.join("\n")));
+            text = text.child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(preview.join("\n")));
         }
         if let Some(file) = &entry.sidecar.file {
             text = text.child(self.link_row(("card-inbox-file", index), file, None, cx));
         }
         if doomed {
-            text = text.child(div().text_size(px(12.)).text_color(rgb(DANGER))
+            text = text.child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(DANGER))
                 .child(if permanent { "Удалить безвозвратно (здесь нет Корзины)? Нажмите корзину ещё раз" } else { "Удалить в Корзину? Нажмите корзину ещё раз" }));
         }
         let (notes, reveal, gone) = (entry.clone(), shown.clone(), entry.clone());
@@ -899,9 +900,9 @@ impl Explorer {
                 .rounded(px(4.)).overflow_hidden().border_1().border_color(rgb(BORDER)).cursor_pointer()
                 .child(match entry.image_key.as_ref().and_then(|key| self.cards.previews.get(key)) {
                     Some(Ok(preview)) => img(preview.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element(),
-                    Some(Err(_)) => div().size_full().flex().items_center().justify_center().text_size(px(11.))
+                    Some(Err(_)) => div().size_full().flex().items_center().justify_center().text_size(px(ui::CAPTION_TEXT))
                         .text_color(rgb(TEXT_DIM)).child("Открыть снимок").into_any_element(),
-                    None => div().size_full().flex().items_center().justify_center().text_size(px(11.))
+                    None => div().size_full().flex().items_center().justify_center().text_size(px(ui::CAPTION_TEXT))
                         .text_color(rgb(TEXT_DIM)).child("Загрузка…").into_any_element(),
                 })
                 .tooltip(|window, cx| Tooltip::new("Открыть снимок").build(window, cx))
@@ -924,8 +925,8 @@ impl Explorer {
         let target = open.editing.as_ref().map(|editing| editing.target.clone());
         let editing = match &target { Some(Target::Section(index)) => Some(*index), _ => None };
         let busy = target.is_some();
-        let dim = |text: String| div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(text);
-        let heading = |title: String| div().flex_1().min_w_0().truncate().text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title);
+        let dim = |text: String| div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(text);
+        let heading = |title: String| div().flex_1().min_w_0().truncate().text_size(px(ui::SECTION_TITLE_TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title);
         let block = |key: String| div().group(gpui::SharedString::from(key)).flex().flex_col().gap_1().pb_3().border_b_1().border_color(rgb(BORDER));
         // A section's buttons show while the mouse is over it.
         let tools = |key: String| div().flex_none().h(px(28.)).flex().items_center().gap_1().invisible()
@@ -943,7 +944,7 @@ impl Explorer {
             let doomed = open.doomed == Some(index);
             let mut body = block(key.clone()).child(div().h(px(28.)).flex().items_center().gap_1()
                 .child(heading(section.title.clone()))
-                .when(doomed, |row| row.child(div().flex_none().text_size(px(12.)).text_color(rgb(DANGER)).child("Удалить раздел? Нажмите ещё раз")))
+                .when(doomed, |row| row.child(div().flex_none().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(DANGER)).child("Удалить раздел? Нажмите ещё раз")))
                 .child(tools(key).when(doomed, |row| row.visible())
                     .child(icon_button(("card-edit", index), "fm/pencil.svg", "Изменить (или щёлкните по тексту)", false, true)
                         .on_click(cx.listener(move |this, _, window, cx| this.edit_card_section(index, false, window, cx))))
@@ -952,7 +953,7 @@ impl Explorer {
                     .child(icon_button(("card-delete", index), "fm/trash.svg", "Удалить раздел", doomed, !busy)
                         .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.delete_card_section(index, cx)))))));
             if section.text.is_empty() {
-                body = body.child(div().id(("card-empty", index)).text_size(px(13.)).text_color(rgb(TEXT_DIM)).cursor_text()
+                body = body.child(div().id(("card-empty", index)).text_size(px(ui::BODY_TEXT)).text_color(rgb(TEXT_DIM)).cursor_text()
                     .child("Пусто — щёлкните, чтобы написать")
                     .on_click(cx.listener(move |this, _, window, cx| this.edit_card_section(index, false, window, cx))));
             }
@@ -962,9 +963,9 @@ impl Explorer {
                 let edit = cx.listener(move |this, _, window, cx| this.edit_card_section(index, false, window, cx));
                 body = match line {
                     Line::Blank => body.child(div().h(px(6.))),
-                    Line::Text(text) => body.child(div().id(("card-text", id)).text_size(px(13.)).cursor_text().child(text).on_click(edit)),
+                    Line::Text(text) => body.child(div().id(("card-text", id)).text_size(px(ui::BODY_TEXT)).cursor_text().child(text).on_click(edit)),
                     Line::Link(path) => body.child(self.link_row(("card-link", id), &path, None, cx)),
-                    Line::Field { label, value, link } => body.child(div().flex().items_start().gap_3().text_size(px(13.))
+                    Line::Field { label, value, link } => body.child(div().flex().items_start().gap_3().text_size(px(ui::BODY_TEXT))
                         .child(div().w(px(150.)).flex_none().text_color(rgb(TEXT_MUTED)).child(label))
                         .child(match link {
                             Some(path) => self.link_row(("card-field", id), &path, None, cx).flex_1().min_w_0().into_any_element(),
@@ -987,7 +988,7 @@ impl Explorer {
             let mut body = block("card-inbox".into()).child(built_in("inbox", "Входящие", None, cx));
             match (&published, &open.inbox) {
                 (None, _) | (_, None) => body = body.child(dim("Читаются…".into())),
-                (Some(_), Some(Err(error))) => body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(format!("Папка входящих недоступна: {error}"))),
+                (Some(_), Some(Err(error))) => body = body.child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(DANGER)).child(format!("Папка входящих недоступна: {error}"))),
                 (Some(published), Some(Ok(entries))) if entries.is_empty() => body = body.child(dim(format!(
                     "Пока пусто. В Notch: снимок, текст или файл → «В проект…» → «{}». Записи попадут в {}.",
                     open.name, published.project.inbox.display()))),
@@ -1012,7 +1013,7 @@ impl Explorer {
                     None => format!("Папка объекта {}", published.source.label()),
                 };
                 let chosen = published.source == crate::inbox::RootSource::Chosen;
-                body = body.child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                body = body.child(div().flex().items_center().gap_2().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED))
                     .child(div().flex_1().min_w_0().child(root_line))
                     .when(chosen, |row| row.child(div().id("card-root-reset").px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
                         .hover(|style| style.bg(rgb(HOVER))).child("определять самой")
@@ -1028,7 +1029,7 @@ impl Explorer {
                 let title = (!folder.title.is_empty()).then(|| folder.title.clone());
                 body = body.child(div().group(gpui::SharedString::from(row_key.clone())).flex().items_center().gap_1()
                     .child(self.link_row(("card-folder", index), &folder.path, title, cx).flex_1().min_w_0())
-                    .when(is_root, |row| row.child(div().flex_none().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("папка объекта")))
+                    .when(is_root, |row| row.child(div().flex_none().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM)).child("папка объекта")))
                     .child(tools(row_key)
                         .when(!is_root, |row| row.child(icon_button(("card-root", index), "fm/home.svg", "Сделать папкой объекта: сюда будут приходить входящие", false, !busy)
                             .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.set_project_root(&name, Some(root.clone()), cx))))))
@@ -1073,7 +1074,7 @@ impl Explorer {
                 PassportState::Absent => {
                     let root = published.as_ref().and_then(|published| published.project.root.clone());
                     body = body.child(div().flex().items_center().gap_3()
-                        .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(match &root {
+                        .child(div().flex_1().min_w_0().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(match &root {
                             Some(root) => format!("Паспорта ещё нет. Он будет лежать в {} — общий для всех, кто работает с объектом.", root.join(passport::FILE_NAME).display()),
                             None => "Паспорта ещё нет. Сначала укажите папку объекта — домик у папки в «Папках проекта»: паспорт ляжет туда.".into(),
                         }))
@@ -1081,7 +1082,7 @@ impl Explorer {
                             .on_click(cx.listener(|this, _, _, cx| this.create_passport(cx))))));
                 }
                 PassportState::Unreadable { file, error } => {
-                    body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(format!("Не прочитан: {error}")))
+                    body = body.child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(DANGER)).child(format!("Не прочитан: {error}")))
                         .child(self.link_row("card-passport-file", file, None, cx));
                 }
                 PassportState::Found { passport, file, page: html, .. } => {
@@ -1090,12 +1091,12 @@ impl Explorer {
                         body = body.child(self.edit_fields(None, true, false, cx));
                     } else {
                         let name = passport.title.clone().unwrap_or_default();
-                        body = body.child(div().flex().items_baseline().gap_2().text_size(px(13.))
+                        body = body.child(div().flex().items_baseline().gap_2().text_size(px(ui::BODY_TEXT))
                             .child(div().id("card-passport-title").flex_1().min_w_0().font_weight(gpui::FontWeight::SEMIBOLD).cursor_text()
                                 .text_color(rgb(if name.is_empty() { TEXT_DIM } else { TEXT }))
                                 .child(if name.is_empty() { "Название объекта — щёлкните, чтобы написать".to_string() } else { name.clone() })
                                 .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportTitle, false, name.clone(), String::new(), window, cx))))
-                            .when_some(passport.updated.clone(), |row, updated| row.child(div().flex_none().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                            .when_some(passport.updated.clone(), |row, updated| row.child(div().flex_none().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM))
                                 .child(format!("обновлено {updated}")))));
                     }
                     if target == Some(Target::PassportWarnings) {
@@ -1106,7 +1107,7 @@ impl Explorer {
                             let text = warnings_text.clone();
                             body = body.child(div().id(("card-warning", index)).flex().items_start().gap_2().px_2().py_1().rounded(px(4.)).bg(rgb(ACCENT_SOFT)).cursor_text()
                                 .child(div().mt(px(3.)).child(small_icon("fm/alert.svg", DANGER)))
-                                .child(div().flex_1().min_w_0().text_size(px(12.)).child(display_text(warning)))
+                                .child(div().flex_1().min_w_0().text_size(px(ui::SECONDARY_TEXT)).child(display_text(warning)))
                                 .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportWarnings, false, "Предупреждения".into(), text.as_ref().clone(), window, cx))));
                         }
                         if passport.warnings.len() > 60 { body = body.child(dim(format!("Ещё {} предупреждений — откройте редактор", passport.warnings.len() - 60))); }
@@ -1126,8 +1127,8 @@ impl Explorer {
                             this.begin_edit(Target::PassportBlock(edit_key.clone()), false, edit_title.clone(), edit_text.as_ref().clone(), window, cx));
                         let mut part = div().group(gpui::SharedString::from(group_key.clone())).flex().flex_col().gap_1()
                             .child(div().h(px(24.)).mt_1().flex().items_center().gap_1()
-                                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(section.title.to_uppercase()))
-                                .when(doomed, |row| row.child(div().flex_none().text_size(px(12.)).text_color(rgb(DANGER)).child("Удалить блок? Нажмите ещё раз")))
+                                .child(div().flex_1().min_w_0().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM)).child(section.title.to_uppercase()))
+                                .when(doomed, |row| row.child(div().flex_none().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(DANGER)).child("Удалить блок? Нажмите ещё раз")))
                                 .child(tools(group_key).when(doomed, |row| row.visible())
                                     .child(icon_button(("card-pblock-edit", row_id), "fm/pencil.svg", "Изменить блок (или щёлкните по нему)", false, !busy)
                                         .when(!busy, |button| button.on_click(start)))
@@ -1135,7 +1136,7 @@ impl Explorer {
                                         .when(!busy, |button| button.on_click(cx.listener(move |this, _, _, cx| this.delete_passport_block(gone.clone(), cx)))))));
                         if section.rows.is_empty() {
                             let (k, t) = (key.clone(), title.clone());
-                            part = part.child(div().id(("card-pblock-empty", row_id)).text_size(px(12.)).text_color(rgb(TEXT_DIM)).cursor_text()
+                            part = part.child(div().id(("card-pblock-empty", row_id)).text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_DIM)).cursor_text()
                                 .child("Пусто — щёлкните, чтобы заполнить")
                                 .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportBlock(k.clone()), false, t.clone(), String::new(), window, cx))));
                         }
@@ -1157,7 +1158,7 @@ impl Explorer {
                                     .when(value.is_empty(), |cell| cell.text_color(rgb(TEXT_DIM)))
                                     .child(if value.is_empty() { "—".to_string() } else { display_text(value) }).on_click(edit).into_any_element(),
                             };
-                            part = part.child(div().flex().items_start().gap_3().text_size(px(12.))
+                            part = part.child(div().flex().items_start().gap_3().text_size(px(ui::SECONDARY_TEXT))
                                 .child(div().w(px(150.)).flex_none().text_color(rgb(TEXT_MUTED)).child(label.clone()))
                                 .child(value_view));
                         }
@@ -1170,7 +1171,7 @@ impl Explorer {
                     }
                     // The journal: what was done and when, newest last.
                     body = body.child(div().h(px(24.)).mt_1().flex().items_center().gap_1()
-                        .child(div().flex_1().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ЖУРНАЛ")));
+                        .child(div().flex_1().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM)).child("ЖУРНАЛ")));
                     if target == Some(Target::PassportJournal) {
                         body = body.child(self.edit_fields(Some("Журнал — запись в строке".into()), false, true, cx));
                     } else {
@@ -1179,10 +1180,10 @@ impl Explorer {
                         let all = Arc::new(passport.journal.join("\n"));
                         for (index, line) in passport.journal.iter().enumerate().skip(shown) {
                             let all = all.clone();
-                            body = body.child(div().id(("card-journal", index)).text_size(px(12.)).cursor_text().child(display_text(line))
+                            body = body.child(div().id(("card-journal", index)).text_size(px(ui::SECONDARY_TEXT)).cursor_text().child(display_text(line))
                                 .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportJournal, false, "Журнал".into(), all.as_ref().clone(), window, cx))));
                         }
-                        body = body.child(div().text_size(px(12.)).child(Input::new(&self.cards.journal_input)));
+                        body = body.child(div().text_size(px(ui::SECONDARY_TEXT)).child(Input::new(&self.cards.journal_input)));
                     }
                     body = body.child(div().flex().items_center().gap_2().mt_1()
                         .child(self.link_row("card-passport-file", file, None, cx).flex_1().min_w_0())
@@ -1204,7 +1205,7 @@ impl Explorer {
                     let full = event.path.display().to_string();
                     let gone = event.kind == "missing";
                     body = body.child(div().id(("card-change", index)).h(px(24.)).flex_none().px_1().flex().items_center().gap_2().rounded(px(4.))
-                        .cursor_pointer().hover(|style| style.bg(rgb(HOVER))).text_size(px(12.))
+                        .cursor_pointer().hover(|style| style.bg(rgb(HOVER))).text_size(px(ui::SECONDARY_TEXT))
                         .child(div().w(px(110.)).flex_none().text_color(rgb(TEXT_DIM)).child(format!("{} {}", event.day_label(), event.clock_label())))
                         .child(div().flex_1().min_w_0().truncate().child(browser::display_name(&event.path)))
                         .child(div().flex_none().text_color(rgb(if gone { DANGER } else { ACCENT })).child(event.feed_label().to_string()))
@@ -1217,7 +1218,7 @@ impl Explorer {
         let hidden: Vec<(&'static str, &'static str)> = model::BUILT_IN.into_iter()
             .filter(|(key, _)| open.card.is_hidden(key)).collect();
         if !hidden.is_empty() && !busy {
-            let mut row = div().flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Скрыто:");
+            let mut row = div().flex().flex_wrap().items_center().gap_2().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_DIM)).child("Скрыто:");
             for (key, title) in hidden {
                 row = row.child(div().id(gpui::SharedString::from(format!("card-show-{key}"))).px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
                     .hover(|style| style.bg(rgb(HOVER))).child(format!("вернуть «{title}»"))

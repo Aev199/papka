@@ -197,6 +197,17 @@ pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
         .child(div().relative().min_w_0().truncate().child(label.into()))
 }
 
+/// Compact, non-animated choice control for settings. Callers own the
+/// selected state and click action; geometry and presentation are shared.
+pub(crate) fn choice_chip(id: impl Into<ElementId>, label: impl Into<SharedString>, chosen: bool) -> Stateful<Div> {
+    div().id(id).h(px(ui::CHOICE_HEIGHT)).px_2().flex().flex_none().items_center()
+        .rounded(px(ui::CONTROL_RADIUS)).cursor_pointer().text_size(px(ui::SECONDARY_TEXT)).border_1()
+        .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
+        .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
+            .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))))
+        .child(label.into())
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ButtonKind { Primary, Danger, Ghost }
 
@@ -2706,13 +2717,13 @@ impl Explorer {
         let tip = label.clone();
         // Long labels end in "…" with the full text in a tooltip; the
         // shortcut keeps its place inside the menu.
-        div().id(id).h(px(28.)).flex_none().px_2().flex().items_center().gap_2().rounded(px(4.))
-            .text_size(px(13.)).text_color(rgb(color))
-            .when(enabled, |this| this.cursor_pointer().hover(|style| style.bg(rgb(if danger { 0x3A2128 } else { HOVER }))))
+        div().id(id).h(px(ui::MENU_ROW_HEIGHT)).flex_none().px_2().flex().items_center().gap_2().rounded(px(ui::CONTROL_RADIUS))
+            .text_size(px(ui::BODY_TEXT)).text_color(rgb(color))
+            .when(enabled, |this| this.cursor_pointer().hover(|style| style.bg(rgb(if danger { DANGER_SOFT } else { HOVER }))))
             .when(tip.chars().count() > 34, |this| this.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)))
             .child(small_icon(icon_path, if !enabled { TEXT_DIM } else if danger { DANGER } else { TEXT_MUTED }))
             .child(div().flex_1().min_w_0().truncate().child(label))
-            .child(div().flex_none().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(shortcut))
+            .child(div().flex_none().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM)).child(shortcut))
     }
 
     fn separator() -> Div {
@@ -2765,7 +2776,7 @@ impl Explorer {
         let max_height = window.viewport_size().height - px(16.);
         let mut list = div().id(("context-menu", menu.serial as usize)).occlude().w(px(300.)).max_h(max_height)
             .overflow_y_scroll().p_1().flex().flex_col()
-            .rounded(px(6.)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
+            .rounded(px(ui::PANEL_RADIUS)).bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.context_menu = None;
                 cx.notify();

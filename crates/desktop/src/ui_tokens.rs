@@ -12,6 +12,21 @@ pub(crate) const DIALOG_BUTTON_HEIGHT: f32 = 28.;
 pub(crate) const FOCUS_MARK_WIDTH: f32 = 3.;
 pub(crate) const FOCUS_MARK_HEIGHT: f32 = 16.;
 
+// Typography roles in UI chrome, not document/preview content.
+pub(crate) const CAPTION_TEXT: f32 = 11.;
+pub(crate) const SECONDARY_TEXT: f32 = 12.;
+pub(crate) const BODY_TEXT: f32 = 13.;
+pub(crate) const SECTION_TITLE_TEXT: f32 = 14.;
+pub(crate) const DIALOG_TITLE_TEXT: f32 = 15.;
+pub(crate) const MENU_ROW_HEIGHT: f32 = 28.;
+pub(crate) const PALETTE_ROW_HEIGHT: f32 = 30.;
+pub(crate) const SETTINGS_ROW_HEIGHT: f32 = 30.;
+pub(crate) const CHOICE_HEIGHT: f32 = 24.;
+pub(crate) const PALETTE_HEADER_HEIGHT: f32 = 44.;
+pub(crate) const PALETTE_FOOTER_HEIGHT: f32 = 28.;
+pub(crate) const CHECKBOX_SIZE: f32 = 16.;
+pub(crate) const CHECKMARK_SIZE: f32 = 12.;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -22,6 +37,18 @@ mod tests {
         assert_eq!([ICON_SIZE, SMALL_ICON_SIZE, TOOLBAR_BUTTON_SIZE, STATUS_BUTTON_SIZE,
             DIALOG_BUTTON_HEIGHT, FOCUS_MARK_WIDTH, FOCUS_MARK_HEIGHT],
             [16., 14., 30., 24., 28., 3., 16.]);
+    }
+
+    #[test]
+    fn hierarchy_and_control_geometry_are_consistent() {
+        assert!(CAPTION_TEXT < SECONDARY_TEXT && SECONDARY_TEXT < BODY_TEXT);
+        assert!(BODY_TEXT < SECTION_TITLE_TEXT && SECTION_TITLE_TEXT < DIALOG_TITLE_TEXT);
+        assert!(CHECKBOX_SIZE >= CHECKMARK_SIZE + 4.);
+        assert!(SETTINGS_ROW_HEIGHT >= CHECKBOX_SIZE + 8.);
+        assert!(CHOICE_HEIGHT >= SECONDARY_TEXT + 8.);
+        assert!(MENU_ROW_HEIGHT >= BODY_TEXT + 8.);
+        assert!(PALETTE_ROW_HEIGHT >= BODY_TEXT + 8.);
+        assert!(PALETTE_HEADER_HEIGHT > PALETTE_FOOTER_HEIGHT);
     }
 
     #[test]

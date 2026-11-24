@@ -60,3 +60,10 @@ into shared builders and component theme without changing numeric values.
 Windows verification is enabled for this branch. Next slice: audit and migrate
 repeated menu/list/dialog roles and define typography/spacing after screenshots;
 do not change file row height policy or user settings unintentionally.
+
+### Stage 1 — typography and shared settings controls
+- Added explicit caption, secondary, body, section and dialog title roles; migrated settings/palette, transfer panel, project card and shared menu rows. Document and preview fonts are not changed.
+- Shared choice_chip handles settings choices and update-channel controls. All dimensions retain the baseline values; row density and hit areas remain unchanged.
+- Checked settings now use the existing accessible SELECTED / SELECTION_TEXT pair instead of a bright accent with a white glyph (on dark teal/green/orange/graphite the previous contrast was about 2.1:1).
+- Destructive menu hover uses theme-aware DANGER_SOFT (text contrast 5.06 dark / 4.81 light); test both themes. No changes to command semantics.
+- CI required; Windows screenshots and manual acceptance still pending.

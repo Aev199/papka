@@ -9,6 +9,7 @@ use gpui_component::tooltip::Tooltip;
 
 use crate::Explorer;
 use crate::theme::*;
+use crate::ui_tokens as ui;
 use crate::transfers;
 use crate::view::{ButtonKind, icon_button, text_button};
 
@@ -83,10 +84,10 @@ impl Explorer {
 
     pub(crate) fn transfer_panel(&self, presentation: &TransferPanelPresentation, popup: crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         let mut card = div().id("transfer-panel").occlude().absolute().right(px(12.)).bottom(px(44.)).w(px(380.))
-            .p_3().flex().flex_col().gap_2().rounded(px(6.))
-            .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).text_size(px(13.)).text_color(rgb(TEXT))
+            .p_3().flex().flex_col().gap_2().rounded(px(ui::PANEL_RADIUS))
+            .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).text_size(px(ui::BODY_TEXT)).text_color(rgb(TEXT))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        let dim = |text: String| div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(text);
+        let dim = |text: String| div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(text);
 
         if let Some(live) = &presentation.live {
             let paused = live.paused;
@@ -95,10 +96,10 @@ impl Explorer {
             let heading = if live.phase.is_empty() { format!("{}…", live.action) } else { live.phase.clone() };
             card = card.child(div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD).child(heading))
-                .child(div().flex_none().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.).floor() as u32)))
+                .child(div().flex_none().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.).floor() as u32)))
                 .child(icon_button("transfer-fold", "fm/chevron-down.svg", "Свернуть: перенос продолжится, ход виден в строке внизу", false, true)
                     .on_click(cx.listener(|this, _, _, cx| { this.transfers.panel_hidden = true; cx.notify(); }))));
-            card = card.child(div().id("transfer-target").min_w_0().truncate().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+            card = card.child(div().id("transfer-target").min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED))
                 .child(format!("в «{}»", browser::display_name(&live.target)))
                 .tooltip(move |window, cx| Tooltip::new(target.clone()).build(window, cx)));
             if let Some(current) = &live.current {
@@ -135,7 +136,7 @@ impl Explorer {
                     .text_color(rgb(if failed { DANGER } else { TEXT })).child(report.title.clone()))
                 .child(icon_button("transfer-close", "fm/x.svg", "Закрыть", false, true)
                     .on_click(cx.listener(move |this, _, _, cx| { this.transfers.dismiss(id); cx.notify(); }))));
-            card = card.child(div().id("transfer-report-target").min_w_0().truncate().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+            card = card.child(div().id("transfer-report-target").min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED))
                 .child(target_label)
                 .tooltip(move |window, cx| Tooltip::new(target.clone()).build(window, cx)));
             if failed {
@@ -146,7 +147,7 @@ impl Explorer {
                     list = list.child(div().flex().flex_col()
                         .child(div().id(("transfer-error", index)).min_w_0().truncate().child(browser::display_name(&failure.path))
                             .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx)))
-                        .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(failure.error.clone())));
+                        .child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(failure.error.clone())));
                 }
                 if report.failures.len() > 200 {
                     list = list.child(dim(format!("…и ещё {}", report.failures.len() - 200)));
