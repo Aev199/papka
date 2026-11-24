@@ -236,7 +236,7 @@ impl Render for FileDragPreview {
                     .child(div().max_w(px(240.)).truncate().child(self.name.clone()))
                     // What a release here does; Ctrl and Shift change it at once.
                     .when_some(word, |chip, word| chip.child(div().px_1p5().rounded_sm().text_size(px(11.))
-                        .bg(rgb(theme::SELECTED_BORDER)).child(word)))
+                        .bg(rgb(theme::PRIMARY_HOVER)).child(word)))
             )
     }
 }

@@ -14,6 +14,9 @@ pub const SELECTED: u32 = 0x0069D9;
 pub const SELECTION_TEXT: u32 = 0xFFFFFF;
 pub const INACTIVE_SELECTED: u32 = 0x35465C;
 pub const SELECTED_BORDER: u32 = 0x3D6BD8;
+/// Fill for a hovered primary action or the action chip on a drag ghost.
+/// Unlike a border tint, it must retain readable selection text.
+pub const PRIMARY_HOVER: u32 = 0x005CBF;
 /// Ancestors of the current folder in Miller columns.
 pub const TRAIL: u32 = 0x24456B;
 pub const ACCENT: u32 = 0x5E8BFF;
@@ -93,6 +96,7 @@ pub fn resolve_with(light: bool, scheme: usize, color: u32) -> u32 {
         ACTIVE_PANE => values[2],
         SELECTED => values[3],
         SELECTED_BORDER => values[4],
+        PRIMARY_HOVER => mix(values[3],0,0.12),
         TRAIL => values[5],
         _ => resolve(light, color),
     }
@@ -194,6 +198,20 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn primary_action_hover_stays_readable_in_every_scheme() {
+        for scheme in 0..ACCENT_SCHEMES.len() {
+            for light in [false,true] {
+                let fg = luminance(resolve_with(light,scheme,SELECTION_TEXT));
+                let base = resolve_with(light,scheme,SELECTED);
+                let hover = resolve_with(light,scheme,PRIMARY_HOVER);
+                assert_ne!(base,hover);
+                let bg = luminance(hover);
+                assert!((fg.max(bg)+0.05)/(fg.min(bg)+0.05)>=4.5);
+            }
+        }
+    }
+
     #[test]
     fn destructive_command_hover_is_readable_in_both_themes() {
         for light in [false, true] {

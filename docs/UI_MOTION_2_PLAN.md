@@ -129,3 +129,12 @@ command mode skips disabled commands, query changes select the first available
 command, disabled rows no longer attach click handlers. Prompt uses shared
 panel/title tokens. Added pure viewport and keyboard selection tests.
 Remaining: full small-window visual review, menu presence and content polish.
+
+## Stage 9 — workspace-wide polish, first slice
+Primary-action hover and drag action chip no longer use the decorative
+selection-border color as a text background. The new semantic PRIMARY_HOVER
+is derived from each scheme's accessible selection color; test all seven
+schemes, light and dark. Centralized title/status/navigation and sidebar row
+geometry without changing heights. Status-bar project and selection labels
+can shrink and truncate instead of competing with the controls.
+Actual appearance and DPI comparison require the deferred Windows manual pass.

@@ -197,7 +197,7 @@ pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
     // Hover colours follow the accent scheme; a ghost button keeps a frame
     // so it stays visible on a dialog of its own colour.
     let (bg, hover, fg, frame) = match kind {
-        ButtonKind::Primary => (SELECTED, SELECTED_BORDER, SELECTION_TEXT, SELECTED),
+        ButtonKind::Primary => (SELECTED, PRIMARY_HOVER, SELECTION_TEXT, SELECTED),
         ButtonKind::Danger => (0x9E3A43, 0xB8454F, 0xFFFFFF, 0x9E3A43),
         ButtonKind::Ghost => (RAISED, HOVER, TEXT, BORDER_STRONG),
     };
@@ -846,7 +846,7 @@ impl Explorer {
     /// system buttons; each pane has its own tab strip.
     fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let controls = !cfg!(target_os="macos") && (!cfg!(target_os="linux") || matches!(window.window_decorations(),gpui::Decorations::Client {..}));
-        div().h(px(32.)).flex_none().flex().items_center().bg(rgb(WINDOW))
+        div().h(px(ui::TITLE_BAR_HEIGHT)).flex_none().flex().items_center().bg(rgb(WINDOW))
             .when(cfg!(target_os="macos") && !self.show_sidebar, |bar|bar.pl(px(80.)))
             .when(!self.show_sidebar, |bar|bar.child(icon_button("toggle-sidebar","fm/panel-left.svg","Боковая панель (Ctrl+B)",false,true)
                 .on_click(cx.listener(|this,_,_,cx| {this.show_sidebar=true;cx.notify();}))))
@@ -1000,7 +1000,7 @@ impl Explorer {
         let can_up = pane.path.parent().is_some();
         // The pane that is not being worked in steps back a little.
         let focused = side == self.browser.active || self.browser.leaves().len() < 2;
-        div().w_full().h(px(36.)).flex_none().flex().items_center().gap_1().px_2()
+        div().w_full().h(px(ui::NAV_BAR_HEIGHT)).flex_none().flex().items_center().gap_1().px_2()
             .bg(rgb(SURFACE)).border_b_1().border_color(rgb(BORDER))
             .when(!focused, |row| row.opacity(0.6))
             .child(icon_button("back", "fm/arrow-left.svg", "Назад (Alt+←)", false, can_back)
@@ -1026,7 +1026,7 @@ impl Explorer {
         let middle=path.clone();
         let spring=path.clone();
         let fill = self.spring_fill(&crate::spring::SpringTarget::Folder(self.active_side(), path.clone()));
-        div().id(id).relative().overflow_hidden().h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
+        div().id(id).relative().overflow_hidden().h(px(ui::SIDEBAR_ROW_HEIGHT)).px_2().flex().items_center().gap_2().rounded(px(ui::CONTROL_RADIUS))
             .cursor_pointer()
             .children(item_overlays(None, fill))
             .when(active && framed, |this| this.child(focus_mark()))
@@ -1071,11 +1071,11 @@ impl Explorer {
         let all: Vec<Place> = self.places.iter().chain(self.drives.iter()).cloned().collect();
         let active_place = containing_place(&all, &current).map(|place| place.path.clone());
         let mut side = div().id("sidebar").flex_1().min_h_0().flex().flex_col().pb_3()
-            .overflow_y_scrollbar().text_size(px(13.))
+            .overflow_y_scrollbar().text_size(px(ui::BODY_TEXT))
             .child(self.section("Места", cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(|this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(None),cx))));
         let open = |key: &str| !self.collapsed.contains(key);
-        let height = 28. * self.places.len().max(1) as f32;
+        let height = ui::SIDEBAR_ROW_HEIGHT * self.places.len().max(1) as f32;
         let mut body = div().flex_none().flex().flex_col();
         // Places are edited like favourites: right click hides, dragging reorders.
         for (index, place) in self.places.iter().enumerate() {
@@ -1221,7 +1221,7 @@ impl Explorer {
         label: &'static str,
         click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
-        div().id(id).mx_2().h(px(28.)).px_2().flex().items_center().gap_2().rounded(px(4.))
+        div().id(id).mx_2().h(px(ui::SIDEBAR_ROW_HEIGHT)).px_2().flex().items_center().gap_2().rounded(px(ui::CONTROL_RADIUS))
             .cursor_pointer().text_color(rgb(TEXT_MUTED))
             .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
             .child(icon(icon_path, TEXT_MUTED))
@@ -2625,12 +2625,12 @@ impl Explorer {
         }) };
         let filter_shown = !card && (self.filter_open || !self.filter.is_empty());
         let split = self.browser.groups.len() > 1;
-        let mut bar = div().w_full().h(px(32.)).flex_none().pl_1().pr_1().flex().items_center().gap_3()
+        let mut bar = div().w_full().h(px(ui::STATUS_BAR_HEIGHT)).flex_none().pl_1().pr_1().flex().items_center().gap_3()
             .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER))
-            .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+            .text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED))
             // Atlas: a magnifier in the corner; the filter field opens in place.
-            .when_some(card_summary, |this, summary| this.child(div().flex().items_center().gap_2().pl_2()
-                .child(small_icon("fm/layers.svg", ACCENT)).child(summary)))
+            .when_some(card_summary, |this, summary| this.child(div().flex().min_w_0().max_w(px(240.)).items_center().gap_2().pl_2()
+                .child(small_icon("fm/layers.svg", ACCENT)).child(div().min_w_0().truncate().child(summary))))
             .when(!filter_shown && !card, |this| this.child(
                 bar_button("filter-open", "fm/search.svg", "Поиск во вложенных папках (Ctrl+F). Фильтр этой папки — просто начните набирать имя", false)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -2646,7 +2646,7 @@ impl Explorer {
                     .child(Input::new(&self.search_input).h(px(24.)).text_size(px(12.))
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
             .when_some(count, |this, count| this.child(items_label(count)))
-            .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
+            .when_some(selection, |this, text| this.child(div().min_w_0().max_w(px(360.)).truncate().child(text)))
             // «Тип»: only drawings, PDF, … in this pane, in one click.
             .when(!card, |this| this.child({
                 let active = self.kinds.get(self.browser.active).is_some();
