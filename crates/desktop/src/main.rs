@@ -30,6 +30,7 @@ mod dock_motion;
 mod tab_reorder;
 mod popup_motion;
 mod mode_motion;
+mod spatial_motion;
 mod kind_filter;
 mod search_panel;
 mod updates;

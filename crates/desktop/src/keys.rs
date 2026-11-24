@@ -1055,6 +1055,7 @@ impl Explorer {
         self.motion.tab_reorder.prune(&ids);
         self.motion.docks.retain(|id,_| ids.contains(id));
         self.motion.modes.retain(|id,_| ids.contains(id));
+        self.motion.spatial.retain(|id,_| ids.contains(id));
         self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));

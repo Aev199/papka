@@ -84,6 +84,7 @@ pub(crate) struct Motion {
     pub(crate) lists: HashMap<(GroupId,PathBuf),crate::list_motion::ListMotion>,
     pub(crate) docks: HashMap<GroupId,crate::dock_motion::DockMotion>,
     pub(crate) modes: HashMap<GroupId,crate::mode_motion::PaneMotion>,
+    pub(crate) spatial: HashMap<GroupId,crate::spatial_motion::SpatialMotion>,
     /// New items and when each came on screen (`None`: not drawn yet).
     flashes: RefCell<HashMap<String, (Flash, Instant, Option<Instant>)>>,
     opened_tab: Option<(GroupId, usize, Instant)>,

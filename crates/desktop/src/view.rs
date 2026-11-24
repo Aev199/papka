@@ -63,6 +63,21 @@ fn item_overlays(flash: Option<(crate::motion::Flash, f32)>, fill: Option<f32>) 
     layers
 }
 
+/// Keep the logical slot in the virtual list while its visible content moves.
+fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElement, width: Option<f32>, height: f32) -> Div {
+    let offset = frame.offset(path, std::time::Instant::now());
+    let record = frame.clone();
+    let path = path.to_path_buf();
+    div().relative().h(px(height)).when_some(width, |slot, width| slot.w(px(width)))
+        .when(width.is_none(), |slot| slot.w_full())
+        .child(div().relative().w_full().h_full().left(px(offset.x)).top(px(offset.y)).child(body))
+        .on_prepaint(move |bounds, _, _| {
+            record.record(path.clone(), crate::spatial_motion::Position {
+                x: bounds.origin.x / px(1.), y: bounds.origin.y / px(1.),
+            }, offset);
+        })
+}
+
 fn column_scroll_area<I: Into<gpui::ElementId>>(id: I, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<I> {
     div().id(id).relative().track_scroll(scroll).flex_1().min_w_0().min_h_0()
         .overflow_x_scroll().lock_scroll_axis()
@@ -389,6 +404,10 @@ impl Explorer {
             let current=self.pane_path(group);
             let saved=self.motion.modes.get(&group).and_then(|m|(m.folder==current).then(||m.anchor.clone()).flatten());
             let anchor=if group==self.active_side(){self.selected.clone().filter(|p|p.parent()==Some(current.as_path())).or(saved)}else{saved};
+            let animate=crate::theme::animations() && !self.renaming && self.marquee.is_none() && !self.dragging_files(cx);
+            if let Some(spatial)=self.motion.spatial.get(&group) {
+                if animate {spatial.begin(&current,now);}else{spatial.cancel();}
+            }
             self.commit_view(group,mode);anchor.map(|anchor|(current,anchor))
         });
         let weak=cx.weak_entity();
@@ -396,6 +415,7 @@ impl Explorer {
         // The project card takes the pane's place: no address row, no list.
         let card=self.cards.shown_in(group);
         let navigation=if card {div().into_any_element()} else {self.nav_row(group,cx).into_any_element()};
+        if card {self.motion.spatial.remove(&group);}
         let body=if card {self.project_card_view(cx)} else {self.pane(group,cx)};
         div().id(SharedString::from(format!("group-{}",group.0))).size_full().min_w_0().min_h_0()
             .flex().flex_col().overflow_hidden().border_1()
@@ -1571,6 +1591,13 @@ impl Explorer {
                         })
                 ).into_any_element();
             }
+            // Only the current folder is shared by all three presentation modes.
+            let spatial_frame=if folder==self.pane_path(side) {
+                let animate=crate::theme::animations() && !self.renaming && self.marquee.is_none() && !self.dragging_files(cx);
+                let (frame,moving)=self.motion.spatial.entry(side).or_default().frame(&folder,now,animate);
+                if moving {self.motion.late_frame.set(true);}
+                Some(frame)
+            }else{None};
             let handle = self.scroll_handle(side, &folder);
             let count = indices.len();
             let list_id = SharedString::from(format!("list-{}-{}", side.0, folder.display()));
@@ -1597,7 +1624,12 @@ impl Explorer {
                         range.map(|row| {
                             let tiles = (row * per_row..((row + 1) * per_row).min(indices.len()))
                                 .map(|position| { let entry = listing.entries[indices[position]].clone(); let (x,y)=this.motion.grids.get(&side).map_or((0.,0.),|grid|grid.offset(&entry.path,std::time::Instant::now()));
-                                    this.tile(&entry, &folder, side, cx).absolute().left(px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x)).top(px(y)).into_any_element() })
+                                    let tile=this.tile(&entry, &folder, side, cx);
+                                    let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
+                                    if let Some(frame)=&spatial_frame {
+                                        spatial_slot(frame,&entry.path,tile.into_any_element(),Some(crate::thumbs::tile_width()),crate::thumbs::tile_height())
+                                            .absolute().left(left).top(px(y)).into_any_element()
+                                    }else{tile.absolute().left(left).top(px(y)).into_any_element()} })
                                 .collect::<Vec<_>>();
                             div().relative().w_full().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP))
                                 .children(tiles).into_any_element()
@@ -1649,7 +1681,10 @@ impl Explorer {
                         range.map(|position| {
                             let entry = &listing.entries[indices[position]];
                             let on_trail = trail.as_ref() == Some(&entry.path);
-                            this.row(entry, &folder, side, position, on_trail, list_mode, list_mode && position % 2 == 1, cx)
+                            let row=this.row(entry, &folder, side, position, on_trail, list_mode, list_mode && position % 2 == 1, cx);
+                            if let Some(frame)=&spatial_frame {
+                                spatial_slot(frame,&entry.path,row,None,row_height()).into_any_element()
+                            }else{row}
                         }).collect::<Vec<_>>()
                     }}))
                     .track_scroll(&handle)
