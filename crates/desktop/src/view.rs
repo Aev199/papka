@@ -463,7 +463,7 @@ impl Explorer {
         // The project card takes the pane's place: no address row, no list.
         let card=self.cards.shown_in(group);
         let navigation=if card {div().into_any_element()} else {self.nav_row(group,cx).into_any_element()};
-        if card {self.motion.spatial.remove(&group);}
+        if card {self.motion.spatial.remove(&group);self.motion.column_presence.remove(&group);self.motion.column_reveals.remove(&group);self.column_reveal_keys.remove(&group);}
         let body=if card {self.project_card_view(cx)} else {self.pane(group,cx)};
         let spatial=self.motion.spatial.get(&group).cloned();
         let ghosts=spatial.as_ref().map_or_else(Vec::new,|m|m.ghosts(&self.pane_path(group),now));
@@ -3520,12 +3520,13 @@ impl Render for Explorer {
         let resizing=self.motion.layout.drag.is_some();
         let window_changed=self.motion.layout.window_changed(viewport);
         let instant=!crate::theme::animations() || window_changed || resizing || self.file_drag || self.renaming || self.marquee.is_some();
-        let (sidebar_width,sidebar_moving)=self.motion.layout.sidebar.sample(if self.show_sidebar {SIDEBAR_WIDTH}else{0.},
+        let (sidebar_width,sidebar_moving)=self.motion.layout.sidebar.bounded(if self.show_sidebar {SIDEBAR_WIDTH}else{0.},SIDEBAR_WIDTH,
             instant || !self.motion.layout.sidebar_initialized,std::time::Instant::now(),180);
         self.motion.layout.sidebar_initialized=true;
         if sidebar_moving {window.request_animation_frame();}
-        let desired=desired.min((window_width-sidebar_width-240.).max(0.));
-        let (inspector_width,panel_moving)=self.motion.layout.inspector.sample(if self.show_inspector {desired}else{0.},instant,
+        let available=(window_width-sidebar_width-240.).max(0.);
+        let desired=desired.min(available);
+        let (inspector_width,panel_moving)=self.motion.layout.inspector.bounded(if self.show_inspector {desired}else{0.},available,instant,
             std::time::Instant::now(),160);
         if panel_moving {window.request_animation_frame();}
         let pane_width=(window_width-sidebar_width-inspector_width).max(240.);

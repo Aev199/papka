@@ -87,6 +87,20 @@ impl Spring {
         (self.target + (distance + c * t) * decay, (self.velocity - omega * c * t) * decay)
     }
 
+    /// Panel geometry may not cross the workspace's physical bounds, even
+    /// if a velocity-preserving reversal would overshoot a boundary.
+    pub(crate) fn bounded(&mut self,target:f32,max:f32,instant:bool,now:Instant,ms:u64)->(f32,bool) {
+        let max=max.max(0.);
+        let target=target.clamp(0.,max);
+        let (value,active)=self.sample(target,instant,now,ms);
+        let clamped=value.clamp(0.,max);
+        if value!=clamped {
+            self.sample(clamped,true,now,ms);
+            return (clamped,(target-clamped).abs()>0.02);
+        }
+        (value,active)
+    }
+
     pub(crate) fn sample(&mut self, target: f32, instant: bool, now: Instant, ms: u64) -> (f32, bool) {
         if instant || ms == 0 {
             self.from = target; self.target = target; self.velocity = 0.; self.started = None;
@@ -126,6 +140,19 @@ mod tests {
         assert!((before.1 - after.1).abs() < 0.001);
         assert_eq!(spring.sample(-20., false, mid + span * 2, TRANSIENT_MS), (-20., false));
         assert_eq!(spring.sample(0., true, mid, TRANSIENT_MS), (0., false));
+    }
+
+    #[test]
+    fn bounded_panel_spring_respects_a_shrinking_workspace_and_settles() {
+        let now=Instant::now();let mut s=Spring::default();
+        assert_eq!(s.bounded(300.,300.,true,now,160),(300.,false));
+        let (width,active)=s.bounded(0.,120.,false,now,160);
+        assert_eq!(width,120.);assert!(active);
+        assert_eq!(s.bounded(0.,120.,false,now,160),(120.,true));
+        let (width,_)=s.bounded(0.,120.,false,now+Duration::from_millis(80),160);
+        assert!((0. ..=120.).contains(&width));
+        assert_eq!(s.bounded(0.,120.,false,now+Duration::from_millis(400),160),(0.,false));
+        assert_eq!(s.bounded(500.,100.,true,now,160),(100.,false));
     }
 
     #[test]

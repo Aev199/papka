@@ -53,6 +53,10 @@ struct Column {
 }
 
 struct Exit { column:Column, at:Instant, alpha:f32 }
+struct Enter { at:Instant, from:f32 }
+impl Enter {
+    fn alpha(&self,now:Instant)->f32 {self.from+(1.-self.from)*presence_alpha(now,self.at)}
+}
 
 pub(crate) struct Departure {
     pub path:PathBuf, pub x:f32, pub width:f32, pub alpha:f32,
@@ -65,7 +69,7 @@ pub(crate) struct Presence {
     tab:Option<usize>,
     viewport:f32,
     columns:Vec<Column>,
-    entering:HashMap<PathBuf,Instant>,
+    entering:HashMap<PathBuf,Enter>,
     exiting:Vec<Exit>,
 }
 
@@ -80,26 +84,30 @@ impl Presence {
         if reset {
             self.entering.clear();self.exiting.clear();
         } else {
-            self.entering.retain(|path,at| folders.contains(path) && now.saturating_duration_since(*at)<PRESENCE_SPAN);
-            self.exiting.retain(|exit| !folders.contains(&exit.column.path) && now.saturating_duration_since(exit.at)<PRESENCE_SPAN);
+            // Sample removed and returning columns before pruning their clocks.
+            self.exiting.retain(|exit| now.saturating_duration_since(exit.at)<PRESENCE_SPAN);
             for column in &self.columns {
                 if !folders.contains(&column.path) && column.x<viewport && column.x+column.width>0.
                     && self.exiting.len()<DEPARTURE_LIMIT {
-                    let alpha=self.entering.get(&column.path).map_or(1.,|at|presence_alpha(now,*at));
+                    let alpha=self.entering.get(&column.path).map_or(1.,|enter|enter.alpha(now));
                     self.exiting.push(Exit{column:column.clone(),at:now,alpha});
                 }
             }
             for column in &next {
                 if !self.columns.iter().any(|old|old.path==column.path) {
-                    self.entering.insert(column.path.clone(),now);
+                    let from=self.exiting.iter().find(|exit|exit.column.path==column.path)
+                        .map_or(0.,|exit|exit.alpha*(1.-presence_alpha(now,exit.at)));
+                    self.entering.insert(column.path.clone(),Enter{at:now,from});
                 }
             }
+            self.entering.retain(|path,enter| folders.contains(path) && now.saturating_duration_since(enter.at)<PRESENCE_SPAN);
+            self.exiting.retain(|exit|!folders.contains(&exit.column.path));
         }
         self.tab=Some(tab);self.viewport=viewport;self.columns=next;
     }
 
     pub(crate) fn entrance(&self,path:&Path,now:Instant)->(f32,f32) {
-        let alpha=self.entering.get(path).map_or(1.,|at|presence_alpha(now,*at));
+        let alpha=self.entering.get(path).map_or(1.,|enter|enter.alpha(now));
         (alpha,8.*(1.-alpha))
     }
 
@@ -112,7 +120,7 @@ impl Presence {
     }
 
     pub(crate) fn active(&self,now:Instant)->bool {
-        self.entering.values().any(|at|now.saturating_duration_since(*at)<PRESENCE_SPAN)
+        self.entering.values().any(|enter|now.saturating_duration_since(enter.at)<PRESENCE_SPAN)
             ||self.exiting.iter().any(|exit|now.saturating_duration_since(exit.at)<PRESENCE_SPAN)
     }
 }
@@ -158,6 +166,23 @@ mod tests {
         assert!(!p.active(later));
         p.observe(1,&[a,b],&[200.,200.],350.,0.,later,true);
         assert!(!p.active(later));
+    }
+
+    #[test]
+    fn interrupted_column_presence_uses_the_current_opacity() {
+        let now=Instant::now();let mut p=Presence::default();
+        let a=PathBuf::from("a");let b=PathBuf::from("a/b");
+        p.observe(0,&[a.clone()],&[200.],400.,0.,now,true);
+        p.observe(0,&[a.clone(),b.clone()],&[200.,200.],400.,0.,now,true);
+        let mid=now+PRESENCE_SPAN/4;
+        let alpha=p.entrance(&b,mid).0;
+        p.observe(0,&[a.clone()],&[200.],400.,0.,mid,true);
+        assert_eq!(p.departures(mid)[0].alpha,alpha);
+        let back=mid+PRESENCE_SPAN/4;
+        let alpha=p.departures(back)[0].alpha;
+        p.observe(0,&[a,b.clone()],&[200.,200.],400.,0.,back,true);
+        assert_eq!(p.entrance(&b,back).0,alpha);
+        assert!(p.departures(back).is_empty());
     }
 
     #[test]

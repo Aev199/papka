@@ -323,6 +323,7 @@ impl Motion {
     /// Where the sliding selection is in `folder` of `group` (in rows), and
     /// the row it goes to; None once it is there.
     pub(crate) fn plate_at(&self, group: GroupId, folder: &Path) -> Option<(f32, usize)> {
+        if !crate::theme::animations() {return None;}
         let (g, f, from, to, start) = self.plate.as_ref()?;
         if *g != group || f != folder || start.elapsed() >= PLATE { return None; }
         let t = ease_out(start.elapsed(), PLATE);
@@ -351,7 +352,7 @@ impl Motion {
         pictures.retain(|_, arrived| arrived.elapsed() < PICTURE_IN * 3);
         let pictures_coming = pictures.values().any(|arrived| arrived.elapsed() < PICTURE_IN);
         drop(pictures);
-        if self.plate.as_ref().is_some_and(|plate| plate.4.elapsed() >= PLATE) { self.plate = None; }
+        if !crate::theme::animations() || self.plate.as_ref().is_some_and(|plate| plate.4.elapsed() >= PLATE) { self.plate = None; }
         let entering = crate::theme::animations() && self.entrances.values().any(|e|
             e.mode != 'c' && e.started.is_some_and(|at| at.elapsed() < LIST_APPEAR));
         entering || flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding || line_moving || pictures_coming || self.plate.is_some()

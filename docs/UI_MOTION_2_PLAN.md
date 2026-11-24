@@ -171,3 +171,13 @@ filesystem operations. Cache validated selected positions while the immutable
 listing/order and dragged paths match to avoid scanning a large list each frame.
 Added scope/cap/expiry tests. This is a landing/return accent, not a cursor-to-file
 flight animation; actual transfers retain their existing success/failure signals.
+
+### Stage 6 follow-up — bounded panel springs and reversal
+Sidebar and inspector use velocity-preserving scalar springs with explicit
+physical width limits; direct resizing, disabled motion and drag retain snap
+behavior. Clamp a spring that crosses a shrinking available-width boundary and
+restart at the clamped geometry, not an invisible out-of-bounds value. Column
+presence retargets from the sampled opacity when an opening column immediately
+closes or a departing column returns; no stale ghost on project-card cover.
+Keyboard selection plate respects reduced motion even if disabled mid-flight.
+Added width and interrupted-presence regression tests.

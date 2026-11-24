@@ -38,8 +38,8 @@ pub(crate) use crate::motion_policy::Tween;
 pub(crate) enum Drag { Inspector {start:f32,width:f32}, Split {path:Vec<bool>,axis:Axis,start:f32,ratio:f32,span:f32} }
 #[derive(Default)]
 pub(crate) struct LayoutMotion {
-    pub inspector:Tween,
-    pub sidebar:Tween,
+    pub inspector:crate::motion_policy::Spring,
+    pub sidebar:crate::motion_policy::Spring,
     pub sidebar_initialized:bool,
     pub closing:Option<GroupId>,
     close_observed:bool,
