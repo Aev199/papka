@@ -88,3 +88,11 @@ an outgoing-content snapshot. Measured destination bounds become available after
 the first destination frame, so the existing mode fade stays for that handover.
 Tests cover interpolated dimensions, interrupted transitions and stale callbacks.
 Windows visual verification and paint-only departure remain outstanding.
+
+## Stage 4 — Miller column reveal (first slice)
+Replace the abrupt automatic reveal with a pane-local retained 180 ms scroll.
+Retarget from actual offset, never from an obsolete destination. External offset
+changes cancel the reveal; disabled animations settle immediately. Deferred
+layout callbacks validate the pane path, tab and preview before touching scroll.
+Prune state when a pane closes or switches presentation. Added independent tests.
+Column appearance/exit snapshots and bounded item entrance stagger still pending.

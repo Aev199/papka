@@ -1327,6 +1327,14 @@ impl Explorer {
                 crate::layout::column_identity(pane_width, folders.len(), current_index),
             );
             let scroll = self.column_scroll_handles.entry(side).or_default().clone();
+            if let Some(reveal) = self.motion.column_reveals.get_mut(&side) {
+                let current = scroll.offset().x / px(1.);
+                let instant = !crate::theme::animations() || self.column_resize.is_some() || self.marquee.is_some();
+                if let Some((next,active)) = reveal.sample(current, std::time::Instant::now(), instant) {
+                    scroll.set_offset(gpui::point(px(next),px(0.)));
+                    if active { self.motion.late_frame.set(true); }
+                }
+            }
             let reveal_key = format!("{group_id}-{:?}-{:?}-{}", path, folders.last(), pane_width as u32);
             let widths = crate::layout::column_widths(pane_width, folders.len(), self.column_width_for(side));
             let content_width = px(widths.iter().sum::<f32>().max(pane_width));
@@ -1339,6 +1347,9 @@ impl Explorer {
                 let reveal_scroll = scroll.clone();
                 let reveal_key = reveal_key.clone();
                 let reveal_widths = widths.clone();
+                let reveal_path = path.clone();
+                let reveal_tab = self.browser.group(side).map(|group|group.active_tab);
+                let reveal_last = folders.last().cloned();
                 let column = div().relative().w(px(widths[index])).h_full().flex_none().child(column)
                     .child(div().id(("column-resize", index)).absolute().right_0().top_0().bottom_0().w(px(6.))
                         .cursor_col_resize().hover(|style| style.bg(rgb(BORDER_STRONG)))
@@ -1353,8 +1364,14 @@ impl Explorer {
                         let reveal_key = reveal_key.clone();
                         let weak = weak.clone();
                         let reveal_widths = reveal_widths.clone();
+                        let reveal_path = reveal_path.clone();
+                        let reveal_last = reveal_last.clone();
                         cx.defer(move |cx| {
                             let _ = weak.update(cx, |this, cx| {
+                                // A deferred layout callback must not scroll a different tab/path.
+                                if !this.miller(side) || this.pane_path(side) != reveal_path
+                                    || this.browser.group(side).map(|group|group.active_tab) != reveal_tab
+                                    || this.pane_columns(side).last() != reveal_last.as_ref() { return; }
                                 if this.column_reveal_keys.get(&side) == Some(&reveal_key) {
                                     return;
                                 }
@@ -1366,8 +1383,15 @@ impl Explorer {
                                     viewport.size.width / px(1.), start, bounds.size.width / px(1.), offset)
                                     .min(0.).max(-reveal_scroll.max_offset().x / px(1.));
                                 this.column_reveal_keys.insert(side,reveal_key);
-                                reveal_scroll.set_offset(gpui::point(px(next), px(0.)));
-                                cx.notify();
+                                let instant = !crate::theme::animations() || this.column_resize.is_some()
+                                    || this.marquee.is_some() || this.file_drag;
+                                let reveal = this.motion.column_reveals.entry(side).or_default();
+                                if reveal.begin(offset,next,std::time::Instant::now(),instant) {
+                                    cx.notify();
+                                } else {
+                                    reveal_scroll.set_offset(gpui::point(px(next), px(0.)));
+                                    cx.notify();
+                                }
                             });
                         });
                     }));
@@ -1379,10 +1403,14 @@ impl Explorer {
                 .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
         } else if self.thumbs_view(side) {
+            self.motion.column_reveals.remove(&side);
+            self.column_reveal_keys.remove(&side);
             div().flex_1().min_h_0().flex().flex_col()
                 .child(self.column(path.clone(), side, None, cx))
                 .into_any_element()
         } else {
+            self.motion.column_reveals.remove(&side);
+            self.column_reveal_keys.remove(&side);
             // Columns keep their widths, as in Explorer: a table wider than
             // the pane scrolls sideways, header and rows together.
             let widths = self.list_widths_for(side);

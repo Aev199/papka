@@ -32,6 +32,7 @@ mod dock_motion;
 mod tab_reorder;
 mod popup_motion;
 mod mode_motion;
+mod column_reveal;
 mod spatial_motion;
 mod manual_drag;
 mod kind_filter;
