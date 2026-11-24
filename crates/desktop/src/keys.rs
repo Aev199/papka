@@ -1062,6 +1062,7 @@ impl Explorer {
         self.motion.modes.retain(|id,_| ids.contains(id));
         self.motion.spatial.retain(|id,_| ids.contains(id));
         self.motion.column_reveals.retain(|id,_| ids.contains(id));
+        self.motion.column_presence.retain(|id,_| ids.contains(id));
         self.manual_drag.prune(&ids);
         self.list_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));

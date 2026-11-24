@@ -1375,6 +1375,16 @@ impl Explorer {
             let reveal_key = format!("{group_id}-{:?}-{:?}-{}", path, folders.last(), pane_width as u32);
             let widths = crate::layout::column_widths(pane_width, folders.len(), self.column_width_for(side));
             let content_width = px(widths.iter().sum::<f32>().max(pane_width));
+            let now=std::time::Instant::now();
+            let tab=self.browser.group(side).map_or(0,|g|g.active_tab);
+            let animate=crate::theme::animations() && self.column_resize.is_none() && self.marquee.is_none()
+                && !self.renaming && !self.dragging_files(cx)
+                && !self.motion.modes.get(&side).is_some_and(|m|m.transition.active());
+            let presence=self.motion.column_presence.entry(side).or_default();
+            presence.observe(tab,&folders,&widths,pane_width,scroll.offset().x/px(1.),now,animate);
+            let poses:Vec<_>=folders.iter().map(|p|presence.entrance(p,now)).collect();
+            let departures=presence.departures(now);
+            if presence.active(now) {self.motion.late_frame.set(true);}
             let mut group = div().id(group_id).w(content_width).h_full().flex().flex_row().flex_none();
             for (index, folder) in folders.iter().enumerate() {
                 // The folder of the next column is highlighted as the trail.
@@ -1387,7 +1397,9 @@ impl Explorer {
                 let reveal_path = path.clone();
                 let reveal_tab = self.browser.group(side).map(|group|group.active_tab);
                 let reveal_last = folders.last().cloned();
-                let column = div().relative().w(px(widths[index])).h_full().flex_none().child(column)
+                let (alpha,slide)=poses[index];
+                let column = div().relative().w(px(widths[index])).h_full().flex_none()
+                    .child(div().relative().left(px(slide)).size_full().opacity(alpha.max(0.18)).child(column))
                     .child(div().id(("column-resize", index)).absolute().right_0().top_0().bottom_0().w(px(6.))
                         .cursor_col_resize().hover(|style| style.bg(rgb(BORDER_STRONG)))
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -1437,16 +1449,26 @@ impl Explorer {
             // Keep the scrollbar outside the content that it scrolls.
             div().relative().flex_1().min_w_0().min_h_0().overflow_hidden().flex()
                 .child(column_scroll_area(gpui::SharedString::from(format!("columns-{}",side.0)), &scroll).child(group))
+                .children(departures.into_iter().map(|gone| {
+                    // Do not retain the old live column or its input handlers.
+                    div().absolute().left(px(gone.x)).top_0().bottom_0().w(px(gone.width)).opacity(gone.alpha*0.5)
+                        .bg(rgb(SURFACE)).border_r_1().border_color(rgb(BORDER))
+                        .px_2().py_1().flex().items_start().gap_2()
+                        .child(icon("fm/folder-fill.svg",FOLDER))
+                        .child(div().min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).child(browser::display_name(&gone.path)))
+                }))
                 .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
         } else if self.thumbs_view(side) {
             self.motion.column_reveals.remove(&side);
+            self.motion.column_presence.remove(&side);
             self.column_reveal_keys.remove(&side);
             div().flex_1().min_h_0().flex().flex_col()
                 .child(self.column(path.clone(), side, None, cx))
                 .into_any_element()
         } else {
             self.motion.column_reveals.remove(&side);
+            self.motion.column_presence.remove(&side);
             self.column_reveal_keys.remove(&side);
             // Columns keep their widths, as in Explorer: a table wider than
             // the pane scrolls sideways, header and rows together.

@@ -152,3 +152,12 @@ generic icon/name silhouettes (at most 48). No retained live rows, handlers,
 thumbnail assets or filesystem reads. Same-folder scope, matching identity,
 viewport size guard. These are approximations, not GPU screenshots. Exact
 shared icon morph and first-destination-frame continuity remain to be refined.
+
+### Stage 4 follow-up — column presence
+Miller columns use path-based retained entrance clocks, with a short fade/slide
+for new columns and noninteractive folder-header silhouettes for departures.
+Cap departing columns at eight and clip to pane. Existing columns retain their
+logical widths; horizontal reveal is independent. Switching tabs, changing
+viewport width, dragging, renaming and reduced-motion reset presence instead of
+replaying it. Added tests of path changes, retarget and reset. Full departure
+contents are intentionally not retained and visual acceptance is still needed.
