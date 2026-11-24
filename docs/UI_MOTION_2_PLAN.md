@@ -67,3 +67,15 @@ do not change file row height policy or user settings unintentionally.
 - Checked settings now use the existing accessible SELECTED / SELECTION_TEXT pair instead of a bright accent with a white glyph (on dark teal/green/orange/graphite the previous contrast was about 2.1:1).
 - Destructive menu hover uses theme-aware DANGER_SOFT (text contrast 5.06 dark / 4.81 light); test both themes. No changes to command semantics.
 - CI required; Windows screenshots and manual acceptance still pending.
+
+## Stage 2 — Motion Lab foundation
+Opt in with PowerShell: `$env:PAPKA_MOTION_LAB="1"; .\\Papka.exe`.
+The bottom bar displays p95 render-call intervals (idle gaps above 250 ms excluded)
+and CPU UI-construction time, not compositor/GPU frame timing. Click to reset.
+Rolling sample capacity 120. No background timer, no forced frames, no disk writes.
+Optional `$env:PAPKA_MOTION_SLOW="4"` (1/2/4) at process start scales the shared
+Tween/Spring and spatial FLIP durations. It is intentionally not global time dilation:
+filesystem, drag dwell, scroll and mode-commit clocks keep real time. Default 1;
+normal behavior unchanged. More motion clocks can migrate once paired expiration
+and sampling paths are covered. Added standalone telemetry tests and exact
+zero-time spring continuity. CI only, no intermediate portable builds per user.

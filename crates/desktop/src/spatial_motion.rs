@@ -3,7 +3,7 @@
 //! indices, identify a file across sorting, filtering and presentation changes.
 use std::{cell::RefCell, collections::HashMap, path::{Path, PathBuf}, rc::Rc, time::Instant};
 
-use crate::motion_policy::{ease_out, ITEM_REFLOW};
+use crate::motion_policy::{diagnostic_span, ease_out, ITEM_REFLOW};
 
 const LIMIT: usize = 256;
 const MAX_TRAVEL: f32 = 1200.;
@@ -67,7 +67,7 @@ impl SpatialMotion {
             state.source.clear();
             state.started = None;
         }
-        if !animate || state.started.is_some_and(|start| now.saturating_duration_since(start) >= ITEM_REFLOW) {
+        if !animate || state.started.is_some_and(|start| now.saturating_duration_since(start) >= diagnostic_span(ITEM_REFLOW)) {
             state.started = None;
             state.source.clear();
         }
@@ -88,7 +88,7 @@ impl Frame {
         if !delta.x.is_finite() || !delta.y.is_finite() || delta.x.abs().max(delta.y.abs()) > MAX_TRAVEL {
             return Position::default();
         }
-        delta.scale(1. - ease_out(now.saturating_duration_since(start), ITEM_REFLOW))
+        delta.scale(1. - ease_out(now.saturating_duration_since(start), diagnostic_span(ITEM_REFLOW)))
     }
 
     pub(crate) fn record(&self, path: PathBuf, natural: Position, offset: Position) {

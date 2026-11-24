@@ -2666,6 +2666,12 @@ impl Explorer {
             bar = bar.child(div().flex().items_center().gap_1().text_color(rgb(SUCCESS))
                 .child(small_icon("fm/eye-watch.svg", SUCCESS)).child("Наблюдение"));
         }
+        if let Some(summary) = self.motion.lab.summary() {
+            bar = bar.child(div().id("motion-lab").flex_none().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_MUTED))
+                .cursor_pointer().child(summary)
+                .tooltip(|window,cx| Tooltip::new("Motion Lab: интервалы вызовов render и время построения UI, не GPU FPS. Нажмите для сброса.").build(window,cx))
+                .on_click(cx.listener(|this,_,_,cx| { this.motion.lab.reset(); cx.notify(); })));
+        }
         bar.child(div().flex_none().flex().items_center().gap_0p5()
             .child(bar_button("bar-new-folder", "fm/folder-plus.svg", "Новая папка (Ctrl+Shift+N)", false)
                 .on_click(cx.listener(|this, _, window, cx| this.begin_new_folder(window, cx))))
@@ -3342,6 +3348,7 @@ impl Explorer {
 
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let lab_start = self.motion.lab.begin();
         #[cfg(windows)]
         if self.hwnd.is_none() { self.hwnd = crate::window_hwnd(window); }
         if self.interface_focus_pending {self.interface_focus_pending=false;window.focus(&self.focus_handle,cx);}
@@ -3726,6 +3733,7 @@ impl Render for Explorer {
         if let Some((state,phase))=self.motion.surfaces.versions.sample(self.version_editing.clone(),now,animate) {
             if phase.active {window.request_animation_frame();}root=root.child(self.version_rules_dialog(&state,phase,cx));
         }
+        self.motion.lab.end(lab_start);
         root
     }
 }

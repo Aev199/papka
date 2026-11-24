@@ -21,6 +21,7 @@ mod smooth_scroll;
 mod marked;
 mod motion;
 mod motion_policy;
+mod motion_lab;
 mod layout_motion;
 mod button_motion;
 mod disclosure_motion;

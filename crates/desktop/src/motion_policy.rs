@@ -9,6 +9,20 @@ pub(crate) const TRANSIENT_MS: u64 = 120;
 pub(crate) const DISCLOSURE_MS: u64 = 160;
 pub(crate) const HOVER: Duration = Duration::from_millis(100);
 
+/// Optional, process-local diagnostic slowdown for migrated visual clocks.
+/// The factor is fixed at launch, so retargets never change time scale midflight.
+pub(crate) fn diagnostic_span(span: Duration) -> Duration {
+    #[cfg(test)]
+    { span }
+    #[cfg(not(test))]
+    {
+        static SCALE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let factor = *SCALE.get_or_init(|| std::env::var("PAPKA_MOTION_SLOW").ok()
+            .and_then(|s| s.parse::<u32>().ok()).filter(|n| [1, 2, 4].contains(n)).unwrap_or(1));
+        span * factor
+    }
+}
+
 pub(crate) fn ease_out_fraction(t: f32) -> f32 { 1. - (1. - t).powi(3) }
 pub(crate) fn smoothstep(t: f32) -> f32 { t * t * (3. - 2. * t) }
 
@@ -26,13 +40,15 @@ pub(crate) const PREVIEW_FADE: Duration = Duration::from_millis(150);
 pub(crate) struct Tween { from:f32, target:f32, started:Option<Instant> }
 impl Tween {
     pub fn sample(&mut self,target:f32,instant:bool,now:Instant,ms:u64)->(f32,bool) {
+        if ms == 0 { self.from=target;self.target=target;self.started=None;return(target,false); }
+        let span=diagnostic_span(Duration::from_millis(ms));
         let value=match self.started {
-            Some(at)=>{let t=(now.saturating_duration_since(at).as_secs_f32()/(ms as f32/1000.)).clamp(0.,1.);self.from+(self.target-self.from)*ease_out_fraction(t)},
+            Some(at)=>{let t=(now.saturating_duration_since(at).as_secs_f32()/span.as_secs_f32()).clamp(0.,1.);self.from+(self.target-self.from)*ease_out_fraction(t)},
             None=>self.target,
         };
         if instant {self.from=target;self.target=target;self.started=None;return(target,false);}
         if (target-self.target).abs()>0.01 {self.from=value;self.target=target;self.started=Some(now);}
-        let active=self.started.is_some_and(|at|now.saturating_duration_since(at)<Duration::from_millis(ms));
+        let active=self.started.is_some_and(|at|now.saturating_duration_since(at)<span);
         if !active {self.started=None;return(self.target,false);}
         (value,true)
     }
@@ -53,6 +69,7 @@ impl Spring {
     fn pose(&self, now: Instant, span: Duration) -> (f32, f32) {
         let Some(start) = self.started else { return (self.target, 0.); };
         let elapsed = now.saturating_duration_since(start);
+        if elapsed.is_zero() { return (self.from, self.velocity); }
         if elapsed >= span * 2 { return (self.target, 0.); }
         let t = elapsed.as_secs_f32();
         let omega = 8. / span.as_secs_f32();
@@ -67,7 +84,7 @@ impl Spring {
             self.from = target; self.target = target; self.velocity = 0.; self.started = None;
             return (target, false);
         }
-        let span = Duration::from_millis(ms);
+        let span = diagnostic_span(Duration::from_millis(ms));
         let (position, velocity) = self.pose(now, span);
         if (target - self.target).abs() > 0.01 {
             self.from = position; self.velocity = velocity; self.target = target; self.started = Some(now);

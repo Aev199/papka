@@ -76,6 +76,7 @@ fn flash_key(path: &Path) -> String {
 
 #[derive(Default)]
 pub(crate) struct Motion {
+    pub(crate) lab: crate::motion_lab::Lab,
     pub(crate) surfaces: crate::popup_motion::Surfaces,
     pub(crate) layout: crate::layout_motion::LayoutMotion,
     pub(crate) tab_reorder: crate::tab_reorder::TabReorder,
