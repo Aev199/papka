@@ -50,6 +50,8 @@ impl SpatialMotion {
         state.frame_id = state.frame_id.wrapping_add(1);
     }
 
+    pub(crate) fn active(&self) -> bool { self.0.borrow().started.is_some() }
+
     pub(crate) fn cancel(&self) {
         let mut state = self.0.borrow_mut();
         state.started = None;

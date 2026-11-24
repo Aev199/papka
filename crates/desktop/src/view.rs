@@ -1555,7 +1555,7 @@ impl Explorer {
             // Files dropped on the empty space or a file row land in this folder.
             .drag_over::<FileDragInfo>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener(move |this, data: &FileDragInfo, window, cx| {
-                if !this.commit_manual_drop(side, &drop_folder, data, window.modifiers(), cx) {
+                if !this.commit_manual_drop(side, &drop_folder, data, window.mouse_position(), window.modifiers(), cx) {
                     this.drop_files(&data.paths, drop_folder.clone(), window.modifiers(), cx);
                 }
             }))
@@ -1597,21 +1597,24 @@ impl Explorer {
             // Only the current folder is shared by all three presentation modes.
             let spatial_frame=if folder==self.pane_path(side) {
                 let animate=crate::theme::animations() && !self.renaming && self.marquee.is_none() && !self.dragging_files(cx);
-                let (frame,moving)=self.motion.spatial.entry(side).or_default().frame(&folder,now,animate);
-                if moving {self.motion.late_frame.set(true);}
-                Some(frame)
+                let changing=self.motion.modes.get(&side).is_some_and(|m|m.transition.active())
+                    || self.motion.spatial.get(&side).is_some_and(|m|m.active());
+                if animate && changing {
+                    let (frame,moving)=self.motion.spatial.entry(side).or_default().frame(&folder,now,true);
+                    if moving {self.motion.late_frame.set(true);}
+                    Some(frame)
+                }else{self.motion.spatial.remove(&side);None}
             }else{None};
             let handle = self.scroll_handle(side, &folder);
-            let logical_indices = indices.clone();
+            let manual_mode = self.manual_orders.enabled(&folder);
             let tiles = list_mode && self.thumbs_view(side);
             let columns = if tiles { crate::thumbs::columns(self.pane_width_for(side)) } else { 1 };
             let cell = if tiles { (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP, crate::thumbs::tile_height()+crate::thumbs::TILE_GAP) }
                 else { (self.pane_width_for(side).max(1.), row_height()) };
             let manual = self.manual_display(side, &folder, &listing, &indices, &handle.0.borrow().base_handle, columns, cell, tiles, now, cx);
-            let manual_present = manual.is_some();
-            let (indices, manual_hidden, manual_geometry) = manual.map_or_else(
-                || (indices, std::sync::Arc::new(std::collections::HashSet::new()), None),
-                |display| (display.order, display.hidden, display.geometry));
+            let (indices, manual_hidden, manual_positions, manual_geometry) = manual.map_or_else(
+                || (indices, std::sync::Arc::new(std::collections::HashSet::new()), None, None),
+                |display| (display.order, display.hidden, Some(display.logical_positions), display.geometry));
             let count = indices.len();
             let list_id = SharedString::from(format!("list-{}-{}", side.0, folder.display()));
             let background_marquee_folder=folder.clone();
@@ -1627,7 +1630,7 @@ impl Explorer {
                 self.thumb_columns.insert(side, per_row);
                 let rows = count.div_ceil(per_row);
                 let list_id = SharedString::from(format!("{list_id}-grid-{per_row}-{}",crate::thumbs::size()));
-                let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some() || (self.dragging_files(cx) && !manual_present);
+                let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some() || (self.dragging_files(cx) && !manual_mode);
                 let moving = self.motion.grids.entry(side).or_default().prepare(&folder, &listing, indices.clone(), per_row,
                     (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP, crate::thumbs::tile_height()+crate::thumbs::TILE_GAP), instant, std::time::Instant::now());
                 if moving {self.motion.late_frame.set(true);}
@@ -1670,7 +1673,7 @@ impl Explorer {
                 let mut content=div().relative().w_full().h(px(total*row_h)).flex_none();
                 for row in geometry.into_iter().filter(|r|r.height>0.001 && (r.top+r.height)*row_h>=start-row_h && r.top*row_h<=end+row_h) {
                     let entry=&listing.entries[row.index];let on_trail=trail.as_ref()==Some(&entry.path);
-                    let logical=if manual_present {logical_indices.iter().position(|&i|i==row.index).unwrap_or(0)}else{row.position.unwrap_or(0)};
+                    let logical=manual_positions.as_ref().and_then(|positions|positions.get(&row.index).copied()).unwrap_or(row.position.unwrap_or(0));
                     let body=self.row(entry,&folder,side,logical,on_trail,list_mode,list_mode&&row.position.is_some_and(|p|p%2==1),cx);
                     let mut slot=div().id(SharedString::from(format!("disclosing-{}",entry.path.display())))
                         .absolute().left_0().right_0().top(px(row.top*row_h)).h(px(row.height*row_h)).overflow_hidden()
@@ -1695,7 +1698,7 @@ impl Explorer {
                         range.map(|position| {
                             let entry = &listing.entries[indices[position]];
                             let on_trail = trail.as_ref() == Some(&entry.path);
-                            let logical=if manual_present {logical_indices.iter().position(|&i|i==indices[position]).unwrap_or(position)}else{position};
+                            let logical=manual_positions.as_ref().and_then(|positions|positions.get(&indices[position]).copied()).unwrap_or(position);
                             let row=this.row(entry, &folder, side, logical, on_trail, list_mode, list_mode && position % 2 == 1, cx);
                             let row=if manual_hidden.contains(&entry.path){div().opacity(0.).child(row).into_any_element()}else{row};
                             if let Some(frame)=&spatial_frame {
