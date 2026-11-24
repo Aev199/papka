@@ -30,9 +30,10 @@ use crate::theme::*;
 use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, GroupId, TabDrag};
 
 use crate::layout::row_height;
+use crate::ui_tokens as ui;
 
 /// Fixed, as in Atlas: the sidebar does not grow with the window.
-const SIDEBAR_WIDTH: f32 = 220.;
+const SIDEBAR_WIDTH: f32 = ui::SIDEBAR_WIDTH;
 /// Details table geometry: where the first column starts (list padding,
 /// selection stripe and row padding), the gap between columns, the icon
 /// with its gap inside the name column, and the room after the last one.
@@ -117,8 +118,8 @@ pub fn apply_component_theme(cx: &mut App) {
     cx.global_mut::<Theme>().focus_ring = false;
     // Flat, as in Explorer: no drop shadows, small corners.
     cx.global_mut::<Theme>().shadow = false;
-    cx.global_mut::<Theme>().radius = px(4.);
-    cx.global_mut::<Theme>().radius_lg = px(6.);
+    cx.global_mut::<Theme>().radius = px(ui::CONTROL_RADIUS);
+    cx.global_mut::<Theme>().radius_lg = px(ui::PANEL_RADIUS);
     // Re-project onto the base layer, which draws focus rings and scrollbars.
     Theme::sync_base(cx);
 }
@@ -128,11 +129,11 @@ fn hsla(color: u32) -> Hsla {
 }
 
 fn icon(path: &'static str, color: u32) -> gpui::Svg {
-    svg().path(path).flex_none().size(px(16.)).text_color(rgb(color))
+    svg().path(path).flex_none().size(px(ui::ICON_SIZE)).text_color(rgb(color))
 }
 
 pub(crate) fn small_icon(path: &'static str, color: u32) -> gpui::Svg {
-    svg().path(path).flex_none().size(px(14.)).text_color(rgb(color))
+    svg().path(path).flex_none().size(px(ui::SMALL_ICON_SIZE)).text_color(rgb(color))
 }
 
 /// The one quiet "you are here" sign, as in Windows 11: a short accent bar
@@ -140,7 +141,7 @@ pub(crate) fn small_icon(path: &'static str, color: u32) -> gpui::Svg {
 /// be `relative()`.
 pub(crate) fn focus_mark() -> Div {
     div().absolute().left(px(0.)).top_0().bottom_0().flex().items_center()
-        .child(div().w(px(3.)).h(px(16.)).rounded(px(1.5)).bg(rgb(ACCENT)))
+        .child(div().w(px(ui::FOCUS_MARK_WIDTH)).h(px(ui::FOCUS_MARK_HEIGHT)).rounded(px(ui::FOCUS_MARK_WIDTH / 2.)).bg(rgb(ACCENT)))
 }
 
 /// Square ghost button with an icon and a tooltip.
@@ -153,7 +154,7 @@ pub(crate) fn icon_button(
 ) -> Stateful<Div> {
     let id=id.into();
     let color = if !enabled { TEXT_DIM } else if active { ACCENT } else { TEXT_MUTED };
-    div().id(id.clone()).relative().overflow_hidden().flex_none().size(px(30.)).rounded(px(4.)).flex().items_center().justify_center()
+    div().id(id.clone()).relative().overflow_hidden().flex_none().size(px(ui::TOOLBAR_BUTTON_SIZE)).rounded(px(ui::CONTROL_RADIUS)).flex().items_center().justify_center()
         .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
         .when(enabled, |this| this.cursor_pointer().on_hover(|_,window,_|window.refresh())
             .active(|style| style.opacity(0.75)))
@@ -165,14 +166,14 @@ pub(crate) fn icon_button(
 /// Text button for dialogs and panels.
 /// Small icon button of the bottom bar, like the corner icons in Atlas.
 fn bar_button(id: &'static str, path: &'static str, tip: &'static str, active: bool) -> Stateful<Div> {
-    div().id(id).relative().overflow_hidden().flex_none().size(px(24.)).rounded_sm().flex().items_center().justify_center()
+    div().id(id).relative().overflow_hidden().flex_none().size(px(ui::STATUS_BUTTON_SIZE)).rounded_sm().flex().items_center().justify_center()
         .cursor_pointer()
         .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
         .on_hover(|_,window,_|window.refresh())
         .active(|style|style.opacity(0.75))
         .child(div().absolute().inset_0().child(crate::button_motion::background(id.into(),if active {Some(themed(ACCENT_SOFT))}else{None},themed(HOVER))))
         .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
-        .child(svg().relative().path(path).size(px(14.)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
+        .child(svg().relative().path(path).size(px(ui::SMALL_ICON_SIZE)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
 }
 
 /// «Версия 1.6», or «Исходный» for the file without a suffix.
@@ -186,7 +187,7 @@ pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedStrin
         ButtonKind::Ghost => (RAISED, HOVER, TEXT, BORDER_STRONG),
     };
     let id=id.into();
-    div().id(id.clone()).relative().overflow_hidden().flex_none().h(px(28.)).px_3().rounded(px(4.)).flex().items_center()
+    div().id(id.clone()).relative().overflow_hidden().flex_none().h(px(ui::DIALOG_BUTTON_HEIGHT)).px_3().rounded(px(ui::CONTROL_RADIUS)).flex().items_center()
         .justify_center().bg(rgb(bg)).border_1().border_color(rgb(frame)).text_color(rgb(fg)).cursor_pointer()
         .on_hover(|_,window,_|window.refresh())
         .active(|style|style.opacity(0.8))

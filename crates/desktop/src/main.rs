@@ -4,6 +4,7 @@ mod assets;
 mod keys;
 mod messages;
 mod theme;
+mod ui_tokens;
 mod view;
 mod bulk_rename;
 mod inspector;
