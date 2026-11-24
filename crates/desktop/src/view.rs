@@ -3570,12 +3570,13 @@ impl Render for Explorer {
             let inspector=self.inspector(cx);
             panels=panels.child(div().id("inspector-shell").relative().w(px(inspector_width)).flex_none().h_full().overflow_hidden()
                 .child(div().w(px(desired)).h_full().opacity(opacity).child(inspector))
-                .child(div().id("inspector-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
+                .when(self.show_inspector,|shell|shell.child(div().id("inspector-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
                     .hover(|v|v.bg(rgb(BORDER_STRONG)))
                     .on_mouse_down(MouseButton::Left,cx.listener(move|this,event:&MouseDownEvent,_,cx|{
-                        cx.stop_propagation();if this.interface_modal(){return;}
+                        cx.stop_propagation();if this.interface_modal() || !this.show_inspector{return;}
                         this.motion.layout.drag=Some(crate::layout_motion::Drag::Inspector{start:event.position.x/px(1.),width:desired});
-                    }))));
+                    }))))
+                .when(!self.show_inspector,|shell|shell.child(crate::popup_motion::shield())));
         }
 
         // Something that learnt only while drawing that it moves (the tab
@@ -3813,8 +3814,9 @@ impl Render for Explorer {
             // panes and the bottom bar sit to its right.
             .child(div().flex_1().min_h_0().w_full().flex()
                 .when(self.show_sidebar || sidebar_moving, |row| row.child(
-                    div().id("sidebar-shell").w(px(sidebar_width)).flex_none().h_full().overflow_hidden()
-                        .child(self.sidebar(cx))))
+                    div().id("sidebar-shell").relative().w(px(sidebar_width)).flex_none().h_full().overflow_hidden()
+                        .child(self.sidebar(cx))
+                        .when(!self.show_sidebar,|shell|shell.child(crate::popup_motion::shield()))))
                 .child(div().flex_1().min_w_0().h_full().flex().flex_col()
                     .child(self.title_bar(window,cx))
                         .child(div().flex_1().min_h_0().overflow_hidden().child(panels))

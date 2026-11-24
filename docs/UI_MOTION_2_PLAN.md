@@ -17,8 +17,9 @@ Branch: feat/ui-motion-2. No release-channel changes during development.
 - Performance goals (not measured yet): 60 Hz frame budget 16.7 ms, p95 frame
   interval near refresh rate in cached folders, no extra animation frames at idle.
   Benchmark baseline and candidate on the same Windows machine and fixtures.
-- After every stage: code review, CI and portable Windows test build; record
-  manual findings and regressions. Publish beta only after acceptance.
+- After every stage: code review and CI. At the user's direction, defer portable
+  Windows builds and manual checks until the code pass is complete. Publish beta
+  only after acceptance.
 
 ## Roadmap
 | Stage | Work | Acceptance |
@@ -207,3 +208,26 @@ progress width and passive counters. Preserve view buttons and all transfer
 commands; long selected names and messages have tooltips. No row-density or
 file-operation changes. Added pure tests of compact geometry. Narrow-window
 interaction and DPI checks remain part of the manual matrix.
+
+## Stage 10 — pre-acceptance review preparation
+Closing sidebar/inspector shells shield their retained controls; inspector resize
+handle is available only while logically open. No settings, file operations,
+release manifests or main-branch changes in this slice.
+
+The first complete implementation and second animation pass (b8d25a9) passed
+Windows CI including all workspace checks, tests and standalone policies
+(run 45468133356). Subsequent inspector/palette/status changes require fresh CI.
+
+### Remaining before release
+- Shared icon/text morph and first-frame handover: current implementation moves
+  and resizes clipped live containers. Departures are generic silhouettes, not
+  actual GPU captures. Decide whether richer snapshots are worth their cost only
+  after Windows comparison; don't claim a full morph before that.
+- Column departures use passive headers rather than entire old columns; landing
+  feedback is a short accent, not a cursor flight. Assess visually.
+- Motion Lab measures UI construction and render cadence, not GPU presentation.
+  Slow mode covers migrated clocks only. No measured performance baseline yet.
+- Explicit jump navigation still uses existing filesystem validation. Typed-path
+  probing is async, but opening an unavailable share may still block there.
+- CI validates code and deterministic geometry, not input behavior/hit testing
+  or real rendering. No portable build requested for this pass.
