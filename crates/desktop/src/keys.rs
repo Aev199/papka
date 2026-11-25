@@ -506,11 +506,19 @@ impl Explorer {
             (None, Some(current)) => (current as isize + delta).clamp(0, last),
         } as usize;
         let path = listing.entries[indices[position]].path.clone();
-        // A step of a few rows slides the selection there (not in tiles,
-        // nor with several items marked).
-        match current.filter(|_| !self.thumbs_view(side) && self.marked.len() <= 1 && !self.motion.rows.contains_key(&(side,folder.clone())) && !self.motion.lists.contains_key(&(side,folder.clone()))) {
-            Some(from) => self.motion.plate_moved(side, &folder, from, position),
-            None => self.motion.plate_moved(side, &folder, position, position),
+        // Keyboard steps use the same selection glide in rows and tiles.
+        let animate=self.marked.len()<=1 && !self.renaming && !self.file_drag && self.marquee.is_none();
+        if self.thumbs_view(side) {
+            if let Some(from)=current.filter(|_|animate && edge.is_none()) {
+                self.motion.tile_plate.begin(side.0,&folder,crate::thumbs::columns(self.pane_width_for(side)),
+                    from,position,std::time::Instant::now(),crate::theme::animations());
+            }else{self.motion.tile_plate.cancel();}
+        }else{
+            self.motion.tile_plate.cancel();
+            match current.filter(|_| animate && !self.motion.rows.contains_key(&(side,folder.clone())) && !self.motion.lists.contains_key(&(side,folder.clone()))) {
+                Some(from) => self.motion.plate_moved(side, &folder, from, position),
+                None => self.motion.plate_moved(side, &folder, position, position),
+            }
         }
         self.navigate_side(side, &folder, Some(path), cx);
     }
@@ -581,6 +589,7 @@ impl Explorer {
     }
 
     pub(crate) fn switch_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.motion.cancel_plate();
         self.leave_project_card(self.browser.active, cx);
         self.marquee=None;
         if index < self.browser.active_group().tabs.len() {
@@ -1042,6 +1051,7 @@ impl Explorer {
 
     pub(crate) fn focus_group(&mut self, id: GroupId, cx: &mut Context<Self>) {
         if self.browser.active != id && self.browser.group(id).is_some() {
+            self.motion.cancel_plate();
             self.browser.focus(id);
             self.select_first_when_loaded=false;
             self.address_editing=None;

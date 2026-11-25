@@ -85,6 +85,7 @@ impl Explorer {
         use crate::mode_motion::Mode;
         self.motion.grids.remove(&side);self.motion.rows.retain(|(id,_),_|*id!=side);self.motion.lists.retain(|(id,_),_|*id!=side);
         self.column_reveal_keys.remove(&side);
+        self.motion.cancel_plate();
         let Some(group)=self.browser.group_mut(side)else{return;};group.miller=mode==Mode::Columns;
         if mode==Mode::Thumbnails {self.thumbs.groups.insert(side);}else{self.thumbs.groups.remove(&side);}
         if let Some(store) = &self.workspaces {

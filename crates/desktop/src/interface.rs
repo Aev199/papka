@@ -670,6 +670,8 @@ pub(crate) struct Marquee {
     sort: filemanager_core::sort::SortSpec,
     hidden: bool,
     miller: bool,
+    tiles: Option<filemanager_core::selection::TileGrid>,
+    row_height: f32,
     filter: String,
     start: gpui::Point<gpui::Pixels>,
     current: gpui::Point<gpui::Pixels>,
@@ -680,6 +682,13 @@ pub(crate) struct Marquee {
     moved: bool,
 }
 impl Explorer {
+    fn marquee_grid(&self,side:crate::GroupId)->Option<filemanager_core::selection::TileGrid> {
+        self.thumbs_view(side).then(||filemanager_core::selection::TileGrid{
+            columns:crate::thumbs::columns(self.pane_width_for(side)),
+            tile:(crate::thumbs::tile_width(),crate::thumbs::tile_height()),
+            gap:crate::thumbs::TILE_GAP,padding:(8.,8.),
+        })
+    }
     pub(crate) fn begin_marquee(
         &mut self,
         folder: &std::path::Path,
@@ -714,12 +723,14 @@ impl Explorer {
         let Some((listing, indices)) = self.folder_view(side, folder) else {
             return;
         };
-        let local_y = (event.position.y - bounds.origin.y) / px(1.);
-        let row = crate::layout::row_index(local_y, scroll);
-        // Reserve the right gutter; rows retain their normal file drag gesture.
-        if row < indices.len() && event.position.x < bounds.right() - px(12.) {
-            return;
-        }
+        let local=((event.position.x-bounds.origin.x)/px(1.),(event.position.y-bounds.origin.y)/px(1.));
+        let tiles=self.marquee_grid(side);
+        // Tiles retain file drag; blank cells, padding and gaps start a rectangle.
+        // Rows retain their existing right-gutter gesture.
+        let over_item=tiles.map_or_else(||crate::layout::row_index(local.1,scroll)<indices.len()
+            && event.position.x<bounds.right()-px(12.),|grid|grid.item_at(indices.len(),local,scroll).is_some());
+        if over_item {return;}
+        self.motion.cancel_plate();
         let switched = self.active_side() != side;
         self.browser.focus(side);
         if switched {
@@ -751,6 +762,8 @@ impl Explorer {
             sort: self.sort_for(side),
             hidden: self.show_hidden,
             miller: self.miller(side),
+            tiles,
+            row_height:crate::layout::row_height(),
             filter: self.filter.clone(),
             start: event.position,
             current: event.position,
@@ -787,6 +800,8 @@ impl Explorer {
             && self.sort_for(m.side) == m.sort
             && self.show_hidden == m.hidden
             && self.miller(m.side) == m.miller
+            && self.marquee_grid(m.side) == m.tiles
+            && crate::layout::row_height() == m.row_height
             && self.filter == m.filter
             && self
                 .dirs.cache
@@ -829,50 +844,24 @@ impl Explorer {
             return;
         }
         m.moved = true;
-        let rows = filemanager_core::selection::marquee_rows(
-            m.indices.len(),
-            crate::layout::row_height(),
-            (m.start.y - m.bounds.top()) / px(1.),
-            (m.current.y - m.bounds.top()) / px(1.),
-            m.bounds.size.height / px(1.),
-            m.scroll,
-        );
-        let mut chosen: std::collections::HashSet<std::path::PathBuf> = if m.additive {
-            if m.marked.is_empty() {
+        let hits=m.tiles.map_or_else(||{
+            if m.current.x==m.start.x {return Vec::new();}
+            filemanager_core::selection::marquee_rows(m.indices.len(),m.row_height,
+                (m.start.y-m.bounds.top())/px(1.),(m.current.y-m.bounds.top())/px(1.),
+                m.bounds.size.height/px(1.),m.scroll).collect::<Vec<_>>()
+        },|grid|grid.marquee(m.indices.len(),
+            ((m.start.x-m.bounds.left())/px(1.),(m.start.y-m.bounds.top())/px(1.)),
+            ((m.current.x-m.bounds.left())/px(1.),(m.current.y-m.bounds.top())/px(1.)),
+            (m.bounds.size.width/px(1.),m.bounds.size.height/px(1.)),m.scroll));
+        self.marked=if m.additive {
+            let mut chosen:std::collections::HashSet<std::path::PathBuf>=if m.marked.is_empty(){
                 m.selected.iter().cloned().collect()
-            } else {
-                m.marked.iter().cloned().collect()
-            }
-        } else {
-            std::collections::HashSet::new()
-        };
-        if m.current.x != m.start.x {
-            for row in rows {
-                chosen.insert(m.listing.entries[m.indices[row]].path.clone());
-            }
-        }
-        self.marked = if m.additive {
-            m.indices
-                .iter()
-                .map(|&i| &m.listing.entries[i].path)
-                .filter(|p| chosen.contains(*p))
-                .cloned()
-                .collect()
-        } else {
-            let rows = filemanager_core::selection::marquee_rows(
-                m.indices.len(),
-                crate::layout::row_height(),
-                (m.start.y - m.bounds.top()) / px(1.),
-                (m.current.y - m.bounds.top()) / px(1.),
-                m.bounds.size.height / px(1.),
-                m.scroll,
-            );
-            if m.current.x == m.start.x {
-                Default::default()
-            } else {
-                rows.map(|i| m.listing.entries[m.indices[i]].path.clone())
-                    .collect()
-            }
+            }else{m.marked.iter().cloned().collect()};
+            for index in hits {chosen.insert(m.listing.entries[m.indices[index]].path.clone());}
+            m.indices.iter().map(|&i|&m.listing.entries[i].path)
+                .filter(|path|chosen.contains(*path)).cloned().collect()
+        }else{
+            hits.into_iter().map(|i|m.listing.entries[m.indices[i]].path.clone()).collect()
         };
         self.selected = self.marked.first().cloned();
         self.anchor = self.selected.clone();

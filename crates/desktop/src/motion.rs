@@ -109,6 +109,8 @@ pub(crate) struct Motion {
     /// Set while drawing when something decided only then (the tab line's
     /// new place) still moves: the window asks for one more frame.
     pub(crate) late_frame: Rc<std::cell::Cell<bool>>,
+    /// Keyboard selection in the thumbnail grid.
+    pub(crate) tile_plate: crate::tile_selection::Selection,
     /// The selection sliding from row to row: pane, folder, from, to, start.
     plate: Option<(GroupId, PathBuf, f32, usize, Instant)>,
 }
@@ -246,15 +248,15 @@ impl Motion {
         let switch = changed && old.is_some_and(|e|e.folder==path);
         let way = old.map_or(0., |e| direction(&e.folder, path));
         self.entrances.insert(group, Entrance { folder: path.to_path_buf(), mode,
-            way: if mode == 'c' { 0. } else { way },
-            from: if switch {1.} else if changed { 0.1 } else { 0.35 }, started: switch.then(||Instant::now()-LIST_APPEAR) });
+            way: if mode == 'c' && way >= 0. { 0. } else { way },
+            from: if switch || mode=='c' {1.} else if changed { 0.1 } else { 0.35 }, started: switch.then(||Instant::now()-LIST_APPEAR) });
     }
 
     /// (opacity, horizontal offset), starting when the contents first arrive.
     pub(crate) fn list_appearance(&mut self, group: GroupId) -> (f32, f32) {
         let Some(e) = self.entrances.get_mut(&group) else { return (1., 0.); };
         let started = *e.started.get_or_insert_with(Instant::now);
-        if !crate::theme::animations() || e.mode == 'c' { return (1., 0.); }
+        if !crate::theme::animations() || (e.mode == 'c' && e.way >= 0.) { return (1., 0.); }
         let t = ease_out(started.elapsed(), crate::motion_policy::diagnostic_span(LIST_APPEAR));
         if t < 1. { self.late_frame.set(true); }
         (e.from + (1. - e.from) * t, e.way * SLIDE * (1. - t))
@@ -318,7 +320,7 @@ impl Motion {
         self.plate = Some((group, folder.to_path_buf(), shown, to, Instant::now()));
     }
 
-    pub(crate) fn cancel_plate(&mut self) { self.plate = None; }
+    pub(crate) fn cancel_plate(&mut self) { self.plate = None; self.tile_plate.cancel(); }
 
     /// Where the sliding selection is in `folder` of `group` (in rows), and
     /// the row it goes to; None once it is there.
@@ -354,8 +356,9 @@ impl Motion {
         drop(pictures);
         if !crate::theme::animations() || self.plate.as_ref().is_some_and(|plate| plate.4.elapsed() >= crate::motion_policy::diagnostic_span(PLATE)) { self.plate = None; }
         let entering = crate::theme::animations() && self.entrances.values().any(|e|
-            e.mode != 'c' && e.started.is_some_and(|at| at.elapsed() < crate::motion_policy::diagnostic_span(LIST_APPEAR)));
-        entering || flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding || line_moving || pictures_coming || self.plate.is_some()
+            (e.mode != 'c' || e.way<0.) && e.started.is_some_and(|at| at.elapsed() < crate::motion_policy::diagnostic_span(LIST_APPEAR)));
+        let tile_moving=self.tile_plate.active(Instant::now(),crate::theme::animations());
+        entering || tile_moving || flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding || line_moving || pictures_coming || self.plate.is_some()
     }
 
     /// Whether the progress bar still has a way to go to `fraction`.
@@ -494,5 +497,23 @@ mod mode_entrance_tests {
         motion.list_location(id,path,'l');motion.list_appearance(id);
         motion.list_location(id,path,'t');assert_eq!(motion.list_appearance(id),(1.,0.));
         motion.list_location(id,path,'c');assert_eq!(motion.list_appearance(id),(1.,0.));
+    }
+}
+
+#[cfg(test)]
+mod column_return_tests {
+    use super::*;
+    #[test]
+    fn returning_to_a_visible_parent_still_has_directional_feedback() {
+        let mut motion=Motion::default();let group=GroupId(1);
+        motion.list_location(group,Path::new("/a/b"),'c');
+        assert_eq!(motion.list_appearance(group),(1.,0.));
+        motion.list_location(group,Path::new("/a"),'c');
+        let (alpha,x)=motion.list_appearance(group);
+        assert_eq!(alpha,1.);assert!(x<0.);
+        motion.entrances.get_mut(&group).unwrap().started=Some(Instant::now()-LIST_APPEAR*2);
+        assert_eq!(motion.list_appearance(group),(1.,0.));
+        motion.list_location(group,Path::new("/a/b"),'c');
+        assert_eq!(motion.list_appearance(group),(1.,0.));
     }
 }

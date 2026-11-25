@@ -1445,7 +1445,7 @@ impl Explorer {
             }
             let reveal_key = format!("{group_id}-{:?}-{:?}-{}", path, folders.last(), pane_width as u32);
             let widths = crate::layout::column_widths(pane_width, folders.len(), self.column_width_for(side));
-            let content_width = px(widths.iter().sum::<f32>().max(pane_width));
+            let logical_width = widths.iter().sum::<f32>().max(pane_width);
             let now=std::time::Instant::now();
             let tab=self.browser.group(side).map_or(0,|g|g.active_tab);
             let animate=crate::theme::animations() && self.column_resize.is_none() && self.marquee.is_none()
@@ -1456,6 +1456,13 @@ impl Explorer {
             let poses:Vec<_>=folders.iter().map(|p|presence.entrance(p,now)).collect();
             let departures=presence.departures(now);
             if presence.active(now) {self.motion.late_frame.set(true);}
+            // Keep enough extent for the last offset until reveal moves it
+            // into the shorter trail. Otherwise GPUI clamps backward navigation
+            // during prepaint, before Reveal can animate a single frame.
+            let revealing=self.column_reveal_keys.get(&side)!=Some(&reveal_key)
+                || self.motion.column_reveals.get(&side).is_some_and(|r|r.active())
+                || self.motion.column_presence.get(&side).is_some_and(|p|p.active(now));
+            let content_width=px(crate::layout::column_motion_extent(logical_width,pane_width,scroll.offset().x/px(1.),revealing));
             let mut group = div().id(group_id).w(content_width).h_full().flex().flex_row().flex_none();
             for (index, folder) in folders.iter().enumerate() {
                 // The folder of the next column is highlighted as the trail.
@@ -1518,7 +1525,7 @@ impl Explorer {
                                 let start = (bounds.origin.x - viewport.origin.x) / px(1.) - offset;
                                 let next = crate::layout::reveal_column_offset(&reveal_widths, current_index,
                                     viewport.size.width / px(1.), start, bounds.size.width / px(1.), offset)
-                                    .min(0.).max(-reveal_scroll.max_offset().x / px(1.));
+                                    .min(0.).max(-(reveal_widths.iter().sum::<f32>()-viewport.size.width/px(1.)).max(0.));
                                 this.column_reveal_keys.insert(side,reveal_key);
                                 let instant = !crate::theme::animations() || this.column_resize.is_some()
                                     || this.marquee.is_some() || this.file_drag;
@@ -1835,7 +1842,9 @@ impl Explorer {
             // Dragging near the top or bottom edge scrolls the list.
             let edge_handle = handle.0.borrow().base_handle.clone();
             // A persistent clock survives a watcher dropping/replacing this list.
-            let (opacity, offset) = self.motion.list_appearance(side);
+            let (opacity, offset) = if !self.miller(side) || folder==self.pane_path(side) {
+                self.motion.list_appearance(side)
+            }else{(1.,0.)};
             let wheel = crate::smooth_scroll::layer(self.smooth.clone(), format!("list-{}-{}", side.0, folder.display()).into(), edge_handle.clone());
             let edge_listener = cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| this.edge_scroll_hover(&edge_handle, event.position, cx));
             if list_mode && self.thumbs_view(side) {
@@ -1865,7 +1874,7 @@ impl Explorer {
                                     // The dragged item is represented by the ghost, not an invisible interactive tile.
                                     let tile=if manual_hidden.contains(&entry.path) {
                                         manual_gap(crate::thumbs::tile_height()).w(px(crate::thumbs::tile_width())).into_any_element()
-                                    }else{this.tile(&entry, &folder, side, cx).into_any_element()};
+                                    }else{this.tile(&entry, &folder, side, position, cx).into_any_element()};
                                     let (alpha,dy)=entry_clock.map_or((1.,0.),|at|crate::motion_policy::entry_appearance(at.elapsed(),position));
                                     let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
                                     if let Some(frame)=&spatial_frame {
@@ -1880,6 +1889,7 @@ impl Explorer {
                     .track_scroll(&handle)
                     .h_full()
                     .pt_2().pl_2().pr(px(12.))
+                    .on_mouse_down(MouseButton::Left,cx.listener({let folder=background_marquee_folder.clone();move|this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx)}))
                 ).opacity(opacity).left(px(offset))).into_any_element();
             }
             let geometry=manual_geometry.or_else(|| self.motion.rows.get(&motion_key).map(|m|m.geometry(now)))
@@ -1975,7 +1985,7 @@ impl Explorer {
 
     /// A tile of the thumbnails view: the picture (or a large icon) and the
     /// name under it; clicks, drags and the menu work as on a list row.
-    fn tile(&mut self, entry: &Entry, folder: &Path, side: GroupId, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn tile(&mut self, entry: &Entry, folder: &Path, side: GroupId, position: usize, cx: &mut Context<Self>) -> Stateful<Div> {
         let (picture_size, tile_h, tile_w) = (crate::thumbs::picture(), crate::thumbs::tile_height(), crate::thumbs::tile_width());
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
@@ -1983,6 +1993,10 @@ impl Explorer {
             .and_then(|m|m.shared_pose(&path,m.sample_time()));
         let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
+        let columns=crate::thumbs::columns(self.pane_width_for(side));
+        let plate=focused_pane.then(||self.motion.tile_plate.sample(side.0,folder,columns,std::time::Instant::now(),crate::theme::animations())).flatten();
+        let plate_part=plate.and_then(|at|crate::tile_selection::coverage(at,position,columns,
+            (tile_w,tile_h),crate::thumbs::TILE_GAP));
         let picture = if is_dir { None } else { self.thumb(&path, cx) };
         let (icon_path, tint) = entry_icon(entry);
         let right_target = is_dir && self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&path);
@@ -1990,10 +2004,11 @@ impl Explorer {
         let mut tile = div().id(SharedString::from(format!("tile-{}", path.display())))
             .w(px(morph.as_ref().map_or(tile_w,|m|m.size.x))).h(px(morph.as_ref().map_or(tile_h,|m|m.size.y))).flex_none().p_1().flex().flex_col().items_center().gap_1()
             .rounded(px(ui::CONTROL_RADIUS)).cursor_pointer().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(if entry.hidden { TEXT_MUTED } else { TEXT }))
-            .when(selected, |tile| tile.bg(rgb(if focused_pane { ACCENT_SOFT } else { HOVER })))
+            .when(selected && plate.is_none(), |tile| tile.bg(rgb(if focused_pane { ACCENT_SOFT } else { HOVER })))
             .when(!selected && right_target, |tile| tile.bg(rgb(ACCENT_SOFT)))
             .when(!selected && !right_target, |tile| tile.hover(|style| style.bg(rgb(HOVER))))
             .relative().overflow_hidden()
+            .when_some(plate_part,|tile,(x,y,w,h)|tile.child(div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h)).rounded(px(ui::CONTROL_RADIUS)).bg(rgb(ACCENT_SOFT))))
             .on_prepaint(track_landing(self.manual_drag.landings.clone(),side,folder.to_path_buf(),path.clone()))
             .children(item_overlays(self.motion.flash_of(&path),
                 is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
@@ -2075,6 +2090,7 @@ impl Explorer {
                 });
             }))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if this.marquee.is_some() {cx.stop_propagation();return;}
                 if this.is_double_click(event, &path) {
                     this.open_entry(path.clone(), is_dir, side, cx);
                 } else {

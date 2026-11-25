@@ -30,6 +30,11 @@ pub fn column_identity(width: f32, count: usize, current: usize) -> String {
 pub fn column_capacity(width: f32) -> usize {
     ((width.max(0.) / COLUMN_MIN) as usize).max(1)
 }
+/// Retain the current offset's extent while navigating out of a deep trail.
+/// The target still uses the logical width, so no permanent blank tail remains.
+pub fn column_motion_extent(logical:f32,viewport:f32,offset:f32,moving:bool)->f32 {
+    if moving {logical.max(viewport-offset.min(0.))}else{logical}
+}
 /// Every column gets `base` until they no longer fit; then all shrink
 /// evenly, down to `COLUMN_MIN`, after which the strip scrolls.
 pub fn column_widths(width: f32, count: usize, base: f32) -> Vec<f32> {
@@ -264,4 +269,20 @@ mod dock_hit_tests {
 pub fn dock_hit(x: f32, y: f32, w: f32, h: f32) -> Option<DockZone> {
     if ![x,y,w,h].iter().all(|n|n.is_finite()) || w<=0. || h<=0. || x<0. || y<0. || x>w || y>h {return None;}
     Some(dock_zone(x,y,w,h))
+}
+
+#[cfg(test)]
+mod column_retreat_tests {
+    use super::*;
+    #[test]
+    fn retreat_keeps_each_intermediate_offset_in_range_then_releases_tail() {
+        let viewport=600.;let logical=750.;
+        for offset in [-450.,-400.,-300.,-200.,-150.] {
+            let extent=column_motion_extent(logical,viewport,offset,true);
+            assert!(offset>=viewport-extent);
+            assert_eq!(extent.max(viewport)-viewport,(-offset).max(logical-viewport));
+        }
+        assert_eq!(column_motion_extent(logical,viewport,-150.,false),logical);
+        assert_eq!(column_motion_extent(600.,viewport,0.,false),600.);
+    }
 }

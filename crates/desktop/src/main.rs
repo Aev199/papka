@@ -20,6 +20,7 @@ mod edge_scroll;
 mod smooth_scroll;
 mod marked;
 mod motion;
+mod tile_selection;
 mod motion_policy;
 mod motion_lab;
 mod layout_motion;

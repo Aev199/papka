@@ -1,6 +1,7 @@
 //! Runs without cfg(test): verifies the real process-local diagnostic scale.
 #[path="../crates/desktop/src/motion_policy.rs"] mod motion_policy;
 #[path="../crates/desktop/src/column_reveal.rs"] mod column_reveal;
+#[path="../crates/desktop/src/tile_selection.rs"] mod tile_selection;
 #[path="../crates/desktop/src/mode_motion.rs"] mod mode_motion;
 #[path="../crates/desktop/src/spatial_motion.rs"] mod spatial_motion;
 #[path="../crates/desktop/src/landing_motion.rs"] mod landing_motion;
@@ -10,6 +11,10 @@ fn main(){
     let factor=std::env::var("PAPKA_MOTION_SLOW").unwrap_or_default().parse::<u32>().unwrap_or(1);
     let factor=if [1,2,4].contains(&factor){factor}else{1};
     let now=Instant::now();let span=Duration::from_millis(180);
+    let mut selection=tile_selection::Selection::default();let folder=std::path::Path::new("tiles");
+    selection.begin(1,folder,4,0,4,now,true);
+    assert!(selection.sample(1,folder,4,now+Duration::from_millis(50)*factor,true).is_some());
+    assert!(!selection.active(now+Duration::from_millis(100)*factor,true));
     assert_eq!(motion_policy::diagnostic_span(span),span*factor);
     let mut reveal=column_reveal::Reveal::default();reveal.begin(0.,-200.,now,false);
     let (x,active)=reveal.sample(0.,now+span/2*factor,false).unwrap();

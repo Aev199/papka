@@ -18,6 +18,8 @@ struct Flight {
 }
 
 impl Reveal {
+    pub(crate) fn active(&self)->bool {self.active.is_some()}
+
     pub(crate) fn begin(&mut self, actual: f32, target: f32, now: Instant, instant: bool) -> bool {
         self.active = if !instant && actual.is_finite() && target.is_finite()
             && (actual-target).abs() > TOLERANCE {

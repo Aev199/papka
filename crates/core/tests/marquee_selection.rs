@@ -1,4 +1,24 @@
 use filemanager_core::selection::marquee_rows;
+
+#[test]
+fn tile_marquee_uses_both_axes_padding_gaps_and_partial_last_row() {
+    use filemanager_core::selection::TileGrid;
+    let grid=TileGrid{columns:3,tile:(100.,80.),gap:6.,padding:(8.,8.)};
+    assert_eq!(grid.item_at(8,(10.,10.),0.),Some(0));
+    assert_eq!(grid.item_at(8,(110.,10.),0.),None); // horizontal gap
+    assert_eq!(grid.item_at(8,(10.,90.),0.),None); // vertical gap
+    assert_eq!(grid.item_at(8,(225.,185.),0.),None); // missing last cell
+    assert_eq!(grid.item_at(8,(2.,10.),0.),None); // left padding
+    let viewport=(340.,300.);
+    assert_eq!(grid.marquee(8,(115.,9.),(213.,87.),viewport,0.),vec![1]);
+    assert_eq!(grid.marquee(8,(213.,87.),(115.,9.),viewport,0.),vec![1]);
+    assert_eq!(grid.marquee(8,(8.,8.),(214.,260.),viewport,0.),vec![0,1,3,4,6,7]);
+    assert!(grid.marquee(8,(108.,8.),(114.,88.),viewport,0.).is_empty());
+    assert_eq!(grid.marquee(8,(8.,8.),(108.,88.),viewport,86.),vec![3]);
+    assert_eq!(grid.marquee(8,(-50.,-50.),(400.,400.),viewport,0.),(0..8).collect::<Vec<_>>());
+    assert!(grid.marquee(8,(5.,5.),(5.,50.),viewport,0.).is_empty());
+    assert!(grid.marquee(8,(0.,0.),(200.,200.),viewport,f32::NAN).is_empty());
+}
 #[test]
 fn marquee_geometry_clips_and_uses_half_open_row_bounds() {
     assert_eq!(marquee_rows(100, 28., 5., 60., 200., 0.), 0..3);
