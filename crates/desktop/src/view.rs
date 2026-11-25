@@ -2484,9 +2484,9 @@ impl Explorer {
             if let Some(control) = &self.transfers.control {
                 let progress = control.progress();
                 panel = panel.child(div().child(format!("Обработано: {}/{}", progress.processed, progress.total)))
-                    .child(text_button("queue-pause", if control.is_paused() { "Продолжить" } else { "Пауза" }, ButtonKind::Ghost)
+                    .child(text_button("queue-pause", if self.transfers.all_paused() { "Продолжить все" } else { "Пауза всех" }, ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_copy_pause(cx))))
-                    .child(text_button("queue-cancel", "Отменить передачу", ButtonKind::Ghost)
+                    .child(text_button("queue-cancel", if self.transfers.running.len()>1 {"Отменить все"}else{"Отменить передачу"}, ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx))));
             }
             if self.operation_alerts.is_empty() {
@@ -2915,7 +2915,7 @@ impl Explorer {
                     .child(status.clone()).tooltip(move|window,cx|Tooltip::new(status.clone()).build(window,cx))
             });
         if self.transfers.copying {
-            let paused = self.transfers.control.as_ref().is_some_and(|control| control.is_paused());
+            let paused = self.transfers.all_paused();
             // A capsule like Finder's: fills as the copy goes, dims on pause.
             if let Some(fraction) = self.transfers.fraction {
                 bar = bar.child(div().flex_none().flex().items_center().gap_2()
@@ -2928,12 +2928,12 @@ impl Explorer {
             if self.transfers.panel_hidden || self.transfers.live.is_none() { bar = bar.child(
                 div().id("pause-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(TEXT))
                     .hover(|style| style.bg(rgb(HOVER)))
-                    .child(if paused { "Продолжить" } else { "Пауза" })
+                    .child(if self.transfers.running.len()>1 {if paused {"Продолжить все"}else{"Пауза всех"}}else{if paused {"Продолжить"}else{"Пауза"}})
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_copy_pause(cx)))
             ).child(
                 div().id("cancel-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(DANGER))
                     .hover(|style| style.bg(rgb(HOVER)))
-                    .child("Отменить передачу")
+                    .child(if self.transfers.running.len()>1 {"Отменить все"}else{"Отменить передачу"})
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx)))
             ); }
         } else if self.transfers.retry_count() > 0 && !self.transfers.panel_visible() {

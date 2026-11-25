@@ -1223,16 +1223,13 @@ impl Explorer {
     /// Checks a transfer before running it: copying into the items' own
     /// folder makes numbered copies (as Explorer does); occupied names
     /// elsewhere ask the user. Nothing is ever replaced.
-    fn request_transfer(&mut self, mut transfer: Transfer, cx: &mut Context<Self>) {
+    fn request_transfer(&mut self,transfer:Transfer,cx:&mut Context<Self>) {
+        self.prepare_transfer(transfer,false,cx);
+    }
+
+    fn prepare_transfer(&mut self,mut transfer:Transfer,from_queue:bool,cx:&mut Context<Self>) {
         if self.refuse_in_archive(&transfer.target.clone(), cx) {
             self.return_to_staging(&transfer);
-            return;
-        }
-        // One operation changes files at a time; the rest wait their turn.
-        if self.transfers.occupied() {
-            self.transfers.queue.push_back(transfer);
-            self.status = format!("Поставлено в очередь ({}): начнётся после текущей операции", self.transfers.queue.len());
-            cx.notify();
             return;
         }
         let items = transfer.zone.items().to_vec();
@@ -1256,8 +1253,6 @@ impl Explorer {
         // Left-out items of the Drop Zone stay staged; the note is repeated
         // when the transfer ends (its progress replaces the status).
         if transfer.restore_failed { for path in pruned.in_place.iter() { let _ = self.zone.add(path); } }
-        self.transfers.skipped_note = (!skipped.is_empty()).then(|| skipped.clone());
-        if !skipped.is_empty() { self.status = skipped; }
         let items = transfer.zone.items().to_vec();
         // Staged paths are canonical (\\?\C:\…), the pane's are not.
         if items.iter().all(|path| path.parent().is_some_and(|parent| filemanager_core::path_utils::same_path(parent, &transfer.target))) {
@@ -1269,6 +1264,13 @@ impl Explorer {
             }
             transfer.keep_both = true;
         }
+        if !from_queue && self.transfers.must_wait(&transfer) {
+            self.transfers.queue.push_back(transfer);
+            self.status=format!("В очереди: {} · ожидание освобождения путей",self.transfers.queue.len());
+            cx.notify();return;
+        }
+        self.transfers.skipped_note=(!skipped.is_empty()).then(||skipped.clone());
+        if !skipped.is_empty(){self.status=skipped;}
         // A replacing transfer was already decided on (conflict dialog, sync).
         let conflicts = if transfer.keep_both || transfer.replace { Vec::new() } else { transfer.zone.conflict_details(&transfer.target, 4) };
         if conflicts.is_empty() {
@@ -1322,7 +1324,7 @@ impl Explorer {
     pub(crate) fn start_queued(&mut self, cx: &mut Context<Self>) {
         while let Some(next) = self.transfers.next() {
             let said = std::mem::take(&mut self.status);
-            self.request_transfer(next, cx);
+            self.prepare_transfer(next,true,cx);
             // The result of what just ended stays readable beside the new start.
             if !said.is_empty() && !self.transfers.occupied() { self.status = format!("{said} · {}", self.status); }
         }
@@ -1344,6 +1346,47 @@ impl Explorer {
         } else {
             self.run_move(zone, target, keep_both, replace, restore_failed, cx);
         }
+    }
+
+    fn parallel_transfer_audit(&mut self)->std::io::Result<Arc<filemanager_core::operation_journal::OperationJournal>> {
+        if let Some(journal)=&self.transfers.parallel {return Ok(journal.clone());}
+        let original=self.operation_journal.as_ref().ok_or_else(||std::io::Error::other("Журнал операций недоступен"))?;
+        let journal=Arc::new(original.parallel_session()?);
+        self.transfers.parallel=Some(journal.clone());
+        Ok(journal)
+    }
+
+    fn start_job_progress(&mut self,id:u64,cx:&mut Context<Self>) {
+        let Some(job)=self.transfers.running.iter().find(|job|job.id==id)else{return;};
+        let progress=job.control.clone();
+        cx.spawn(async move|weak,cx|{
+            let mut active=Duration::ZERO;let mut last=std::time::Instant::now();
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let now=std::time::Instant::now();
+                if !progress.is_paused(){active+=now-last;}last=now;
+                let keep=weak.update(cx,|this,cx|{
+                    let Some(job)=this.transfers.running.iter_mut().find(|job|job.id==id)else{return false;};
+                    let detail=progress.progress();let fraction=progress.fraction().unwrap_or(0.);
+                    job.fraction=fraction;
+                    job.live.phase=if progress.is_paused(){"На паузе".into()}else{match progress.phase(){
+                        TransferPhase::Verifying=>"Проверка копии…".into(),
+                        TransferPhase::Recycling=>"Завершение переноса…".into(),
+                        TransferPhase::Copying=>String::new(),
+                    }};
+                    job.live.processed=detail.processed;job.live.total=detail.total;
+                    job.live.bytes=progress.bytes_copied();job.live.total_bytes=progress.total_bytes();
+                    job.live.current=detail.source;
+                    job.live.left=(fraction>0.02 && active.as_secs()>=3 && !progress.is_paused())
+                        .then(||remaining(active.as_secs_f64()*(1.-fraction)/fraction));
+                    this.transfers.refresh_running();
+                    this.status=format!("Передачи: {}{}",this.transfers.running.len(),this.transfers.queue_note());
+                    cx.notify();true
+                }).unwrap_or(false);
+                if !keep {break;}
+            }
+        }).detach();
+        cx.notify();
     }
 
     fn start_transfer_progress(&mut self, action: &'static str, target: PathBuf, cx: &mut Context<Self>) {
@@ -1417,16 +1460,18 @@ impl Explorer {
     }
 
     fn run_copy(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, cx: &mut Context<Self>) {
-        let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.status = "Копирование отклонено: журнал операций недоступен".into();
-            cx.notify();
-            return;
+        let audit=match self.parallel_transfer_audit() {
+            Ok(audit)=>audit,Err(error)=>{
+                if restore_failed {for path in zone.items(){let _=self.zone.add(path);}}
+                self.transfers.skipped_note=None;
+                self.status=format!("Копирование отклонено: {error}");cx.notify();return;
+            }
         };
-        self.transfers.copying = true;
-        let control = Arc::new(CopyControl::default());
-        self.transfers.control = Some(Arc::clone(&control));
-        self.status = "Копирование…".into();
-        let target_shown = target.clone();
+        let skipped=self.transfers.skipped_note.take();
+        let id=self.transfers.start_job("Копирование",&zone,target.clone(),true,keep_both,skipped);
+        let control=self.transfers.running.iter().find(|job|job.id==id).unwrap().control.clone();
+        self.status="Копирование…".into();
+        self.start_job_progress(id,cx);
         let task = cx.background_spawn(async move {
             let results = if replace {
                 zone.transfer_to_audited_replace(Action::Copy, &target, &control, &audit)
@@ -1443,7 +1488,6 @@ impl Explorer {
                 .collect();
             (zone, target, ok, errors, failures, cancelled, created)
         });
-        self.start_transfer_progress("Копирование", target_shown, cx);
         cx.spawn(async move |weak, cx| {
             let (zone, target, ok, errors, failures, cancelled, created) = task.await;
             let _ = weak.update(cx, |this, cx| {
@@ -1453,8 +1497,7 @@ impl Explorer {
                         this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
-                this.transfers.copying = false;
-                this.transfers.control = None;
+                this.transfers.skipped_note=this.transfers.complete_job(id);
                 if errors > 0 && !zone.items().is_empty() {
                     this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: true, keep_both, replace });
                 }
@@ -1474,17 +1517,18 @@ impl Explorer {
     /// Same-volume rename or verified cross-volume transfer. Each item is prepared again and
     /// journaled before any disk change.
     fn run_move(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, cx: &mut Context<Self>) {
-        let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.status = "Перемещение отклонено: журнал операций недоступен".into();
-            cx.notify();
-            return;
+        let audit=match self.parallel_transfer_audit() {
+            Ok(audit)=>audit,Err(error)=>{
+                if restore_failed {for path in zone.items(){let _=self.zone.add(path);}}
+                self.transfers.skipped_note=None;
+                self.status=format!("Перемещение отклонено: {error}");cx.notify();return;
+            }
         };
-        self.transfers.busy = true;
-        self.transfers.copying = true;
-        let control = Arc::new(CopyControl::default());
-        self.transfers.control = Some(Arc::clone(&control));
-        self.start_transfer_progress("Перемещение", target.clone(), cx);
-        self.status = "Перемещение…".into();
+        let skipped=self.transfers.skipped_note.take();
+        let id=self.transfers.start_job("Перемещение",&zone,target.clone(),false,keep_both,skipped);
+        let control=self.transfers.running.iter().find(|job|job.id==id).unwrap().control.clone();
+        self.start_job_progress(id,cx);
+        self.status="Перемещение…".into();
         let task = cx.background_spawn(async move {
             let results = if replace {
                 zone.transfer_to_audited_replace(Action::Move, &target, &control, &audit)
@@ -1514,9 +1558,7 @@ impl Explorer {
                         this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
-                this.transfers.busy = false;
-                this.transfers.copying = false;
-                this.transfers.control = None;
+                this.transfers.skipped_note=this.transfers.complete_job(id);
                 if failed > 0 && !zone.items().is_empty() {
                     this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: false, keep_both, replace });
                 }
@@ -1524,10 +1566,11 @@ impl Explorer {
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
                 }
+                let show_result=filemanager_core::path_utils::same_path(&this.pane_path(this.active_side()),&target);
                 this.finish_transfer("Перемещено", moved, cancelled, target, failures, cx);
                 if moved > 0 {
                     this.motion.flash(receipts.iter().filter_map(|receipt| receipt.destination.clone()));
-                    this.selected = normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));
+                    if show_result {this.selected = normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));}
                     let label = if moved == 1 {
                         format!("перенос «{}»", browser::display_name(&receipts[0].source))
                     } else {
@@ -1816,12 +1859,31 @@ impl Explorer {
         }).detach();
     }
 
-    pub(crate) fn toggle_copy_pause(&mut self, cx: &mut Context<Self>) {
-        if let Some(control) = &self.transfers.control {
-            let paused = !control.is_paused();
-            control.set_paused(paused);
-            self.status = if paused { "Передача на паузе".into() } else { "Передача продолжается…".into() };
+    pub(crate) fn toggle_transfer_pause(&mut self,id:u64,cx:&mut Context<Self>) {
+        if id==0 {self.toggle_copy_pause(cx);return;}
+        if let Some(job)=self.transfers.running.iter().find(|job|job.id==id) {
+            job.control.set_paused(!job.control.is_paused());
         }
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_transfer(&mut self,id:u64,cx:&mut Context<Self>) {
+        if id==0 {self.cancel_copy(cx);return;}
+        if let Some(job)=self.transfers.running.iter().find(|job|job.id==id) {
+            job.control.set_paused(false);job.control.cancel();
+            self.status=format!("Отмена передачи #{id} запрошена. Остальные продолжаются.");
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_copy_pause(&mut self,cx:&mut Context<Self>) {
+        let paused=!self.transfers.all_paused();
+        if self.transfers.running.is_empty() {
+            if let Some(control)=&self.transfers.control {control.set_paused(paused);}
+        }else{
+            for job in &self.transfers.running {job.control.set_paused(paused);}
+        }
+        self.status=if paused {"Передачи на паузе".into()}else{"Передачи продолжаются…".into()};
         cx.notify();
     }
 
@@ -1846,6 +1908,7 @@ impl Explorer {
         // «Отмена» stops everything asked for, not only the running item.
         let queued = self.transfers.drain();
         for transfer in &queued { self.return_to_staging(transfer); }
+        for job in &self.transfers.running {job.control.set_paused(false);job.control.cancel();}
         if let Some(control) = &self.transfers.control {
             control.set_paused(false);
             control.cancel();
@@ -2057,11 +2120,12 @@ impl Explorer {
                     // Files another program or person changed light up softly where
                     // they are on screen. A burst (a sync, an unpacked archive) and
                     // the folder Papka itself is copying into stay unlit.
-                    let copying_into = this.transfers.live.as_ref().map(|live| live.target.clone());
+                    let copying_into:Vec<_>=this.transfers.running.iter().map(|job|job.live.target.clone())
+                        .chain(this.transfers.live.iter().filter(|_|this.transfers.running.is_empty()).map(|live|live.target.clone())).collect();
                     if changes.paths.len() <= 50 {
                         this.motion.flash_as(motion::Flash::Changed, changes.paths.iter()
                             .filter(|path| path.parent().is_some_and(|parent| visible.iter().any(|folder| folder == parent)
-                                && !copying_into.as_deref().is_some_and(|target| filemanager_core::path_utils::same_path(target, parent))))
+                                && !copying_into.iter().any(|target| filemanager_core::path_utils::same_path(target, parent))))
                             .cloned().collect::<Vec<_>>());
                     }
                     // Invalidating non-visible cache entries prevents an old

@@ -79,3 +79,5 @@ pub mod shell_menu;
 
 pub mod inbox_preview;
 pub mod word_text;
+
+pub mod transfer_access;

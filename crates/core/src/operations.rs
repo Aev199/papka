@@ -182,7 +182,7 @@ pub struct Receipt {
     replacement: Option<Arc<crate::replacement::UndoState>>,
 }
 
-/// Serial execution boundary between the user interface and filesystem changes.
+/// Ordered execution within a batch; disjoint copy/move batches may share a journal session.
 #[derive(Default)]
 pub struct OperationQueue { pending: VecDeque<Plan> }
 
@@ -236,7 +236,7 @@ impl OperationQueue {
         control.begin_batch(self.pending.len());
         // Fail closed if another Filemanager process owns the executor lock.
         // Hold the lock for the entire batch, not one file at a time.
-        let _executor_lock = match journal.lock_executor() {
+        let _executor_lock = match journal.lock_batch(self.pending.iter()) {
             Ok(lock) => lock,
             Err(error) => {
                 while let Some(plan) = self.pending.pop_front() {
@@ -1629,5 +1629,64 @@ mod tests {
         control.set_paused(true);
         control.cancel();
         assert!(control.check().is_err());
+    }
+}
+
+#[cfg(test)]
+mod parallel_transfer_tests {
+    use super::*;
+    #[test]
+    fn independent_move_finishes_while_copy_is_paused_and_cancel_is_local() {
+        let temp=tempfile::tempdir().unwrap();
+        let a=temp.path().join("a.txt");let b=temp.path().join("b.txt");
+        fs::write(&a,b"first").unwrap();fs::write(&b,b"second").unwrap();
+        let out=temp.path().join("out");fs::create_dir(&out).unwrap();
+        let journal=crate::operation_journal::OperationJournal::open(temp.path().join("audit.sqlite")).unwrap();
+        let session=Arc::new(journal.parallel_session().unwrap());
+        let control=Arc::new(CopyControl::default());control.set_paused(true);
+        let worker_session=session.clone();let worker_control=control.clone();
+        let plan=Plan::prepare(Action::Copy,&a,Some(&out.join("a.txt"))).unwrap();
+        let worker=std::thread::spawn(move||{
+            let mut queue=OperationQueue::default();queue.submit(plan);
+            queue.run_all_audited(&worker_control,&worker_session)
+        });
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+        while control.progress().source.is_none() && std::time::Instant::now()<deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let started=control.progress().source.is_some();
+        let mut conflict=OperationQueue::default();
+        conflict.submit(Plan::prepare(Action::Move,&a,Some(&out.join("other.txt"))).unwrap());
+        let blocked=conflict.run_all_audited(&CopyControl::default(),&session);
+        let mut independent=OperationQueue::default();
+        independent.submit(Plan::prepare(Action::Move,&b,Some(&out.join("b.txt"))).unwrap());
+        let moved=independent.run_all_audited(&CopyControl::default(),&session);
+        let external_blocked=journal.lock_executor().is_err();
+        control.cancel();control.set_paused(false);
+        let copied=worker.join().unwrap();
+        assert!(started,"paused copy must acquire its lease before the second task");
+        assert_eq!(blocked[0].1.as_ref().unwrap_err().kind(),io::ErrorKind::WouldBlock);
+        assert!(moved[0].1.is_ok(),"{:?}",moved[0].1);
+        assert_eq!(fs::read(out.join("b.txt")).unwrap(),b"second");assert!(!b.exists());
+        assert!(copied[0].1.is_err());assert!(a.exists());assert!(!out.join("a.txt").exists());
+        assert!(external_blocked,"other windows and Undo must retain the OS gate");
+        drop(session);
+        assert!(journal.lock_executor().is_ok());
+    }
+
+    #[test]
+    fn shared_copy_readers_are_allowed_but_destinations_remain_exclusive() {
+        let temp=tempfile::tempdir().unwrap();let src=temp.path().join("source");
+        fs::write(&src,b"data").unwrap();
+        let journal=crate::operation_journal::OperationJournal::open(temp.path().join("audit.sqlite")).unwrap();
+        let session=journal.parallel_session().unwrap();
+        let a=Plan::prepare(Action::Copy,&src,Some(&temp.path().join("a"))).unwrap();
+        let b=Plan::prepare(Action::Copy,&src,Some(&temp.path().join("b"))).unwrap();
+        let lease=session.lock_batch(std::iter::once(&a)).unwrap();
+        let reader=session.lock_batch(std::iter::once(&b)).unwrap();
+        assert!(session.lock_batch(std::iter::once(&a)).is_err());
+        drop(lease);
+        assert!(session.lock_batch(std::iter::once(&a)).is_ok());
+        drop(reader);
     }
 }

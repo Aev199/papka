@@ -18,12 +18,13 @@ use crate::view::{ButtonKind, icon_button, text_button};
 /// frames, including reports with many failures.
 #[derive(Clone, Default)]
 pub(crate) struct TransferPanelPresentation {
-    live: Option<LivePresentation>,
+    live: Vec<LivePresentation>,
     report: Option<ReportPresentation>,
 }
 
 #[derive(Clone)]
 struct LivePresentation {
+    id:u64,
     action: &'static str,
     target: std::path::PathBuf,
     phase: String,
@@ -67,14 +68,21 @@ impl Explorer {
     /// render frame). The parent retains the last snapshot for fade-out.
     pub(crate) fn transfer_panel_presentation(&self, previous: Option<&TransferPanelPresentation>) -> Option<TransferPanelPresentation> {
         if !self.transfers.panel_visible() { return None; }
-        let live = self.transfers.live.as_ref().map(|live| LivePresentation {
-            action: live.action, target: live.target.clone(), phase: live.phase.clone(),
-            processed: live.processed, total: live.total, bytes: live.bytes, total_bytes: live.total_bytes,
-            left: live.left.clone(), current: live.current.clone(),
-            paused: self.transfers.control.as_ref().is_some_and(|control| control.is_paused()),
-            fraction: self.transfers.fraction.unwrap_or(0.).clamp(0., 1.) as f32,
-            queued: self.transfers.queue.len(),
-        });
+        let mut live:Vec<_>=self.transfers.running.iter().map(|job|LivePresentation{
+            id:job.id,action:job.live.action,target:job.live.target.clone(),phase:job.live.phase.clone(),
+            processed:job.live.processed,total:job.live.total,bytes:job.live.bytes,total_bytes:job.live.total_bytes,
+            left:job.live.left.clone(),current:job.live.current.clone(),paused:job.control.is_paused(),
+            fraction:job.fraction.clamp(0.,1.) as f32,queued:0,
+        }).collect();
+        if live.is_empty() {
+            if let Some(job)=&self.transfers.live {live.push(LivePresentation{
+                id:0,action:job.action,target:job.target.clone(),phase:job.phase.clone(),
+                processed:job.processed,total:job.total,bytes:job.bytes,total_bytes:job.total_bytes,
+                left:job.left.clone(),current:job.current.clone(),paused:self.transfers.all_paused(),
+                fraction:self.transfers.fraction.unwrap_or(0.).clamp(0.,1.) as f32,queued:0,
+            });}
+        }
+        if let Some(first)=live.first_mut(){first.queued=self.transfers.queue.len();}
         let previous_report = previous.and_then(|presentation| presentation.report.as_ref());
         let report = self.transfers.report.as_ref().map(|report| {
             report_presentation(report, self.transfers.retry_count(), previous_report)
@@ -84,31 +92,36 @@ impl Explorer {
 
     pub(crate) fn transfer_panel(&self, presentation: &TransferPanelPresentation, popup: crate::popup_motion::Phase, cx: &mut Context<Self>) -> AnyElement {
         let mut card = div().id("transfer-panel").occlude().absolute().right(px(12.)).bottom(px(44.)).w(px(380.))
-            .p_3().flex().flex_col().gap_2().rounded(px(ui::PANEL_RADIUS))
+            .p_3().flex().flex_col().gap_2().max_h(gpui::relative(0.8)).overflow_y_scroll().rounded(px(ui::PANEL_RADIUS))
             .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).text_size(px(ui::BODY_TEXT)).text_color(rgb(TEXT))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         let dim = |text: String| div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(text);
 
-        if let Some(live) = &presentation.live {
+        if !presentation.live.is_empty(){card=card.child(div().flex().items_center().gap_2()
+            .child(div().flex_1().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Передачи: {}",presentation.live.len())))
+            .child(icon_button("transfer-fold","fm/chevron-down.svg","Свернуть: передачи продолжатся",false,true)
+                .on_click(cx.listener(|this,_,_,cx|{this.transfers.panel_hidden=true;cx.notify();}))));}
+        let mut list=div().id("active-transfers").max_h(px(360.)).overflow_y_scroll().flex().flex_col().gap_3();
+        for live in &presentation.live {
+            let id=live.id;
+            let mut item=div().id(gpui::SharedString::from(format!("transfer-job-{id}"))).flex().flex_col().gap_2().flex_none();
             let paused = live.paused;
             let fraction = live.fraction;
             let target = live.target.display().to_string();
             let heading = if live.phase.is_empty() { format!("{}…", live.action) } else { live.phase.clone() };
-            card = card.child(div().flex().items_center().gap_2()
+            item = item.child(div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD).child(heading))
-                .child(div().flex_none().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.).floor() as u32)))
-                .child(icon_button("transfer-fold", "fm/chevron-down.svg", "Свернуть: перенос продолжится, ход виден в строке внизу", false, true)
-                    .on_click(cx.listener(|this, _, _, cx| { this.transfers.panel_hidden = true; cx.notify(); }))));
-            card = card.child(div().id("transfer-target").min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED))
+                .child(div().flex_none().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.).floor() as u32))));
+            item = item.child(div().id(gpui::SharedString::from(format!("transfer-target-{id}"))).min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED))
                 .child(format!("в «{}»", browser::display_name(&live.target)))
                 .tooltip(move |window, cx| Tooltip::new(target.clone()).build(window, cx)));
             if let Some(current) = &live.current {
                 let full = current.display().to_string();
-                card = card.child(div().id("transfer-current").min_w_0().truncate().child(browser::display_name(current))
+                item = item.child(div().id(gpui::SharedString::from(format!("transfer-current-{id}"))).min_w_0().truncate().child(browser::display_name(current))
                     .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx)));
             }
-            card = card.child(div().h(px(6.)).w_full().rounded_full().bg(rgb(BORDER)).overflow_hidden()
-                .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT })).w(gpui::relative(self.motion.bar().unwrap_or(fraction)))));
+            item = item.child(div().h(px(6.)).w_full().rounded_full().bg(rgb(BORDER)).overflow_hidden()
+                .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT })).w(gpui::relative(fraction))));
             // The item being copied counts: "1 из 3" while the first one runs.
             let mut facts = if live.total > 0 { vec![format!("{} из {}", (live.processed + 1).min(live.total), live.total)] } else { Vec::new() };
             if live.total_bytes > 0 { facts.push(format!("{} из {}", format_size(live.bytes), format_size(live.total_bytes))); }
@@ -116,18 +129,20 @@ impl Explorer {
             if let Some(left) = &live.left { facts.push(format!("осталось {left}")); }
             let queued = live.queued;
             if queued > 0 { facts.push(format!("в очереди: {queued}")); }
-            card = card.child(dim(facts.join(" · ")));
-            card = card.child(div().flex().gap_2().justify_end()
-                .child(text_button("transfer-pause", if paused { "Продолжить" } else { "Пауза" }, ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_copy_pause(cx))))
-                .child(text_button("transfer-cancel", "Отменить", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx)))));
+            item = item.child(dim(facts.join(" · ")));
+            item = item.child(div().flex().gap_2().justify_end()
+                .child(text_button(gpui::SharedString::from(format!("transfer-pause-{id}")), if paused { "Продолжить" } else { "Пауза" }, ButtonKind::Ghost)
+                    .on_click(cx.listener(move|this, _, _, cx| this.toggle_transfer_pause(id,cx))))
+                .child(text_button(gpui::SharedString::from(format!("transfer-cancel-{id}")), "Отменить", ButtonKind::Ghost)
+                    .on_click(cx.listener(move|this, _, _, cx| this.cancel_transfer(id,cx)))));
+            list=list.child(item);
         }
+        card=card.child(list);
 
         if let Some(report) = &presentation.report {
             let failed = !report.failures.is_empty();
             let id = report.id;
-            if presentation.live.is_some() { card = card.child(div().h(px(1.)).bg(rgb(BORDER))); }
+            if !presentation.live.is_empty() { card = card.child(div().h(px(1.)).bg(rgb(BORDER))); }
             let target = report.targets.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n");
             let target_label = if report.targets.len() == 1 { format!("в «{}»", browser::display_name(&report.targets[0])) }
                 else { format!("Папок назначения: {}", report.targets.len()) };
@@ -154,7 +169,7 @@ impl Explorer {
                 }
                 card = card.child(list);
                 let text = transfers::failures_text(&report.title, &report.failures);
-                let retry = Some(report.retry_count).filter(|count| *count > 0 && !self.transfers.occupied());
+                let retry = Some(report.retry_count).filter(|count| *count > 0 && !self.transfers.busy && self.transfers.pending.is_none());
                 card = card.child(div().flex().gap_2().justify_end()
                     .child(text_button("transfer-copy-errors", "Скопировать текст", ButtonKind::Ghost)
                         .on_click(cx.listener(move |this, _, _, cx| {

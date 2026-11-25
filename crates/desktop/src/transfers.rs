@@ -1,5 +1,4 @@
-//! Copies and moves of the window: the one running, the one waiting for an
-//! answer about name conflicts, and those asked for meanwhile.
+//! Concurrent copy/move batches with stable job identities and path reservations.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -30,6 +29,7 @@ pub(crate) struct Retry {
 }
 
 /// The running copy or move as its panel shows it.
+#[derive(Clone)]
 pub(crate) struct Live {
     /// «Копирование» or «Перемещение».
     pub(crate) action: &'static str,
@@ -111,9 +111,25 @@ pub(crate) fn failures_text(title: &str, failures: &[Failure]) -> String {
     text
 }
 
+pub(crate) struct Running {
+    pub id:u64,
+    pub live:Live,
+    pub control:Arc<CopyControl>,
+    pub fraction:f64,
+    accesses:Vec<filemanager_core::transfer_access::Access>,
+    skipped:Option<String>,
+}
+impl Transfer {
+    fn accesses(&self)->Vec<filemanager_core::transfer_access::Access> {
+        filemanager_core::transfer_access::transfer(self.zone.items(),&self.target,self.copy,self.keep_both)
+    }
+}
 #[derive(Default)]
 pub(crate) struct Transfers {
-    /// What the transfer panel shows of the running copy or move.
+    pub(crate) running:Vec<Running>,
+    pub(crate) parallel:Option<Arc<filemanager_core::operation_journal::OperationJournal>>,
+    sequence:u64,
+    /// Compatibility summary of the first live job (or exclusive bulk rename).
     pub(crate) live: Option<Live>,
     /// The result of the last one, until dismissed.
     pub(crate) report: Option<Report>,
@@ -124,7 +140,7 @@ pub(crate) struct Transfers {
     pub(crate) copying: bool,
     /// Share of the running copy or move done, 0..=1, for the progress bar.
     pub(crate) fraction: Option<f64>,
-    /// Any operation that changes files is running: one at a time.
+    /// An exclusive non-transfer operation (rename, delete, Undo) is running.
     pub(crate) busy: bool,
     pub(crate) control: Option<Arc<CopyControl>>,
     /// Items a transfer could not finish (e.g. the network dropped): their
@@ -135,20 +151,62 @@ pub(crate) struct Transfers {
     pub(crate) skipped_note: Option<String>,
     /// Transfer paused on name conflicts, with the conflicting items.
     pub(crate) pending: Option<(Transfer, Vec<Conflict>)>,
-    /// Asked for while another ran (or folders of a sync): started in turn.
+    /// Transfers blocked on overlapping paths or an exclusive operation.
     pub(crate) queue: VecDeque<Transfer>,
 }
 
 impl Transfers {
-    /// A new transfer has to wait: files are being changed, or the conflict
-    /// dialog of an earlier one is still open.
+    /// Activity that blocks commands requiring exclusive ownership (Undo, rename).
     pub(crate) fn occupied(&self) -> bool {
         self.copying || self.busy || self.pending.is_some()
     }
 
-    /// The next queued transfer, once nothing else runs.
+    fn can_run(&self,transfer:&Transfer)->bool {
+        !self.busy && (!self.copying || !self.running.is_empty()) && self.pending.is_none()
+            && !self.running.iter().any(|job|filemanager_core::transfer_access::conflicts(&job.accesses,&transfer.accesses()))
+    }
+
+    pub(crate) fn must_wait(&self,transfer:&Transfer)->bool {
+        !self.can_run(transfer) || self.queue.iter().any(|old|
+            filemanager_core::transfer_access::conflicts(&old.accesses(),&transfer.accesses()))
+    }
+
+    /// Independent jobs bypass a blocked queue head; overlapping jobs keep FIFO.
     pub(crate) fn next(&mut self) -> Option<Transfer> {
-        if self.occupied() { None } else { self.queue.pop_front() }
+        let index=self.queue.iter().enumerate().position(|(index,transfer)|self.can_run(transfer)
+            && !self.queue.iter().take(index).any(|old|filemanager_core::transfer_access::conflicts(&old.accesses(),&transfer.accesses())))?;
+        self.queue.remove(index)
+    }
+
+    pub(crate) fn start_job(&mut self,action:&'static str,zone:&DropZone,target:PathBuf,copy:bool,numbered:bool,skipped:Option<String>)->u64 {
+        self.sequence=self.sequence.wrapping_add(1);
+        let id=self.sequence;
+        self.begin(action,target.clone());
+        let live=self.live.as_ref().unwrap().clone();
+        self.running.push(Running{id,live,control:Arc::new(CopyControl::default()),fraction:0.,
+            accesses:filemanager_core::transfer_access::transfer(zone.items(),&target,copy,numbered),skipped});
+        self.refresh_running();
+        id
+    }
+
+    pub(crate) fn refresh_running(&mut self) {
+        self.copying=!self.running.is_empty();
+        self.live=self.running.first().map(|job|job.live.clone());
+        self.control=self.running.first().map(|job|job.control.clone());
+        self.fraction=(!self.running.is_empty()).then(||self.running.iter().map(|job|job.fraction).sum::<f64>()/self.running.len() as f64);
+    }
+
+    pub(crate) fn complete_job(&mut self,id:u64)->Option<String> {
+        let index=self.running.iter().position(|job|job.id==id)?;
+        let skipped=self.running.remove(index).skipped;
+        if self.running.is_empty() {self.parallel=None;}
+        self.refresh_running();
+        skipped
+    }
+
+    pub(crate) fn all_paused(&self)->bool {
+        if self.running.is_empty() {self.control.as_ref().is_some_and(|c|c.is_paused())}
+        else{self.running.iter().all(|job|job.control.is_paused())}
     }
 
     /// Empties the queue («Отмена»), handing back what was in it.
@@ -168,7 +226,7 @@ impl Transfers {
     /// A transfer ended. Returns the report's id when it may fade by
     /// itself: nothing failed, so there is nothing to read.
     pub(crate) fn finish(&mut self, title: String, target: PathBuf, failures: Vec<Failure>) -> Option<u64> {
-        self.live = None;
+        if self.running.is_empty(){self.live=None;}else{self.refresh_running();}
         self.reports = self.reports.wrapping_add(1);
         // Errors nobody closed yet are not replaced by the next result
         // (a queued transfer may end seconds later): they pile up.
@@ -360,5 +418,57 @@ mod tests {
         transfers.queue.push_back(transfer("b"));
         assert_eq!(transfers.drain().len(), 2);
         assert!(transfers.queue.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod parallel_tests {
+    use super::*;
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new()->Self {
+            let path=std::env::temp_dir().join(format!("papka-parallel-{}-{}",std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir(&path).unwrap();
+            Self(std::fs::canonicalize(path).unwrap())
+        }
+        fn transfer(&self,name:&str,target:&str,copy:bool)->Transfer {
+            let source=self.0.join(name);std::fs::write(&source,b"data").unwrap();
+            let mut zone=DropZone::default();zone.add(&source).unwrap();
+            Transfer{zone,target:self.0.join(target),copy,keep_both:false,replace:false,restore_failed:false}
+        }
+    }
+    impl Drop for Temp {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
+    #[test]
+    fn independent_jobs_start_by_default_and_completion_preserves_other_control() {
+        let temp=Temp::new();let mut state=Transfers::default();
+        let a=temp.transfer("a","one",true);let b=temp.transfer("b","two",false);
+        let first=state.start_job("Копирование",&a.zone,a.target.clone(),true,false,None);
+        assert!(!state.must_wait(&b));
+        let second=state.start_job("Перемещение",&b.zone,b.target.clone(),false,false,None);
+        let second_control=state.running[1].control.clone();
+        state.running[0].control.set_paused(true);
+        assert!(!second_control.is_paused());assert!(!state.all_paused());
+        state.running[0].fraction=0.4;state.running[1].fraction=0.8;state.refresh_running();
+        assert!((state.fraction.unwrap()-0.6).abs()<0.0001);
+        state.running[0].control.cancel();
+        state.complete_job(first);
+        assert_eq!(state.running.len(),1);assert_eq!(state.running[0].id,second);
+        assert!(state.copying);assert!(!second_control.is_cancelled());
+        assert!(Arc::ptr_eq(state.control.as_ref().unwrap(),&second_control));
+        state.complete_job(second);assert!(!state.copying);assert!(state.control.is_none());
+    }
+    #[test]
+    fn paused_paths_stay_reserved_and_unrelated_jobs_bypass_waiting_head() {
+        let temp=Temp::new();let mut state=Transfers::default();
+        let a=temp.transfer("a","one",false);let blocked=temp.transfer("a","three",true);
+        let independent=temp.transfer("b","two",true);
+        let id=state.start_job("Перемещение",&a.zone,a.target.clone(),false,false,None);
+        state.running[0].control.set_paused(true);
+        assert!(state.must_wait(&blocked));
+        state.queue.push_back(blocked);state.queue.push_back(independent);
+        assert_eq!(state.next().unwrap().target,temp.0.join("two"));
+        assert!(state.next().is_none());
+        state.complete_job(id);assert_eq!(state.next().unwrap().target,temp.0.join("three"));
     }
 }

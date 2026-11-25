@@ -8,7 +8,23 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub struct OperationJournal { database: PathBuf }
+pub struct OperationJournal { database: PathBuf, parallel:Option<std::sync::Arc<ParallelExecutor>> }
+pub(crate) struct ParallelExecutor {
+    _file:fs::File,
+    active:std::sync::Mutex<Vec<(u64,Vec<crate::transfer_access::Access>)>>,
+    sequence:std::sync::atomic::AtomicU64,
+}
+pub(crate) enum BatchLease {
+    Exclusive{_file:fs::File},
+    Parallel{executor:std::sync::Arc<ParallelExecutor>,id:u64},
+}
+impl Drop for BatchLease {
+    fn drop(&mut self) {
+        if let Self::Parallel{executor,id}=self {
+            executor.active.lock().unwrap_or_else(|e|e.into_inner()).retain(|(key,_)|*key!=*id);
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct InterruptedAction {
@@ -48,7 +64,7 @@ impl OperationJournal {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let database = path.as_ref().to_owned();
         if let Some(parent) = database.parent() { fs::create_dir_all(parent)?; }
-        let journal = Self { database };
+        let journal = Self { database, parallel:None };
         let mut conn = journal.connection()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql_error)?;
         tx.execute_batch("
@@ -106,6 +122,37 @@ impl OperationJournal {
             }
         })?;
         Ok(lock)
+    }
+
+    /// One window may run disjoint copy/move batches under a shared OS gate.
+    /// Other windows, Undo and crash recovery still require exclusive ownership.
+    pub fn parallel_session(&self)->io::Result<Self> {
+        if self.parallel.is_some() {return Err(io::Error::other("Parallel session already active"));}
+        let file=self.lock_executor()?;
+        Ok(Self{database:self.database.clone(),parallel:Some(std::sync::Arc::new(ParallelExecutor{
+            _file:file,active:Default::default(),sequence:std::sync::atomic::AtomicU64::new(1),
+        }))})
+    }
+
+    pub(crate) fn lock_batch<'a>(&self,plans:impl Iterator<Item=&'a Plan>)->io::Result<BatchLease> {
+        let Some(executor)=&self.parallel else {
+            return self.lock_executor().map(|file|BatchLease::Exclusive{_file:file});
+        };
+        let mut accesses=Vec::new();
+        for plan in plans {
+            if !matches!(plan.action,Action::Copy|Action::Move) {
+                return Err(io::Error::other("Only copy and move may use a parallel session"));
+            }
+            accesses.push(crate::transfer_access::Access::new(&plan.source,plan.action==Action::Move));
+            if let Some(target)=&plan.destination {accesses.push(crate::transfer_access::Access::new(target,true));}
+        }
+        let mut active=executor.active.lock().unwrap_or_else(|e|e.into_inner());
+        if active.iter().any(|(_,old)|crate::transfer_access::conflicts(&accesses,old)) {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock,"Another transfer is using these paths"));
+        }
+        let id=executor.sequence.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+        active.push((id,accesses));
+        Ok(BatchLease::Parallel{executor:executor.clone(),id})
     }
 
     /// A valid job record must exist before any filesystem operation begins.
