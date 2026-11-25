@@ -35,6 +35,7 @@ mod mode_motion;
 mod column_reveal;
 mod spatial_motion;
 mod manual_drag;
+mod landing_motion;
 mod kind_filter;
 mod search_panel;
 mod updates;

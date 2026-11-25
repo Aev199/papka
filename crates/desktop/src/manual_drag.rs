@@ -29,6 +29,7 @@ struct Preview {
     paths: Vec<PathBuf>,
     hidden: Arc<HashSet<PathBuf>>,
     selected: Vec<usize>,
+    cursor:Point<Pixels>,
     motion: Option<ListMotion>,
 }
 
@@ -55,6 +56,7 @@ pub(crate) struct ManualDrag {
     pub transfer_modifier: bool,
     previews: HashMap<GroupId, Preview>,
     settles: HashMap<GroupId,Settle>,
+    pub landings:crate::landing_motion::Landings,
 }
 
 pub(crate) struct Display {
@@ -68,18 +70,20 @@ impl ManualDrag {
     pub(crate) fn prune(&mut self, ids: &[GroupId]) {
         self.previews.retain(|id, _| ids.contains(id));
         self.settles.retain(|id,_|ids.contains(id));
+        self.landings.prune(&ids.iter().map(|id|id.0).collect::<Vec<_>>());
         if self.pointer.as_ref().is_some_and(|p| !ids.contains(&p.source.0)) { self.pointer = None; }
     }
 
-    fn settle(&mut self,side:GroupId,folder:&Path,paths:&[PathBuf],now:Instant,committed:bool) {
+    fn settle(&mut self,side:GroupId,folder:&Path,paths:&[PathBuf],now:Instant,committed:bool,origin:Option<Point<Pixels>>) {
         if crate::theme::animations() && !paths.is_empty() {
             self.settles.insert(side,Settle::new(folder,paths,now,committed));
+            if let Some(origin)=origin {self.landings.begin(side.0,folder,paths,(origin.x/px(1.),origin.y/px(1.)),now,committed);}
         }
     }
 
     pub(crate) fn advance(&mut self,now:Instant)->bool {
         self.settles.retain(|_,s|crate::theme::animations() && now.saturating_duration_since(s.started)<crate::motion_policy::diagnostic_span(SETTLE_SPAN));
-        !self.settles.is_empty()
+        self.landings.advance(now,crate::theme::animations()) || !self.settles.is_empty()
     }
 
     pub(crate) fn strength(&self,side:GroupId,folder:&Path,path:&Path)->Option<(bool,f32)> {
@@ -161,12 +165,12 @@ impl Explorer {
         }
 
         if self.manual_drag.pointer.is_none() && !self.manual_drag.previews.contains_key(&side) { return None; }
-        let pointer = self.manual_drag.pointer.as_ref().filter(|p| p.source.0 == side && p.source.1 == folder);
+        let pointer = self.manual_drag.pointer.as_ref().filter(|p| p.source.0 == side && p.source.1 == folder).cloned();
         let first_file = base.iter().take_while(|&&i| listing.entries[i].is_directory).count();
         let dragging = self.dragging_files(cx);
         let candidate = if dragging && !self.manual_drag.transfer_modifier && self.right_drag.is_none() && self.filter.is_empty()
             && self.label_filter(side).is_none() && self.kinds.get(side).is_none() && !self.renaming {
-            pointer.and_then(|p| {
+            pointer.as_ref().and_then(|p| {
                 let at = pointer_boundary(scroll, p.position, base.len(), first_file, columns, cell, tiles)?;
                 let selected = self.manual_drag.previews.get(&side)
                     .filter(|view|Arc::ptr_eq(&view.listing,listing) && Arc::ptr_eq(&view.base,base)
@@ -179,8 +183,8 @@ impl Explorer {
 
         if candidate.is_none() && !dragging {
             let returning=self.manual_drag.previews.get(&side).filter(|view|view.folder==folder && view.boundary.is_some())
-                .map(|view|view.paths.clone());
-            if let Some(paths)=returning {self.manual_drag.settle(side,folder,&paths,now,false);}
+                .map(|view|(view.paths.clone(),view.cursor));
+            if let Some((paths,cursor))=returning {self.manual_drag.settle(side,folder,&paths,now,false,Some(cursor));}
         }
         // A watcher or navigation must invalidate any preview derived from
         // different indices, even if the path and file count are unchanged.
@@ -188,13 +192,14 @@ impl Explorer {
         let view = self.manual_drag.previews.entry(side).or_insert_with(|| Preview {
             folder: folder.to_path_buf(), listing: listing.clone(), base: base.clone(), order: base.clone(),
             logical_positions: logical_positions(base), columns, cell, tiles,
-            boundary: None, paths: Vec::new(), hidden: Arc::new(HashSet::new()), selected:Vec::new(), motion: None,
+            boundary: None, paths: Vec::new(), hidden: Arc::new(HashSet::new()), selected:Vec::new(), cursor:gpui::point(px(0.),px(0.)), motion: None,
         });
         if view.folder != folder || !Arc::ptr_eq(&view.listing, listing) || !Arc::ptr_eq(&view.base, base) {
             *view = Preview { folder: folder.to_path_buf(), listing: listing.clone(), base: base.clone(), order: base.clone(),
                 logical_positions: logical_positions(base), columns, cell, tiles,
-                boundary: None, paths: Vec::new(), hidden: Arc::new(HashSet::new()), selected:Vec::new(), motion: None };
+                boundary: None, paths: Vec::new(), hidden: Arc::new(HashSet::new()), selected:Vec::new(), cursor:gpui::point(px(0.),px(0.)), motion: None };
         }
+        if let Some(pointer)=pointer {view.cursor=pointer.position;}
         view.columns = columns; view.cell = cell; view.tiles = tiles;
         let at = candidate.as_ref().map(|c| c.0);
         let paths = candidate.as_ref().map_or(&[][..], |c| c.2.as_slice());
@@ -213,6 +218,7 @@ impl Explorer {
         }
         if tiles || !crate::theme::animations() || view.motion.as_ref().is_some_and(|m| !m.active(now)) { view.motion = None; }
         if candidate.is_some() {
+            self.manual_drag.landings.cancel(side.0);
             self.drag_target.borrow_mut().manual_folder = Some(folder.to_path_buf());
         }
         let geometry = view.motion.as_ref().map(|m| m.geometry(now));
@@ -268,7 +274,7 @@ impl Explorer {
         if self.manual_orders.save(folder, &ordered) {
             self.status = "Ручной порядок сохранён".into();
             self.persist_manual_orders();
-            self.manual_drag.settle(side,folder,&data.paths,now,true);
+            self.manual_drag.settle(side,folder,&data.paths,now,true,Some(position));
         }
         cx.notify();
         true

@@ -106,6 +106,22 @@ fn shared_visual(entry:&Entry,pose:&crate::spatial_motion::SharedPose,text:u32,t
             .child(entry.name.clone()))
 }
 
+fn landing_ghost(ghost:crate::landing_motion::Ghost)->Div {
+    let r=ghost.rect;let (glyph,tint)=file_icon(ghost.path.extension().and_then(|v|v.to_str()));
+    div().absolute().left(px(r.x)).top(px(r.y)).w(px(r.w)).h(px(r.h))
+        .opacity(ghost.alpha).overflow_hidden().rounded(px(ui::CONTROL_RADIUS))
+        .bg(rgb(if ghost.committed{ACCENT_SOFT}else{HOVER})).border_1().border_color(rgb(BORDER_STRONG))
+        .px_2().flex().items_center().gap_2()
+        .child(icon(glyph,tint))
+        .child(div().min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).child(browser::display_name(&ghost.path)))
+}
+
+fn track_landing(landings:crate::landing_motion::Landings,side:GroupId,folder:PathBuf,path:PathBuf)
+    ->impl Fn(gpui::Bounds<Pixels>,&mut Window,&mut App)+'static {
+    move |bounds,_,_|landings.record(side.0,&folder,&path,crate::landing_motion::Rect{
+        x:bounds.origin.x/px(1.),y:bounds.origin.y/px(1.),w:bounds.size.width/px(1.),h:bounds.size.height/px(1.)})
+}
+
 /// Lightweight icon/name silhouette with no input listeners or image assets.
 fn spatial_ghost(ghost: crate::spatial_motion::Ghost,selected:bool) -> Div {
     let r=ghost.geometry;
@@ -479,6 +495,8 @@ impl Explorer {
         if card {self.motion.spatial.remove(&group);self.motion.column_presence.remove(&group);self.motion.column_reveals.remove(&group);self.column_reveal_keys.remove(&group);}
         let body=if card {self.project_card_view(cx)} else {self.pane(group,cx)};
         let spatial=self.motion.spatial.get(&group).cloned();
+        let landing_state=self.manual_drag.landings.clone();
+        let landing_ghosts=if crate::theme::animations(){landing_state.ghosts(group.0,&self.pane_path(group),now)}else{Vec::new()};
         let measuring=spatial.as_ref().is_some_and(|m|m.measuring());
         let shared=spatial.is_some();
         let ghosts=spatial.as_ref().map_or_else(Vec::new,|m|m.ghosts(&self.pane_path(group),now));
@@ -486,11 +504,14 @@ impl Explorer {
             .child(div().size_full().opacity(if measuring{0.001}else if shared{1.}else{opacity}).child(body))
             .children(ghosts.into_iter().map(|ghost|{let selected=self.is_selected(&ghost.path);spatial_ghost(ghost,selected)}))
             .when(measuring,|body|body.child(crate::popup_motion::shield()))
-            .when_some(spatial,|body,spatial|body.on_prepaint(move|bounds,_,_| {
+            .children(landing_ghosts.into_iter().map(landing_ghost))
+            .on_prepaint(move|bounds,_,_| {
                 use crate::spatial_motion::{Geometry,Position};
-                spatial.viewport(Geometry{origin:Position{x:bounds.origin.x/px(1.),y:bounds.origin.y/px(1.)},
-                    size:Position{x:bounds.size.width/px(1.),y:bounds.size.height/px(1.)}});
-            }));
+                landing_state.viewport(group.0,crate::landing_motion::Rect{x:bounds.origin.x/px(1.),y:bounds.origin.y/px(1.),
+                    w:bounds.size.width/px(1.),h:bounds.size.height/px(1.)});
+                if let Some(spatial)=&spatial {spatial.viewport(Geometry{origin:Position{x:bounds.origin.x/px(1.),y:bounds.origin.y/px(1.)},
+                    size:Position{x:bounds.size.width/px(1.),y:bounds.size.height/px(1.)}});}
+            });
         div().id(SharedString::from(format!("group-{}",group.0))).size_full().min_w_0().min_h_0()
             .flex().flex_col().overflow_hidden().border_1()
             .border_color(rgb(if group==self.browser.active && self.browser.leaves().len()>1 {ACTIVE_PANE} else {BORDER}))
@@ -1931,6 +1952,7 @@ impl Explorer {
             .when(!selected && right_target, |tile| tile.bg(rgb(ACCENT_SOFT)))
             .when(!selected && !right_target, |tile| tile.hover(|style| style.bg(rgb(HOVER))))
             .relative().overflow_hidden()
+            .on_prepaint(track_landing(self.manual_drag.landings.clone(),side,folder.to_path_buf(),path.clone()))
             .children(item_overlays(self.motion.flash_of(&path),
                 is_dir.then(|| self.spring_fill(&crate::spring::SpringTarget::Folder(side, path.clone()))).flatten()))
             .when_some(self.manual_drag.strength(side,folder,&path), |item,(committed,strength)| {
@@ -2061,6 +2083,7 @@ impl Explorer {
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
             .relative()
+            .on_prepaint(track_landing(self.manual_drag.landings.clone(),side,folder.to_path_buf(),path.clone()))
             .when_some(plate_part, |row, (top, height)| row.child(div().absolute().left_0().w_full()
                 .top(px(top * row_height())).h(px(height * row_height())).bg(rgb(SELECTED))))
             .children(item_overlays(self.motion.flash_of(&path),
