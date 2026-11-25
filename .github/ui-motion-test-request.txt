@@ -1,4 +1,5 @@
-UI & Motion 2.0 / final Windows acceptance candidate
-Source: d8c0df6c1efd88a00ee284b73de7371c3ae2fa12
-Verified source CI: https://github.com/Aev199/papka/actions/runs/45549398937
-One final portable candidate after implementation; no update manifest publication.
+UI & Motion 2.0 / Windows acceptance candidate after review fixes
+Source: 7909bd4678869df72f446476c3829371cb5eb1d1
+Verified source CI: https://github.com/Aev199/papka/actions/runs/45555914095
+Requested rebuild: 2026-11-25. Includes column hit guard, anchor scroll handover and complete first-frame source rows.
+Portable test candidate; no update manifest publication.
