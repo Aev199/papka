@@ -248,15 +248,15 @@ impl Motion {
         let switch = changed && old.is_some_and(|e|e.folder==path);
         let way = old.map_or(0., |e| direction(&e.folder, path));
         self.entrances.insert(group, Entrance { folder: path.to_path_buf(), mode,
-            way: if mode == 'c' && way >= 0. { 0. } else { way },
-            from: if switch || mode=='c' {1.} else if changed { 0.1 } else { 0.35 }, started: switch.then(||Instant::now()-LIST_APPEAR) });
+            way: if mode == 'c' { 0. } else { way },
+            from: if switch {1.} else if changed { 0.1 } else { 0.35 }, started: switch.then(||Instant::now()-LIST_APPEAR) });
     }
 
     /// (opacity, horizontal offset), starting when the contents first arrive.
     pub(crate) fn list_appearance(&mut self, group: GroupId) -> (f32, f32) {
         let Some(e) = self.entrances.get_mut(&group) else { return (1., 0.); };
         let started = *e.started.get_or_insert_with(Instant::now);
-        if !crate::theme::animations() || (e.mode == 'c' && e.way >= 0.) { return (1., 0.); }
+        if !crate::theme::animations() || e.mode == 'c' { return (1., 0.); }
         let t = ease_out(started.elapsed(), crate::motion_policy::diagnostic_span(LIST_APPEAR));
         if t < 1. { self.late_frame.set(true); }
         (e.from + (1. - e.from) * t, e.way * SLIDE * (1. - t))
@@ -356,7 +356,7 @@ impl Motion {
         drop(pictures);
         if !crate::theme::animations() || self.plate.as_ref().is_some_and(|plate| plate.4.elapsed() >= crate::motion_policy::diagnostic_span(PLATE)) { self.plate = None; }
         let entering = crate::theme::animations() && self.entrances.values().any(|e|
-            (e.mode != 'c' || e.way<0.) && e.started.is_some_and(|at| at.elapsed() < crate::motion_policy::diagnostic_span(LIST_APPEAR)));
+            e.mode != 'c' && e.started.is_some_and(|at| at.elapsed() < crate::motion_policy::diagnostic_span(LIST_APPEAR)));
         let tile_moving=self.tile_plate.active(Instant::now(),crate::theme::animations());
         entering || tile_moving || flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding || line_moving || pictures_coming || self.plate.is_some()
     }
@@ -504,16 +504,12 @@ mod mode_entrance_tests {
 mod column_return_tests {
     use super::*;
     #[test]
-    fn returning_to_a_visible_parent_still_has_directional_feedback() {
+    fn column_navigation_keeps_folder_contents_stationary_in_both_directions() {
         let mut motion=Motion::default();let group=GroupId(1);
-        motion.list_location(group,Path::new("/a/b"),'c');
-        assert_eq!(motion.list_appearance(group),(1.,0.));
-        motion.list_location(group,Path::new("/a"),'c');
-        let (alpha,x)=motion.list_appearance(group);
-        assert_eq!(alpha,1.);assert!(x<0.);
-        motion.entrances.get_mut(&group).unwrap().started=Some(Instant::now()-LIST_APPEAR*2);
-        assert_eq!(motion.list_appearance(group),(1.,0.));
-        motion.list_location(group,Path::new("/a/b"),'c');
-        assert_eq!(motion.list_appearance(group),(1.,0.));
+        for folder in ["/a/b","/a","/a/b","/a"] {
+            motion.list_location(group,Path::new(folder),'c');
+            assert_eq!(motion.list_appearance(group),(1.,0.));
+            assert!(!motion.wants_frame(None),"only column reveal should request navigation frames");
+        }
     }
 }
