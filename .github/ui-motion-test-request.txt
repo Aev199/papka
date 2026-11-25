@@ -1,3 +1,4 @@
-UI & Motion 2.0 / stage 1 / design tokens, typography and accessibility contrast
-Source: 1fc431b
-Portable testing only; do not publish an update manifest.
+UI & Motion 2.0 / final Windows acceptance candidate
+Source: d8c0df6c1efd88a00ee284b73de7371c3ae2fa12
+Verified source CI: https://github.com/Aev199/papka/actions/runs/45549398937
+One final portable candidate after implementation; no update manifest publication.

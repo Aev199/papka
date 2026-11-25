@@ -246,4 +246,5 @@ Windows CI including all workspace checks, tests and standalone policies
   Confirm image handover, label wrapping, end frames and hit targets visually.
 - Explicit jump navigation keeps its existing synchronous availability check;
   typed-path probing stays in the background.
-- No portable build or beta is requested in this implementation pass.
+- Intermediate portable builds remain deferred. After green final CI, prepare
+  one final portable acceptance candidate. Publish beta only after Windows acceptance.
