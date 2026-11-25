@@ -1,5 +1,5 @@
-UI & Motion 2.0 / Windows acceptance candidate after review fixes
-Source: 7909bd4678869df72f446476c3829371cb5eb1d1
-Verified source CI: https://github.com/Aev199/papka/actions/runs/45555914095
-Requested rebuild: 2026-11-25. Includes column hit guard, anchor scroll handover and complete first-frame source rows.
+UI & Motion 2.0 / manual regression fixes candidate
+Source: fb28723b95868398c01e3353a85694f695e6cba7
+Verified source CI: https://github.com/Aev199/papka/actions/runs/45588134311
+Requested rebuild: 2026-11-25. Column retreat, keyboard tile selection glide and thumbnail marquee.
 Portable test candidate; no update manifest publication.
