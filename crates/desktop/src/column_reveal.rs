@@ -33,7 +33,7 @@ impl Reveal {
             return None;
         }
         let t = if instant { 1. } else { (now.saturating_duration_since(flight.started).as_secs_f32()
-            / SPAN.as_secs_f32()).clamp(0.,1.) };
+            / crate::motion_policy::diagnostic_span(SPAN).as_secs_f32()).clamp(0.,1.) };
         let next = flight.from + (flight.to-flight.from) * (1.-(1.-t).powi(3));
         flight.last_applied = next;
         let active = t < 1.;
@@ -85,7 +85,7 @@ impl Presence {
             self.entering.clear();self.exiting.clear();
         } else {
             // Sample removed and returning columns before pruning their clocks.
-            self.exiting.retain(|exit| now.saturating_duration_since(exit.at)<PRESENCE_SPAN);
+            self.exiting.retain(|exit| now.saturating_duration_since(exit.at)<crate::motion_policy::diagnostic_span(PRESENCE_SPAN));
             for column in &self.columns {
                 if !folders.contains(&column.path) && column.x<viewport && column.x+column.width>0.
                     && self.exiting.len()<DEPARTURE_LIMIT {
@@ -100,7 +100,7 @@ impl Presence {
                     self.entering.insert(column.path.clone(),Enter{at:now,from});
                 }
             }
-            self.entering.retain(|path,enter| folders.contains(path) && now.saturating_duration_since(enter.at)<PRESENCE_SPAN);
+            self.entering.retain(|path,enter| folders.contains(path) && now.saturating_duration_since(enter.at)<crate::motion_policy::diagnostic_span(PRESENCE_SPAN));
             self.exiting.retain(|exit|!folders.contains(&exit.column.path));
         }
         self.tab=Some(tab);self.viewport=viewport;self.columns=next;
@@ -120,13 +120,13 @@ impl Presence {
     }
 
     pub(crate) fn active(&self,now:Instant)->bool {
-        self.entering.values().any(|enter|now.saturating_duration_since(enter.at)<PRESENCE_SPAN)
-            ||self.exiting.iter().any(|exit|now.saturating_duration_since(exit.at)<PRESENCE_SPAN)
+        self.entering.values().any(|enter|now.saturating_duration_since(enter.at)<crate::motion_policy::diagnostic_span(PRESENCE_SPAN))
+            ||self.exiting.iter().any(|exit|now.saturating_duration_since(exit.at)<crate::motion_policy::diagnostic_span(PRESENCE_SPAN))
     }
 }
 
 fn presence_alpha(now:Instant,at:Instant)->f32 {
-    let t=(now.saturating_duration_since(at).as_secs_f32()/PRESENCE_SPAN.as_secs_f32()).clamp(0.,1.);
+    let t=(now.saturating_duration_since(at).as_secs_f32()/crate::motion_policy::diagnostic_span(PRESENCE_SPAN).as_secs_f32()).clamp(0.,1.);
     1.-(1.-t).powi(3)
 }
 

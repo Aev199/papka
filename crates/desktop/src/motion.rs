@@ -31,7 +31,7 @@ pub(crate) const SLIDE: f32 = 10.;
 /// full to nothing, fading faster at first.
 pub(crate) fn flash_strength(elapsed: Duration) -> Option<f32> {
     if !crate::theme::animations() { return None; }
-    let t = elapsed.as_secs_f32() / FLASH.as_secs_f32();
+    let t = elapsed.as_secs_f32() / crate::motion_policy::diagnostic_span(FLASH).as_secs_f32();
     (t < 1.).then(|| (1. - t) * (1. - t))
 }
 
@@ -40,7 +40,7 @@ pub(crate) use crate::motion_policy::{ease_out, ease_out_fraction, smoothstep, I
 /// The bar's next value on the way from `shown` to `real` after `dt` s.
 pub(crate) fn glide(shown: f32, real: f32, dt: f32) -> f32 {
     if (real - shown).abs() < 0.002 || real < shown { return real; }
-    shown + (real - shown) * (1. - (-dt / PROGRESS_TAU).exp())
+    shown + (real - shown) * (1. - (-dt / (PROGRESS_TAU*crate::motion_policy::diagnostic_span(Duration::from_secs(1)).as_secs_f32())).exp())
 }
 
 /// Which way a pane went from `old` to `new`: +1 into a subfolder, -1 out
@@ -208,14 +208,14 @@ impl Motion {
     pub(crate) fn tab_opening(&self, group: GroupId, index: usize) -> Option<f32> {
         if !crate::theme::animations() { return None; }
         let (g, i, start) = self.opened_tab?;
-        (g == group && i == index && start.elapsed() < TAB_OPEN).then(|| ease_out(start.elapsed(), TAB_OPEN))
+        (g == group && i == index && start.elapsed() < crate::motion_policy::diagnostic_span(TAB_OPEN)).then(|| ease_out(start.elapsed(), crate::motion_policy::diagnostic_span(TAB_OPEN)))
     }
 
     /// The gap a closed tab leaves before `index`: its width now.
     pub(crate) fn tab_gap(&self, group: GroupId) -> Option<(usize, f32)> {
         if !crate::theme::animations() { return None; }
         let (g, index, width, start) = self.closed_tab?;
-        (g == group && start.elapsed() < TAB_CLOSE).then(|| (index, width * (1. - ease_out(start.elapsed(), TAB_CLOSE))))
+        (g == group && start.elapsed() < crate::motion_policy::diagnostic_span(TAB_CLOSE)).then(|| (index, width * (1. - ease_out(start.elapsed(), crate::motion_policy::diagnostic_span(TAB_CLOSE)))))
     }
 
     /// The progress bar's value as drawn this frame.
@@ -255,7 +255,7 @@ impl Motion {
         let Some(e) = self.entrances.get_mut(&group) else { return (1., 0.); };
         let started = *e.started.get_or_insert_with(Instant::now);
         if !crate::theme::animations() || e.mode == 'c' { return (1., 0.); }
-        let t = ease_out(started.elapsed(), LIST_APPEAR);
+        let t = ease_out(started.elapsed(), crate::motion_policy::diagnostic_span(LIST_APPEAR));
         if t < 1. { self.late_frame.set(true); }
         (e.from + (1. - e.from) * t, e.way * SLIDE * (1. - t))
     }
@@ -265,7 +265,7 @@ impl Motion {
     pub(crate) fn thumbnail_entrance(&self, group: GroupId) -> Option<Instant> {
         if !crate::theme::animations() {return None;}
         let e = self.entrances.get(&group)?;
-        e.started.filter(|at|e.mode=='t' && e.from < 1. && at.elapsed()<LIST_APPEAR)
+        e.started.filter(|at|e.mode=='t' && e.from < 1. && at.elapsed()<crate::motion_policy::diagnostic_span(LIST_APPEAR))
     }
 
     /// Notes that `group`'s strip is drawn with `count` tabs; true when it
@@ -285,7 +285,7 @@ impl Motion {
         // Not drawn for a while (the pane was hidden): no slide from the past.
         let fresh = now - line.drawn < Duration::from_millis(500);
         let step = |from: f32, to: f32| {
-            if !crate::theme::animations() || !fresh || (to - from).abs() < 0.5 { to } else { from + (to - from) * (1. - (-dt / LINE_TAU).exp()) }
+            if !crate::theme::animations() || !fresh || (to - from).abs() < 0.5 { to } else { from + (to - from) * (1. - (-dt / (LINE_TAU*crate::motion_policy::diagnostic_span(Duration::from_secs(1)).as_secs_f32())).exp()) }
         };
         line.x = step(line.x, target_x);
         line.width = step(line.width, target_width);
@@ -307,7 +307,7 @@ impl Motion {
     /// How far in the picture for `key` is (1: fully, or never tracked).
     pub(crate) fn picture_opacity(&self, key: &str) -> f32 {
         if !crate::theme::animations() { return 1.; }
-        self.pictures.borrow().get(key).map_or(1., |arrived| ease_out(arrived.elapsed(), PICTURE_IN))
+        self.pictures.borrow().get(key).map_or(1., |arrived| ease_out(arrived.elapsed(), crate::motion_policy::diagnostic_span(PICTURE_IN)))
     }
 
     /// The selection moved by keys from row `from` to row `to` of `folder`.
@@ -325,8 +325,8 @@ impl Motion {
     pub(crate) fn plate_at(&self, group: GroupId, folder: &Path) -> Option<(f32, usize)> {
         if !crate::theme::animations() {return None;}
         let (g, f, from, to, start) = self.plate.as_ref()?;
-        if *g != group || f != folder || start.elapsed() >= PLATE { return None; }
-        let t = ease_out(start.elapsed(), PLATE);
+        if *g != group || f != folder || start.elapsed() >= crate::motion_policy::diagnostic_span(PLATE) { return None; }
+        let t = ease_out(start.elapsed(), crate::motion_policy::diagnostic_span(PLATE));
         Some((*from + (*to as f32 - *from) * t, *to))
     }
 
@@ -335,13 +335,13 @@ impl Motion {
     pub(crate) fn wants_frame(&mut self, fraction: Option<f64>) -> bool {
         let mut flashes = self.flashes.borrow_mut();
         flashes.retain(|_, (_, added, shown)| match shown {
-            Some(shown) => shown.elapsed() < FLASH,
+            Some(shown) => shown.elapsed() < crate::motion_policy::diagnostic_span(FLASH),
             None => added.elapsed() < FLASH_WAIT,
         });
         let flashing = flashes.values().any(|(_, _, shown)| shown.is_some());
         drop(flashes);
-        if self.opened_tab.is_some_and(|(_, _, start)| start.elapsed() >= TAB_OPEN) { self.opened_tab = None; }
-        if self.closed_tab.is_some_and(|(_, _, _, start)| start.elapsed() >= TAB_CLOSE) { self.closed_tab = None; }
+        if self.opened_tab.is_some_and(|(_, _, start)| start.elapsed() >= crate::motion_policy::diagnostic_span(TAB_OPEN)) { self.opened_tab = None; }
+        if self.closed_tab.is_some_and(|(_, _, _, start)| start.elapsed() >= crate::motion_policy::diagnostic_span(TAB_CLOSE)) { self.closed_tab = None; }
         let gliding = self.progress_moving(fraction);
         // A line of a pane no longer drawn is let go.
         let mut lines = self.tab_lines.borrow_mut();
@@ -349,12 +349,12 @@ impl Motion {
         let line_moving = lines.values().any(|line| (line.x - line.target_x).abs() >= 0.5 || (line.width - line.target_width).abs() >= 0.5);
         drop(lines);
         let mut pictures = self.pictures.borrow_mut();
-        pictures.retain(|_, arrived| arrived.elapsed() < PICTURE_IN * 3);
-        let pictures_coming = pictures.values().any(|arrived| arrived.elapsed() < PICTURE_IN);
+        pictures.retain(|_, arrived| arrived.elapsed() < crate::motion_policy::diagnostic_span(PICTURE_IN) * 3);
+        let pictures_coming = pictures.values().any(|arrived| arrived.elapsed() < crate::motion_policy::diagnostic_span(PICTURE_IN));
         drop(pictures);
-        if !crate::theme::animations() || self.plate.as_ref().is_some_and(|plate| plate.4.elapsed() >= PLATE) { self.plate = None; }
+        if !crate::theme::animations() || self.plate.as_ref().is_some_and(|plate| plate.4.elapsed() >= crate::motion_policy::diagnostic_span(PLATE)) { self.plate = None; }
         let entering = crate::theme::animations() && self.entrances.values().any(|e|
-            e.mode != 'c' && e.started.is_some_and(|at| at.elapsed() < LIST_APPEAR));
+            e.mode != 'c' && e.started.is_some_and(|at| at.elapsed() < crate::motion_policy::diagnostic_span(LIST_APPEAR)));
         entering || flashing || self.opened_tab.is_some() || self.closed_tab.is_some() || gliding || line_moving || pictures_coming || self.plate.is_some()
     }
 

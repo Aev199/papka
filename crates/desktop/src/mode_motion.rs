@@ -84,7 +84,7 @@ impl ModeMotion {
 }
 
 fn progress(now: Instant, started: Instant, duration: Duration) -> f32 {
-    (now.saturating_duration_since(started).as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.)
+    (now.saturating_duration_since(started).as_secs_f32() / crate::motion_policy::diagnostic_span(duration).as_secs_f32()).clamp(0., 1.)
 }
 use crate::motion::ease_out_fraction as ease;
 

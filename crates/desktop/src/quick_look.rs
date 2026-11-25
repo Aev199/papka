@@ -64,13 +64,13 @@ impl QuickLook {
     pub(crate) fn sample(&mut self, now: Instant, animations: bool) -> (f32, f32, bool, bool, bool) {
         let closing=self.closing();
         let (shell_alpha,shell_active)=self.shell.sample(if closing {0.}else{1.},!animations,now,crate::motion_policy::PANE_CLOSE_MS);
-        let content_active=matches!(self.transition,PreviewTransition::FadeIn(at) if animations && now.saturating_duration_since(at)<PREVIEW_FADE);
+        let content_active=matches!(self.transition,PreviewTransition::FadeIn(at) if animations && now.saturating_duration_since(at)<crate::motion_policy::diagnostic_span(PREVIEW_FADE));
         if matches!(self.transition,PreviewTransition::FadeIn(_)) && !content_active {self.transition=PreviewTransition::Stable;}
         let active=shell_active || content_active;
         let finished=closing && !shell_active;
         let content_alpha = match self.transition {
             PreviewTransition::FadeIn(started) => if animations {
-                ((now - started).as_secs_f32() / PREVIEW_FADE.as_secs_f32()).clamp(0., 1.)
+                ((now - started).as_secs_f32() / crate::motion_policy::diagnostic_span(PREVIEW_FADE).as_secs_f32()).clamp(0., 1.)
             } else { 1. },
             _ => 1.,
         };

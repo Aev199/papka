@@ -9,7 +9,7 @@ pub(crate) struct DockMotion {
 impl DockMotion {
     fn shown(&self,now:Instant)->Option<Rect>{
         let to=self.target?;let from=self.from.unwrap_or(to);
-        let t=self.started.map_or(1.,|at|(now.saturating_duration_since(at).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.));let t=crate::motion::ease_out_fraction(t);
+        let t=self.started.map_or(1.,|at|(now.saturating_duration_since(at).as_secs_f32()/crate::motion_policy::diagnostic_span(SPAN).as_secs_f32()).clamp(0.,1.));let t=crate::motion::ease_out_fraction(t);
         let mix=|a:f32,b:f32|a+(b-a)*t;
         Some(Rect{x:mix(from.x,to.x),y:mix(from.y,to.y),w:mix(from.w,to.w),h:mix(from.h,to.h)})
     }
@@ -23,7 +23,7 @@ impl DockMotion {
         }
         let (opacity,fading)=self.opacity.sample(if zone.is_some(){1.}else{0.},!animate,now,crate::motion::TRANSIENT_MS);
         if !animate {self.from=self.target;self.started=None;}
-        let moving=self.started.is_some_and(|at|now.saturating_duration_since(at)<SPAN);
+        let moving=self.started.is_some_and(|at|now.saturating_duration_since(at)<crate::motion_policy::diagnostic_span(SPAN));
         if !moving {self.started=None;}
         if zone.is_none() && !fading {self.zone=None;self.target=None;self.from=None;self.started=None;return(None,false);}
         (self.shown(now).zip(self.zone).map(|(rect,zone)|(rect,opacity,zone)),fading||moving)

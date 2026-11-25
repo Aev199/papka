@@ -44,8 +44,8 @@ impl Settle {
     }
     fn strength(&self,folder:&Path,path:&Path,now:Instant)->Option<(bool,f32)> {
         let elapsed=now.saturating_duration_since(self.started);
-        if folder!=self.folder || !self.paths.contains(path) || elapsed>=SETTLE_SPAN {return None;}
-        Some((self.committed,1.-crate::motion_policy::ease_out(elapsed,SETTLE_SPAN)))
+        if folder!=self.folder || !self.paths.contains(path) || elapsed>=crate::motion_policy::diagnostic_span(SETTLE_SPAN) {return None;}
+        Some((self.committed,1.-crate::motion_policy::ease_out(elapsed,crate::motion_policy::diagnostic_span(SETTLE_SPAN))))
     }
 }
 
@@ -78,7 +78,7 @@ impl ManualDrag {
     }
 
     pub(crate) fn advance(&mut self,now:Instant)->bool {
-        self.settles.retain(|_,s|crate::theme::animations() && now.saturating_duration_since(s.started)<SETTLE_SPAN);
+        self.settles.retain(|_,s|crate::theme::animations() && now.saturating_duration_since(s.started)<crate::motion_policy::diagnostic_span(SETTLE_SPAN));
         !self.settles.is_empty()
     }
 

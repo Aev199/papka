@@ -12,8 +12,8 @@ pub(crate) const HOVER: Duration = Duration::from_millis(100);
 pub(crate) const ENTRY_STAGGER_LIMIT: usize = 8;
 pub(crate) fn entry_appearance(elapsed: Duration, index: usize) -> (f32,f32) {
     if index >= ENTRY_STAGGER_LIMIT {return (1.,0.);}
-    let delay = Duration::from_millis(index as u64 * 4);
-    let t = ease_out(elapsed.saturating_sub(delay),Duration::from_millis(95));
+    let delay = diagnostic_span(Duration::from_millis(index as u64 * 4));
+    let t = ease_out(elapsed.saturating_sub(delay),diagnostic_span(Duration::from_millis(95)));
     (0.65 + 0.35*t, 5.*(1.-t))
 }
 

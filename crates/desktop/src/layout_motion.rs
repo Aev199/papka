@@ -88,7 +88,7 @@ impl LayoutMotion {
             self.duration=if target.len()>self.shown.len(){crate::motion_policy::PANE_OPEN_MS}else{crate::motion_policy::PANE_CLOSE_MS};self.started=Some(now);
         }
         self.signature=Some(sig);self.viewport=Some(viewport);
-        let t=self.started.map_or(1.,|at|(now.saturating_duration_since(at).as_secs_f32()/(self.duration as f32/1000.)).clamp(0.,1.));
+        let t=self.started.map_or(1.,|at|(now.saturating_duration_since(at).as_secs_f32()/crate::motion_policy::diagnostic_span(Duration::from_millis(self.duration)).as_secs_f32()).clamp(0.,1.));
         let active=t<1.;
         self.shown=target.into_iter().map(|(id,r)|{
             let from=self.from.get(&id).copied().unwrap_or(r);(id,if active {from.mix(r,crate::motion::ease_out_fraction(t))}else{r})

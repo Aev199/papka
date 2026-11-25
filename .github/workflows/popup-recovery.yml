@@ -36,7 +36,7 @@ jobs:
         run: cargo test --workspace --all-targets
       - name: Test standalone motion, layout and colour policies
         run: |
-          rustc --edition=2024 --test crates/desktop/src/column_reveal.rs -o target/ui-column-reveal-tests.exe
+          rustc --edition=2024 --test tools/motion-policy-harness.rs -o target/ui-column-reveal-tests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./target/ui-column-reveal-tests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -60,3 +60,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./target/ui-palette-tests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify production slow-motion clocks
+        run: |
+          rustc --edition=2024 tools/motion-clock-probe.rs -o target/ui-clock-probe.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($factor in @("1", "2", "4")) {
+            $env:PAPKA_MOTION_SLOW=$factor
+            & ./target/ui-clock-probe.exe
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Remove-Item Env:PAPKA_MOTION_SLOW

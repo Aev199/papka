@@ -15,7 +15,7 @@ impl RowMotion {
         let mut motion=Self{listing,roles,order:before.to_vec(),from:before.iter().map(|&i|(i,1.)).collect(),target:HashMap::new(),started:now};
         motion.retarget(after,now);Some(motion)
     }
-    fn amount(&self,now:Instant)->f32{let t=(now.saturating_duration_since(self.started).as_secs_f32()/SPAN.as_secs_f32()).clamp(0.,1.);crate::motion::ease_out_fraction(t)}
+    fn amount(&self,now:Instant)->f32{let t=(now.saturating_duration_since(self.started).as_secs_f32()/crate::motion_policy::diagnostic_span(SPAN).as_secs_f32()).clamp(0.,1.);crate::motion::ease_out_fraction(t)}
     fn height(&self,index:usize,now:Instant)->f32{let from=self.from.get(&index).copied().unwrap_or(0.);let to=if self.target.contains_key(&index){1.}else{0.};from+(to-from)*self.amount(now)}
     pub fn openness(&self,key:&str,now:Instant)->Option<f32>{
         self.order.iter().find_map(|&i|{
@@ -24,7 +24,7 @@ impl RowMotion {
         })
     }
     pub fn matches(&self,order:&[usize])->bool{order.len()==self.target.len()&&order.iter().enumerate().all(|(p,i)|self.target.get(i)==Some(&p))}
-    pub fn active(&self,now:Instant)->bool{now.saturating_duration_since(self.started)<SPAN}
+    pub fn active(&self,now:Instant)->bool{now.saturating_duration_since(self.started)<crate::motion_policy::diagnostic_span(SPAN)}
     pub fn retarget(&mut self,after:&[usize],now:Instant){
         let from=self.order.iter().map(|&i|(i,self.height(i,now))).collect();
         // Insert newly disclosed rows after their preceding retained row.
