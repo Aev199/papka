@@ -1,5 +1,6 @@
-UI & Motion 2.0 / manual regression fixes candidate
-Source: fb28723b95868398c01e3353a85694f695e6cba7
-Verified source CI: https://github.com/Aev199/papka/actions/runs/45588134311
-Requested rebuild: 2026-11-25. Column retreat, keyboard tile selection glide and thumbnail marquee.
-Portable test candidate; no update manifest publication.
+Parallel transfers by default / Windows acceptance candidate
+Source: 12658cf870b473bed2425c9dff193c7c6a8d7e9f
+Verified CI: https://github.com/Aev199/papka/actions/runs/45634234376
+Independent copy/move batches start immediately with per-job progress, pause and cancel.
+Overlapping paths queue; OS executor gate and audited revalidation remain active.
+Test build only; do not publish an update-channel release.
