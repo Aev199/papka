@@ -1831,7 +1831,10 @@ impl Explorer {
                     self.motion.thumbnail_entrance(side)
                 } else {None};
                 let list_id = SharedString::from(format!("{list_id}-grid-{per_row}-{}",crate::thumbs::size()));
-                let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some() || (self.dragging_files(cx) && !manual_mode);
+                let instant = !crate::theme::animations() || self.renaming || self.marquee.is_some()
+                    || self.motion.spatial.get(&side).is_some_and(|m|m.active())
+                    || self.motion.modes.get(&side).is_some_and(|m|m.transition.active())
+                    || (self.dragging_files(cx) && !manual_mode);
                 let moving = self.motion.grids.entry(side).or_default().prepare(&folder, &listing, indices.clone(), per_row,
                     (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP, crate::thumbs::tile_height()+crate::thumbs::TILE_GAP), instant, std::time::Instant::now());
                 if moving {self.motion.late_frame.set(true);}
@@ -1849,7 +1852,7 @@ impl Explorer {
                                     let left=px((position % per_row) as f32 * (crate::thumbs::tile_width()+crate::thumbs::TILE_GAP)+x);
                                     if let Some(frame)=&spatial_frame {
                                         spatial_slot(frame,&entry.path,tile,Some(crate::thumbs::tile_width()),crate::thumbs::tile_height(),entry.is_directory)
-                                            .absolute().left(left).top(px(y)).into_any_element()
+                                            .absolute().left(left).top(px(y+dy)).opacity(alpha).into_any_element()
                                     }else{div().absolute().left(left).top(px(y+dy)).w(px(crate::thumbs::tile_width())).h(px(crate::thumbs::tile_height())).opacity(alpha).child(tile).into_any_element()} })
                                 .collect::<Vec<_>>();
                             div().relative().w_full().h(px(crate::thumbs::tile_height() + crate::thumbs::TILE_GAP))
