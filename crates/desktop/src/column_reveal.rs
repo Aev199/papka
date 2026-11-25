@@ -114,6 +114,10 @@ impl Presence {
         self.tab=Some(tab);self.viewport=viewport;self.columns=next;
     }
 
+    pub(crate) fn visible(&self,path:&Path)->bool {
+        self.columns.iter().any(|column|column.path==path&&column.x<self.viewport&&column.x+column.width>0.)
+    }
+
     pub(crate) fn snapshot(&mut self,path:&Path,rows:Vec<RowSnapshot>) {
         if let Some(column)=self.columns.iter_mut().find(|column|column.path==path) {
             column.rows=rows.into_iter().filter(|row|row.top.is_finite()&&row.height.is_finite()&&row.height>0.)

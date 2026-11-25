@@ -42,6 +42,12 @@ pub(crate) fn status_filter_width(width:f32)->f32 {
     if compact_status(width) {(width*0.24).clamp(100.,160.)} else {200.}
 }
 
+/// Modal card limits. Preserve space for its frame at every window size.
+pub(crate) fn dialog_geometry(width:f32,height:f32,wanted_width:f32,wanted_height:f32)->(f32,f32){
+    ((width-POPUP_MARGIN*2.).max(0.).min(wanted_width),
+        (height-POPUP_MARGIN*2.).max(0.).min(wanted_height))
+}
+
 /// Top inset and available content height in logical pixels. Cap the list
 /// height but never assume a large monitor.
 pub(crate) fn palette_geometry(viewport_height: f32) -> (f32,f32,f32) {
@@ -75,6 +81,13 @@ mod tests {
         assert!(MENU_ROW_HEIGHT >= BODY_TEXT + 8.);
         assert!(PALETTE_ROW_HEIGHT >= BODY_TEXT + 8.);
         assert!(PALETTE_HEADER_HEIGHT > PALETTE_FOOTER_HEIGHT);
+    }
+
+    #[test]
+    fn modal_cards_fit_small_windows_without_negative_dimensions(){
+        assert_eq!(dialog_geometry(760.,480.,620.,560.),(620.,464.));
+        assert_eq!(dialog_geometry(400.,240.,620.,560.),(384.,224.));
+        assert_eq!(dialog_geometry(10.,10.,620.,560.),(0.,0.));
     }
 
     #[test]

@@ -86,6 +86,8 @@ struct State {
     viewport: Option<Geometry>,
     source_viewport: Option<Geometry>,
     scroll:Option<Position>,
+    labels:HashMap<PathBuf,Geometry>,
+    target_labels:HashMap<PathBuf,Geometry>,
     started: Option<Instant>,
 }
 
@@ -103,6 +105,16 @@ impl SpatialMotion {
         state.source = if state.folder == folder {
             state.current.clone()
         } else { HashMap::new() };
+        let labels=state.labels.clone();
+        for (path,slot) in state.source.iter_mut() {
+            if let Some(label)=labels.get(path) {
+                let chars=path.file_name().map_or(1,|s|s.to_string_lossy().chars().count());
+                let mut content=slot.content.unwrap_or_else(||Content::layout(slot.shown.size,chars));
+                content.name=label.origin.minus(slot.shown.origin);content.name_width=label.size.x;
+                slot.content=Some(content);
+            }
+        }
+        state.labels.clear();state.target_labels.clear();
         state.source_viewport = state.viewport;
         state.scroll=None;
         state.started = (!state.source.is_empty()).then_some(now);
@@ -117,7 +129,7 @@ impl SpatialMotion {
         let mut state = self.0.borrow_mut();
         state.started = None;
         state.source.clear();
-        state.source_viewport = None;
+        state.source_viewport = None;state.target_labels.clear();
     }
 
     pub(crate) fn frame(&self, folder: &Path, now: Instant, animate: bool) -> (Frame, bool) {
@@ -129,7 +141,7 @@ impl SpatialMotion {
             state.source.clear();
             state.started = None;
             state.viewport = None;
-            state.scroll=None;
+            state.scroll=None;state.labels.clear();state.target_labels.clear();
             state.source_viewport = None;
         }
         if !animate || state.started.is_some_and(|start| now.saturating_duration_since(start) >= diagnostic_span(ITEM_REFLOW)) {
@@ -137,6 +149,10 @@ impl SpatialMotion {
             state.source.clear();
             state.source_viewport = None;
         }
+        if state.started.is_some() && state.target_labels.is_empty() && !state.current.is_empty() {
+            state.target_labels=state.labels.clone();
+        }
+        state.labels.clear();
         state.previous = std::mem::take(&mut state.current);
         state.frame_id = state.frame_id.wrapping_add(1);
         (Frame { state: self.clone(), id: state.frame_id, at:now }, state.started.is_some())
@@ -144,6 +160,14 @@ impl SpatialMotion {
 }
 
 impl SpatialMotion {
+    pub(crate) fn frame_id(&self)->u64 {self.0.borrow().frame_id}
+    pub(crate) fn record_label(&self,id:u64,path:&Path,geometry:Geometry) {
+        let mut state=self.0.borrow_mut();
+        if state.frame_id==id && geometry.valid() && (state.labels.len()<LIMIT||state.labels.contains_key(path)) {
+            state.labels.insert(path.to_path_buf(),geometry);
+        }
+    }
+
     pub(crate) fn measuring(&self)->bool {
         let state=self.0.borrow();
         state.started.is_some() && state.previous.is_empty() && !state.source.is_empty()
@@ -160,7 +184,11 @@ impl SpatialMotion {
             .max(source.shown.origin.minus(target.natural.origin).y.abs())>MAX_TRAVEL {return None;}
         let size=source.shown.mix(target.natural,remaining).size;
         let from=source.content.unwrap_or_else(||Content::layout(source.shown.size,chars));
-        Some(SharedPose{size,content:from.mix(Content::layout(target.natural.size,chars),remaining)})
+        let mut to=Content::layout(target.natural.size,chars);
+        if let Some(label)=state.target_labels.get(path) {
+            to.name=label.origin.minus(target.natural.origin);to.name_width=label.size.x;
+        }
+        Some(SharedPose{size,content:from.mix(to,remaining)})
     }
 
     pub(crate) fn observe_scroll(&self,offset:Position) {
@@ -254,6 +282,24 @@ mod tests {
     fn path(s: &str) -> PathBuf { PathBuf::from(s) }
     fn rect(origin: Position) -> Geometry { Geometry { origin, size: p(200.,24.) } }
     fn offset(frame: &Frame, path: &Path, now: Instant) -> Position { frame.pose(path, now).map_or(Position::default(), |v|v.0) }
+
+    #[test]
+    fn shared_labels_use_measured_bounds_instead_of_character_estimates() {
+        let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
+        let (old,_)=m.frame(folder,now,true);
+        old.record(path("a"),Geometry{origin:p(100.,80.),size:p(400.,24.)},None);
+        m.record_label(m.frame_id(),Path::new("a"),Geometry{origin:p(132.,84.),size:p(50.,16.)});
+        m.begin(folder,now);
+        let (first,_)=m.frame(folder,now,true);
+        first.record(path("a"),Geometry{origin:p(20.,30.),size:p(132.,148.)},None);
+        m.record_label(m.frame_id(),Path::new("a"),Geometry{origin:p(40.,134.),size:p(80.,16.)});
+        let (_next,_)=m.frame(folder,now,true);
+        let initial=m.shared_pose(Path::new("a"),now).unwrap();
+        assert_eq!(initial.content.name,p(32.,4.));assert_eq!(initial.content.name_width,50.);
+        let mid=m.shared_pose(Path::new("a"),now+ITEM_REFLOW/2).unwrap();
+        assert!(mid.content.name.y>4.&&mid.content.name.y<104.);
+        assert!(mid.content.name_width>50.&&mid.content.name_width<80.);
+    }
 
     #[test]
     fn icon_and_label_tracks_interpolate_independently_and_keep_endpoints() {

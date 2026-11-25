@@ -814,7 +814,7 @@ impl Explorer {
         let missing = kind == Some(None);
         let folder = match kind { Some(Some(is_dir)) => is_dir, _ => path.extension().is_none() };
         let tip = if missing { format!("Не найдено: {full}") } else { format!("Открыть в новой вкладке: {full}") };
-        div().id(id).min_h(px(24.)).flex().items_center().gap_2().px_1().rounded(px(4.)).cursor_pointer()
+        div().id(id).min_h(px(24.)).flex().items_center().gap_2().px_1().rounded(px(ui::CONTROL_RADIUS)).cursor_pointer()
             .hover(|style| style.bg(rgb(HOVER)))
             .child(if folder { small_icon("fm/folder-fill.svg", if missing { TEXT_DIM } else { FOLDER }) } else { small_icon("fm/file.svg", TEXT_MUTED) })
             .child(div().flex_none().max_w(px(260.)).truncate().text_color(rgb(if missing { TEXT_DIM } else { ACCENT }))
@@ -843,7 +843,7 @@ impl Explorer {
                 .child(text_button("card-save", "Готово", ButtonKind::Primary)
                     .tooltip(|window, cx| Tooltip::new("Сохранить (Esc тоже сохраняет)").build(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.save_card_section(cx)))))
-            .when(with_text, |fields| fields.child(div().mx(px(-12.)).rounded(px(4.)).bg(rgb(HOVER)).text_size(px(ui::BODY_TEXT))
+            .when(with_text, |fields| fields.child(div().mx(px(-12.)).rounded(px(ui::CONTROL_RADIUS)).bg(rgb(HOVER)).text_size(px(ui::BODY_TEXT))
                 .child(Textarea::new(&self.cards.text_input).appearance(false))))
     }
 
@@ -897,7 +897,7 @@ impl Explorer {
         let group: gpui::SharedString = format!("card-inbox-{index}").into();
         div().id(("card-inbox", index)).group(group.clone()).flex().items_start().gap_3().py_1()
             .when_some(entry.image.clone(), |row, picture| row.child(div().id(("card-inbox-image", index)).flex_none().w(px(140.)).h(px(84.))
-                .rounded(px(4.)).overflow_hidden().border_1().border_color(rgb(BORDER)).cursor_pointer()
+                .rounded(px(ui::CONTROL_RADIUS)).overflow_hidden().border_1().border_color(rgb(BORDER)).cursor_pointer()
                 .child(match entry.image_key.as_ref().and_then(|key| self.cards.previews.get(key)) {
                     Some(Ok(preview)) => img(preview.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element(),
                     Some(Err(_)) => div().size_full().flex().items_center().justify_center().text_size(px(ui::CAPTION_TEXT))
@@ -1105,7 +1105,7 @@ impl Explorer {
                         let warnings_text = Arc::new(passport.warnings.join("\n"));
                         for (index, warning) in passport.warnings.iter().take(60).enumerate() {
                             let text = warnings_text.clone();
-                            body = body.child(div().id(("card-warning", index)).flex().items_start().gap_2().px_2().py_1().rounded(px(4.)).bg(rgb(ACCENT_SOFT)).cursor_text()
+                            body = body.child(div().id(("card-warning", index)).flex().items_start().gap_2().px_2().py_1().rounded(px(ui::CONTROL_RADIUS)).bg(rgb(ACCENT_SOFT)).cursor_text()
                                 .child(div().mt(px(3.)).child(small_icon("fm/alert.svg", DANGER)))
                                 .child(div().flex_1().min_w_0().text_size(px(ui::SECONDARY_TEXT)).child(display_text(warning)))
                                 .on_click(cx.listener(move |this, _, window, cx| this.begin_edit(Target::PassportWarnings, false, "Предупреждения".into(), text.as_ref().clone(), window, cx))));
@@ -1204,7 +1204,7 @@ impl Explorer {
                     let path = event.path.clone();
                     let full = event.path.display().to_string();
                     let gone = event.kind == "missing";
-                    body = body.child(div().id(("card-change", index)).h(px(24.)).flex_none().px_1().flex().items_center().gap_2().rounded(px(4.))
+                    body = body.child(div().id(("card-change", index)).h(px(24.)).flex_none().px_1().flex().items_center().gap_2().rounded(px(ui::CONTROL_RADIUS))
                         .cursor_pointer().hover(|style| style.bg(rgb(HOVER))).text_size(px(ui::SECONDARY_TEXT))
                         .child(div().w(px(110.)).flex_none().text_color(rgb(TEXT_DIM)).child(format!("{} {}", event.day_label(), event.clock_label())))
                         .child(div().flex_1().min_w_0().truncate().child(browser::display_name(&event.path)))
