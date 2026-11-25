@@ -1393,7 +1393,7 @@ impl Explorer {
 
     // --------------------------------------------------------------- panes
 
-    fn pane_width_for(&self, side: GroupId) -> f32 {
+    pub(crate) fn pane_width_for(&self, side: GroupId) -> f32 {
         crate::layout::effective_pane_width(self.pane_width, self.pane_measured_widths.get(&side).copied())
     }
 
