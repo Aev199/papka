@@ -487,7 +487,7 @@ impl Explorer {
 
     fn group_view(&mut self, group: GroupId, cx: &mut Context<Self>) -> AnyElement {
         let now=std::time::Instant::now();
-        self.manual_drag.landings.scope(group.0,&self.pane_path(group),self.browser.group(group).map_or(0,|g|g.active_tab));
+        self.manual_drag.landings.scope(group.0,&self.pane_path(group),self.browser.group(group).map_or((0,0),|g|(g.active_tab,g.tabs.len())));
         let (opacity,commit)=self.motion.modes.get_mut(&group).map_or((1.,None),|m|{
             let (opacity,_,commit)=m.transition.sample(now,crate::theme::animations());
             if m.transition.active(){self.motion.late_frame.set(true);} (opacity,commit)
@@ -507,7 +507,7 @@ impl Explorer {
         // The project card takes the pane's place: no address row, no list.
         let card=self.cards.shown_in(group);
         let navigation=if card {div().into_any_element()} else {self.nav_row(group,cx).into_any_element()};
-        if card {self.motion.spatial.remove(&group);self.motion.column_presence.remove(&group);self.motion.column_reveals.remove(&group);self.column_reveal_keys.remove(&group);}
+        if card {self.manual_drag.landings.cancel(group.0);self.motion.spatial.remove(&group);self.motion.column_presence.remove(&group);self.motion.column_reveals.remove(&group);self.column_reveal_keys.remove(&group);}
         let body=if card {self.project_card_view(cx)} else {self.pane(group,cx)};
         let spatial=self.motion.spatial.get(&group).cloned();
         let landing_state=self.manual_drag.landings.clone();
