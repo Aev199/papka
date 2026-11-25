@@ -504,7 +504,18 @@ impl Explorer {
             }
             self.commit_view(group,mode);anchor.map(|anchor|(current,anchor))
         });
-        let weak=cx.weak_entity();
+        // Queue the reveal before building the destination list, so its first
+        // measured geometry already includes the selected file's scroll offset.
+        let anchor_scroll=reveal.and_then(|(folder,anchor)|{
+            let (listing,order)=self.folder_view(group,&folder)?;
+            let position=order.iter().position(|&i|listing.entries[i].path==anchor)?;
+            let columns=if self.thumbs_view(group){crate::thumbs::columns(self.pane_width_for(group))}else{1};
+            let spatial=self.motion.spatial.get(&group).cloned();
+            let token=spatial.as_ref().map(|m|m.prepare_anchor_scroll());
+            let handle=self.scroll_handle(group,&folder);
+            handle.scroll_to_item(position/columns,gpui::ScrollStrategy::Nearest);
+            spatial.zip(token).map(|(spatial,token)|(spatial,token,handle))
+        });
         let tabs=self.tab_strip(group,cx);
         // The project card takes the pane's place: no address row, no list.
         let card=self.cards.shown_in(group);
@@ -535,17 +546,21 @@ impl Explorer {
             .border_color(rgb(if group==self.browser.active && self.browser.leaves().len()>1 {ACTIVE_PANE} else {BORDER}))
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx|this.focus_group(group,cx)))
             .child(tabs).child(navigation).child(body)
-            .when_some(reveal,move|root,(folder,anchor)|root.on_prepaint(move|_,_,cx|cx.defer(move|cx|{
-                let _=weak.update(cx,|this,cx|{
-                    if this.pane_path(group)!=folder{return;}
-                    if let Some((listing,order))=this.folder_view(group,&folder){
-                        if let Some(position)=order.iter().position(|&i|listing.entries[i].path==anchor){
-                            let columns=if this.thumbs_view(group){this.thumb_columns.get(&group).copied().unwrap_or(1).max(1)}else{1};
-                            this.scroll_handle(group,&folder).scroll_to_item(position/columns,gpui::ScrollStrategy::Nearest);cx.notify();
-                        }
+            .when_some(anchor_scroll,|root,(spatial,token,handle)|root.on_prepaint(move|_,_,cx|{
+                let spatial=spatial.clone();let handle=handle.clone();
+                // Parent prepaint precedes the list. Defer until the complete
+                // frame has applied the queued scroll, then accept that offset.
+                cx.defer(move|_|{
+                    let state=handle.0.borrow();
+                    if state.deferred_scroll_to_item.is_none() {
+                        let offset=state.base_handle.offset();
+                        spatial.finish_anchor_scroll(token,crate::spatial_motion::Position{x:offset.x/px(1.),y:offset.y/px(1.)});
+                    }else{
+                        // A missing/replaced list must not suppress real scrolling.
+                        spatial.cancel();
                     }
                 });
-            })))
+            }))
             .into_any_element()
     }
 
@@ -1523,8 +1538,8 @@ impl Explorer {
             div().relative().flex_1().min_w_0().min_h_0().overflow_hidden().flex()
                 .child(column_scroll_area(gpui::SharedString::from(format!("columns-{}",side.0)), &scroll).child(group))
                 .children(departures.into_iter().map(|gone| {
-                    // Full bounded row presentation, without old rows or handlers.
-                    div().absolute().left(px(gone.x)).top_0().bottom_0().w(px(gone.width)).opacity(gone.alpha)
+                    // The visible snapshot owns mouse hits; wheel input still reaches the list.
+                    div().block_mouse_except_scroll().absolute().left(px(gone.x)).top_0().bottom_0().w(px(gone.width)).opacity(gone.alpha)
                         .overflow_hidden().bg(rgb(SURFACE)).border_r_1().border_color(rgb(BORDER))
                         .child(div().h(px(row_height())).px_2().flex().items_center().gap_2()
                             .border_b_1().border_color(rgb(BORDER))

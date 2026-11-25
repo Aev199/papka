@@ -89,6 +89,7 @@ struct State {
     viewport: Option<Geometry>,
     source_viewport: Option<Geometry>,
     scroll:Option<Position>,
+    anchor_scroll:Option<u64>,
     labels:HashMap<PathBuf,Geometry>,
     target_labels:HashMap<PathBuf,Geometry>,
     started: Option<Instant>,
@@ -106,7 +107,7 @@ impl SpatialMotion {
     pub(crate) fn scope(&self,key:(usize,usize)){
         let mut state=self.0.borrow_mut();
         if state.tab_key.is_some_and(|old|old!=key) {
-            state.started=None;state.source.clear();state.current.clear();state.previous.clear();
+            state.started=None;state.anchor_scroll=None;state.source.clear();state.current.clear();state.previous.clear();
             state.labels.clear();state.target_labels.clear();state.source_viewport=None;state.scroll=None;
             state.frame_id=state.frame_id.wrapping_add(1);
         }
@@ -130,7 +131,7 @@ impl SpatialMotion {
         }
         state.labels.clear();state.target_labels.clear();
         state.source_viewport = state.viewport;
-        state.scroll=None;
+        state.scroll=None;state.anchor_scroll=None;
         state.started = (!state.source.is_empty()).then_some(now);
         state.current.clear();
         state.previous.clear();
@@ -141,7 +142,7 @@ impl SpatialMotion {
 
     pub(crate) fn cancel(&self) {
         let mut state = self.0.borrow_mut();
-        state.started = None;
+        state.started = None;state.anchor_scroll=None;
         state.source.clear();
         state.source_viewport = None;state.target_labels.clear();
     }
@@ -153,13 +154,13 @@ impl SpatialMotion {
             state.current.clear();
             state.previous.clear();
             state.source.clear();
-            state.started = None;
+            state.started = None;state.anchor_scroll=None;
             state.viewport = None;
             state.scroll=None;state.labels.clear();state.target_labels.clear();
             state.source_viewport = None;
         }
         if !animate || state.started.is_some_and(|start| now.saturating_duration_since(start) >= diagnostic_span(ITEM_REFLOW)) {
-            state.started = None;
+            state.started = None;state.anchor_scroll=None;
             state.source.clear();
             state.source_viewport = None;
         }
@@ -208,11 +209,28 @@ impl SpatialMotion {
         Some(SharedPose{size,content:from.mix(to,remaining)})
     }
 
+    /// An anchor reveal belongs to the mode change. Acknowledge its final
+    /// offset after prepaint, when UniformList has consumed the request.
+    pub(crate) fn prepare_anchor_scroll(&self)->u64 {
+        let mut state=self.0.borrow_mut();
+        let token=state.frame_id;
+        state.anchor_scroll=Some(token);
+        token
+    }
+
+    pub(crate) fn finish_anchor_scroll(&self,token:u64,offset:Position) {
+        let mut state=self.0.borrow_mut();
+        if state.anchor_scroll==Some(token) {
+            state.scroll=Some(offset);
+            state.anchor_scroll=None;
+        }
+    }
+
     pub(crate) fn observe_scroll(&self,offset:Position) {
         let mut state=self.0.borrow_mut();
-        if state.started.is_some() && state.scroll.is_some_and(|old|
+        if state.anchor_scroll.is_none() && state.started.is_some() && state.scroll.is_some_and(|old|
             (old.x-offset.x).abs().max((old.y-offset.y).abs())>0.75) {
-            state.started=None;state.source.clear();state.source_viewport=None;
+            state.started=None;state.anchor_scroll=None;state.source.clear();state.source_viewport=None;
         }
         state.scroll=Some(offset);
     }
@@ -222,7 +240,7 @@ impl SpatialMotion {
         let mut state=self.0.borrow_mut();
         if state.source_viewport.is_some_and(|old|
             (old.size.x-geometry.size.x).abs().max((old.size.y-geometry.size.y).abs())>1.) {
-            state.started=None;state.source.clear();state.source_viewport=None;
+            state.started=None;state.anchor_scroll=None;state.source.clear();state.source_viewport=None;
         }
         state.viewport=Some(geometry);
     }
@@ -249,7 +267,9 @@ impl SpatialMotion {
             }).collect();
         ghosts.sort_by(|a,b|a.geometry.origin.y.total_cmp(&b.geometry.origin.y)
             .then_with(||a.geometry.origin.x.total_cmp(&b.geometry.origin.x)).then_with(||a.path.cmp(&b.path)));
-        ghosts.truncate(GHOST_LIMIT);
+        // During handover the destination is hidden: preserve every captured
+        // source row. Only true departures use the smaller steady-state cap.
+        ghosts.truncate(if measuring { LIMIT } else { GHOST_LIMIT });
         ghosts
     }
 }
@@ -367,6 +387,47 @@ mod tests {
         idle.record(path("a"),rect(p(100.,80.)),None);
         m.begin(folder,now+std::time::Duration::from_secs(10));
         assert!(m.active());assert!(m.measuring());
+    }
+
+    #[test]
+    fn anchor_scroll_survives_until_prepaint_but_later_user_scroll_cancels() {
+        let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
+        let (old,_)=m.frame(folder,now,true);
+        old.record(path("a"),rect(p(10.,20.)),None);m.begin(folder,now);
+        m.observe_scroll(p(0.,0.));
+        let token=m.prepare_anchor_scroll();
+        let (_first,_)=m.frame(folder,now,true);
+        m.observe_scroll(p(0.,-400.));assert!(m.active());
+        m.finish_anchor_scroll(token,p(0.,-400.));
+        m.observe_scroll(p(0.,-400.));assert!(m.active());
+        m.observe_scroll(p(0.,-430.));assert!(!m.active());
+    }
+
+    #[test]
+    fn stale_anchor_ack_cannot_hide_scroll_in_a_replacement_transition() {
+        let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
+        let (old,_)=m.frame(folder,now,true);
+        old.record(path("a"),rect(p(10.,20.)),None);m.begin(folder,now);
+        let token=m.prepare_anchor_scroll();
+        let (next,_)=m.frame(folder,now,true);
+        next.record(path("a"),rect(p(10.,20.)),None);m.begin(folder,now);
+        m.observe_scroll(p(0.,0.));m.finish_anchor_scroll(token,p(0.,-400.));
+        m.observe_scroll(p(0.,-30.));assert!(!m.active());
+    }
+
+    #[test]
+    fn handover_preserves_more_than_48_rows_then_caps_departures() {
+        let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
+        let (old,_)=m.frame(folder,now,true);
+        m.viewport(Geometry{origin:p(0.,0.),size:p(400.,2000.)});
+        for i in 0..60 {old.record(path(&format!("row-{i}")),rect(p(0.,i as f32*24.)),None);}
+        m.begin(folder,now);
+        let (first,_)=m.frame(folder,now,true);
+        let ghosts=m.ghosts(folder,now);
+        assert_eq!(ghosts.len(),60);assert!(ghosts.iter().all(|g|g.alpha==1.));
+        first.record(path("destination"),rect(p(200.,0.)),None);
+        let (_next,_)=m.frame(folder,now,true);
+        assert_eq!(m.ghosts(folder,now).len(),GHOST_LIMIT);
     }
 
     #[test]
