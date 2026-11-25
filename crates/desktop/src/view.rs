@@ -1788,9 +1788,10 @@ impl Explorer {
             // Only the current folder is shared by all three presentation modes.
             let spatial_frame=if folder==self.pane_path(side) {
                 let animate=crate::theme::animations() && !self.renaming && self.marquee.is_none() && !self.dragging_files(cx);
-                let changing=self.motion.modes.get(&side).is_some_and(|m|m.transition.active())
-                    || self.motion.spatial.get(&side).is_some_and(|m|m.active());
-                if animate && changing {
+                // Retain the last actually presented geometry even at rest.
+                // This does not request frames; a delayed mode command can
+                // still start from the last visible source without a warm-up.
+                if animate {
                     let (frame,moving)=self.motion.spatial.entry(side).or_default().frame(&folder,now,true);
                     if moving {self.motion.late_frame.set(true);}
                     Some(frame)
@@ -1824,7 +1825,9 @@ impl Explorer {
                 let per_row = crate::thumbs::columns(self.pane_width_for(side));
                 self.thumb_columns.insert(side, per_row);
                 let rows = count.div_ceil(per_row);
-                let entry_clock = if !self.dragging_files(cx) && !self.renaming && self.marquee.is_none() && spatial_frame.is_none() {
+                let entry_clock = if !self.dragging_files(cx) && !self.renaming && self.marquee.is_none()
+                    && !self.motion.spatial.get(&side).is_some_and(|m|m.active())
+                    && !self.motion.modes.get(&side).is_some_and(|m|m.transition.active()) {
                     self.motion.thumbnail_entrance(side)
                 } else {None};
                 let list_id = SharedString::from(format!("{list_id}-grid-{per_row}-{}",crate::thumbs::size()));

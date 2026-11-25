@@ -319,6 +319,15 @@ mod tests {
     }
 
     #[test]
+    fn idle_recording_keeps_the_last_presented_source_without_requesting_frames(){
+        let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
+        let (idle,moving)=m.frame(folder,now,true);assert!(!moving);assert!(!m.active());
+        idle.record(path("a"),rect(p(100.,80.)),None);
+        m.begin(folder,now+std::time::Duration::from_secs(10));
+        assert!(m.active());assert!(m.measuring());
+    }
+
+    #[test]
     fn scroll_and_viewport_changes_cancel_the_shared_transition() {
         let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
         let (old,_)=m.frame(folder,now,true);
