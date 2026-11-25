@@ -3,6 +3,11 @@
 Baseline: Beta 105 (4f48b139), merged into main at 930633c.
 Branch: feat/ui-motion-2. No release-channel changes during development.
 
+Сверка с предыдущим чатом и фактические статусы всех десяти этапов:
+[UI_MOTION_2_AUDIT.md](UI_MOTION_2_AUDIT.md). Первый проход по этапам 1–9
+не означает полного выполнения плана; эффекты, диагностика и приёмка
+остаются частично выполненными.
+
 ## Objectives and constraints
 - A coherent native desktop design, not a clone of Atlas.
 - Preserve keyboard operation, compact engineering-document lists, split panes,

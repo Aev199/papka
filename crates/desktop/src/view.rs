@@ -3512,8 +3512,7 @@ impl Render for Explorer {
         self.validate_marquee(cx);
         self.motion.progress(self.transfers.fraction);
         let edge_moving = self.edge_scroll_frame(cx);
-        let settling = self.manual_drag.advance(std::time::Instant::now());
-        if self.motion.wants_frame(self.transfers.fraction) || self.spring_filling() || edge_moving || settling { window.request_animation_frame(); }
+        if self.motion.wants_frame(self.transfers.fraction) || self.spring_filling() || edge_moving { window.request_animation_frame(); }
         if self.clear_filter {
             self.clear_filter = false;
             self.filter.clear();
@@ -3893,6 +3892,9 @@ impl Render for Explorer {
         if let Some((state,phase))=self.motion.surfaces.versions.sample(self.version_editing.clone(),now,animate) {
             if phase.active {window.request_animation_frame();}root=root.child(self.version_rules_dialog(&state,phase,cx));
         }
+        // manual_display may create a return effect while building this frame.
+        // Schedule after that creation, including a no-op drag with no reflow.
+        if self.manual_drag.advance(std::time::Instant::now()) {window.request_animation_frame();}
         self.motion.lab.end(lab_start);
         root
     }

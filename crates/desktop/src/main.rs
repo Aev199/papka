@@ -808,29 +808,15 @@ impl Explorer {
     /// A request number prevents a slow response for a previously selected
     /// file from overwriting the active inspector.
     fn load_selected_details(&mut self, cx: &mut Context<Self>) {
-        if self.inspector.path == self.selected && (!self.inspector.dirty || self.inspector.loading) {
-            return;
-        }
-        self.inspector.dirty = false;
-        self.inspector.request = self.inspector.request.wrapping_add(1);
-        let request = self.inspector.request;
-        self.inspector.path = self.selected.clone();
-        self.inspector.preview = None;
-        self.inspector.thumbnail = None;
-        self.inspector.thumbnail_ready = false;
-        self.inspector.thumbnail_failed = false;
-        self.inspector.history.clear();
-        self.inspector.versions.clear();
-        let Some(path) = self.selected.clone() else {
-            self.inspector.loading = false;
-            return;
-        };
-        self.inspector.loading = true;
+        if !self.inspector.refresh_selection(self.selected.clone()) {return;}
         // Thumbnail and metadata use separate bounded worker slots; slow
         // version enumeration should not delay an available preview.
         self.load_selected_thumbnail(cx);
-        if self.inspector.details_busy { return; }
-        self.inspector.details_busy = true;
+        self.start_selected_details(cx);
+    }
+
+    fn start_selected_details(&mut self,cx:&mut Context<Self>) {
+        let Some((request,path))=self.inspector.next_details_request() else {return;};
         let history_journal = self.journal.clone();
         let observe_history = self.watched_root.is_some();
         let selected_path = path.clone();
@@ -861,9 +847,11 @@ impl Explorer {
             let _ = weak.update(cx, |this, cx| {
                 this.inspector.details_busy = false;
                 if this.inspector.request != request || this.selected.as_ref() != Some(&selected_path) {
-                    this.inspector.loading = false;
-                    this.inspector.dirty = true;
+                    // A selection change may not have rendered yet. Prepare it
+                    // if needed, otherwise reuse B's existing generation/image.
                     this.load_selected_details(cx);
+                    this.start_selected_details(cx);
+                    cx.notify();
                     return;
                 }
                 this.inspector.preview = preview;

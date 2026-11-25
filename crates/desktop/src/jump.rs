@@ -58,6 +58,7 @@ pub(crate) struct Folders {
     pub(crate) reading: bool,
     checked_path: Option<(PathBuf,bool)>,
     checking_path: bool,
+    pub(crate) selected_by_user: bool,
 }
 
 impl Folders {
@@ -171,10 +172,16 @@ impl Explorer {
     fn restore_jump_selection(&mut self,path:Option<PathBuf>){
         let results=self.jump_results();
         if let Some(palette)=self.palette.as_mut(){
-            palette.selected=path.and_then(|path|results.iter().position(|(p,_)|p==&path))
-                .unwrap_or_else(||palette.selected.min(results.len().saturating_sub(1)));
+            let explicit=palette.folders.as_ref().is_some_and(|f|f.selected_by_user);
+            palette.selected=restored_selection(&results,path.as_deref(),palette.selected,explicit);
             if !results.is_empty(){palette.scroll.scroll_to_item(palette.selected);}
         }
+    }
+
+    pub(crate) fn jump_enter_target(&self)->Option<PathBuf>{
+        let palette=self.palette.as_ref()?;
+        let explicit=palette.folders.as_ref()?.selected_by_user;
+        enter_target(typed_local_path(&palette.query),self.jump_selected_path(),explicit)
     }
 
     /// The folders matching what is typed, best first.
@@ -254,6 +261,37 @@ impl Explorer {
                 })));
         }
         (list.into_any_element(), footer)
+    }
+}
+
+fn restored_selection(results:&[(PathBuf,&'static str)],path:Option<&std::path::Path>,fallback:usize,explicit:bool)->usize{
+    if !explicit {return 0;}
+    path.and_then(|path|results.iter().position(|(p,_)|p==path))
+        .unwrap_or_else(||fallback.min(results.len().saturating_sub(1)))
+}
+
+fn enter_target(typed:Option<PathBuf>,selected:Option<PathBuf>,explicit:bool)->Option<PathBuf>{
+    if explicit {selected}else{typed.or(selected)}
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    #[test]
+    fn exact_path_replaces_automatic_fuzzy_selection_but_preserves_arrow_choice(){
+        let exact=PathBuf::from("project");let child=exact.join("old");
+        let results=vec![(exact.clone(),"Путь"),(child.clone(),"Недавние")];
+        assert_eq!(restored_selection(&results,Some(&child),0,false),0);
+        assert_eq!(restored_selection(&results,Some(&child),0,true),1);
+        assert_eq!(enter_target(Some(exact.clone()),Some(child.clone()),false),Some(exact));
+        assert_eq!(enter_target(Some(PathBuf::from("project")),Some(child.clone()),true),Some(child));
+    }
+    #[test]
+    fn enter_uses_typed_path_even_before_probe_and_never_substitutes_a_fuzzy_hit(){
+        let typed=PathBuf::from("new-folder");
+        assert_eq!(enter_target(Some(typed.clone()),None,false),Some(typed.clone()));
+        assert_eq!(enter_target(Some(typed.clone()),Some(PathBuf::from("other")),false),Some(typed));
+        assert_eq!(restored_selection(&[],None,10,true),0);
     }
 }
 

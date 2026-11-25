@@ -146,6 +146,7 @@ impl Explorer {
                     if let Some(palette) = this.palette.as_mut() {
                         palette.query = query;
                         palette.selected = selected;
+                        if let Some(folders)=palette.folders.as_mut(){folders.selected_by_user=false;}
                         palette.scroll.scroll_to_item(0);
                     }
                     this.probe_jump_path(cx);
@@ -176,6 +177,9 @@ impl Explorer {
             let count = self.jump_results().len();
             if let Some(palette) = self.palette.as_mut() {
                 palette.selected = palette.selected.saturating_add_signed(delta).min(count.saturating_sub(1));
+                if count>0 {
+                    if let Some(folders)=palette.folders.as_mut(){folders.selected_by_user=true;}
+                }
                 palette.scroll.scroll_to_item(palette.selected);
             }
             cx.notify();
@@ -221,8 +225,7 @@ impl Explorer {
             return;
         };
         if palette.folders.is_some() {
-            let selected = palette.selected;
-            if let Some((path, _)) = self.jump_results().into_iter().nth(selected) {
+            if let Some(path) = self.jump_enter_target() {
                 self.jump_to(path, false, window, cx);
             }
             return;

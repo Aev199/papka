@@ -20,6 +20,62 @@ pub(crate) struct InspectorState {
     pub(crate) versions: Vec<filemanager_core::versions::Member>,
 }
 
+impl InspectorState {
+    /// Reset only for a new selection or an explicit refresh. A retired
+    /// metadata worker must not invalidate another worker's current picture.
+    pub(crate) fn refresh_selection(&mut self,selected:Option<PathBuf>)->bool {
+        if self.path==selected && (!self.dirty || self.loading) {return false;}
+        self.dirty=false;
+        self.request=self.request.wrapping_add(1);
+        self.path=selected;
+        self.preview=None;self.thumbnail=None;
+        self.thumbnail_ready=false;self.thumbnail_failed=false;
+        self.history.clear();self.versions.clear();
+        self.loading=self.path.is_some();
+        true
+    }
+
+    pub(crate) fn next_details_request(&mut self)->Option<(u64,PathBuf)> {
+        if self.details_busy {return None;}
+        let path=self.path.clone()?;
+        self.details_busy=true;
+        Some((self.request,path))
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    #[test]
+    fn retired_metadata_worker_keeps_current_thumbnail_and_generation(){
+        let mut state=InspectorState::default();
+        state.refresh_selection(Some(PathBuf::from("a.pdf")));
+        let (old,_) = state.next_details_request().unwrap();
+        state.refresh_selection(Some(PathBuf::from("b.pdf")));
+        assert!(state.next_details_request().is_none());
+        state.thumbnail=Some(PathBuf::from("b.png"));state.thumbnail_ready=true;
+        let current=state.request;
+        assert_ne!(old,current);
+        // The old task frees its worker slot; scheduling B is not a refresh.
+        state.details_busy=false;
+        assert_eq!(state.next_details_request(),Some((current,PathBuf::from("b.pdf"))));
+        assert_eq!(state.thumbnail,Some(PathBuf::from("b.png")));
+        assert!(state.thumbnail_ready);
+        assert!(!state.refresh_selection(Some(PathBuf::from("b.pdf"))));
+    }
+    #[test]
+    fn explicit_refresh_invalidates_thumbnail_and_deselection_stops_pending_details(){
+        let mut state=InspectorState::default();
+        state.refresh_selection(Some(PathBuf::from("b.pdf")));
+        let before=state.request;
+        state.loading=false;state.dirty=true;state.thumbnail=Some(PathBuf::from("b.png"));
+        assert!(state.refresh_selection(Some(PathBuf::from("b.pdf"))));
+        assert_ne!(before,state.request);assert!(state.thumbnail.is_none());
+        assert!(state.refresh_selection(None));
+        assert!(!state.loading);assert!(state.next_details_request().is_none());
+    }
+}
+
 impl Explorer {
     pub(crate) fn load_selected_thumbnail(&mut self, cx: &mut Context<Self>) {
         if self.inspector.path != self.selected || self.inspector.thumbnail_busy || self.inspector.thumbnail.is_some() || self.inspector.thumbnail_failed {
