@@ -5,8 +5,8 @@ Branch: feat/ui-motion-2. No release-channel changes during development.
 
 Сверка с предыдущим чатом и фактические статусы всех десяти этапов:
 [UI_MOTION_2_AUDIT.md](UI_MOTION_2_AUDIT.md). Первый проход по этапам 1–9
-не означает полного выполнения плана; эффекты, диагностика и приёмка
-остаются частично выполненными.
+не означал полного выполнения плана. Недостающий проход по коду завершён;
+реальная Windows-приёмка и измерения производительности остаются открытыми.
 
 ## Objectives and constraints
 - A coherent native desktop design, not a clone of Atlas.
@@ -223,16 +223,27 @@ The first complete implementation and second animation pass (b8d25a9) passed
 Windows CI including all workspace checks, tests and standalone policies
 (run 45468133356). Subsequent inspector/palette/status changes require fresh CI.
 
+### Implementation closure after the audit
+- Diagnostic spans now agree with expiration in grid/list/row, Miller presence,
+  modes, preview, panel/layout, tab, selection and manual-order effects. A
+  non-test executable exercises real process-local scale at 1x, 2x and 4x in CI.
+- Shared items have separate icon and name tracks. Text bounds are measured;
+  live root bounds follow the shown rectangle. Source visuals bridge the first
+  destination measurement; scroll/resize cancels stale geometry.
+- Departing Miller columns retain bounded visible row metadata, not just a
+  header, with clipping below the retained header and no old input handlers.
+- Manual-order landing/cancellation has a bounded cursor-to-target flight.
+  Targets come from live prepaint bounds; pane/folder/tab and resize scope it.
+- Remaining repeated chrome typography/radii use shared roles. Modal cards fit
+  the viewport and scroll content, while ordinary row density stays unchanged.
+
 ### Remaining before release
-- Shared icon/text morph and first-frame handover: current implementation moves
-  and resizes clipped live containers. Departures are generic silhouettes, not
-  actual GPU captures. Decide whether richer snapshots are worth their cost only
-  after Windows comparison; don't claim a full morph before that.
-- Column departures use passive headers rather than entire old columns; landing
-  feedback is a short accent, not a cursor flight. Assess visually.
-- Motion Lab measures UI construction and render cadence, not GPU presentation.
-  Slow mode covers migrated clocks only. No measured performance baseline yet.
-- Explicit jump navigation still uses existing filesystem validation. Typed-path
-  probing is async, but opening an unavailable share may still block there.
-- CI validates code and deterministic geometry, not input behavior/hit testing
-  or real rendering. No portable build requested for this pass.
+- Execute the Windows acceptance matrix and compare Beta 105 on the same machine.
+  Source review and CI do not establish visual acceptance or actual GPU timing.
+- Measure latency, UI/render cadence and compositor/presentation performance,
+  including large local folders and engineering project shares.
+- Shared glyphs and passive metadata snapshots are not bitmap/GPU captures.
+  Confirm image handover, label wrapping, end frames and hit targets visually.
+- Explicit jump navigation keeps its existing synchronous availability check;
+  typed-path probing stays in the background.
+- No portable build or beta is requested in this implementation pass.

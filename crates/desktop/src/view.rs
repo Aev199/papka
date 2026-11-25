@@ -73,7 +73,7 @@ fn manual_gap(height: f32) -> Div {
 /// Keep the logical slot in the virtual list while its visible content moves.
 fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElement, width: Option<f32>, height: f32, directory:bool) -> Div {
     use crate::spatial_motion::{Geometry, Position};
-    let pose = frame.pose(path, std::time::Instant::now());
+    let pose = frame.pose(path, frame.sample_time());
     let record = frame.clone();
     let path = path.to_path_buf();
     // The virtual slot never changes size. Only the live content moves and
@@ -113,10 +113,11 @@ fn shared_visual(entry:&Entry,pose:&crate::spatial_motion::SharedPose,text:u32,t
     div().absolute().inset_0().overflow_hidden()
         .child(svg().absolute().left(px(c.icon.x)).top(px(c.icon.y)).path(glyph)
             .size(px(c.icon_size)).text_color(rgb(tint)))
-        .child(div().absolute().left(px(c.name.x)).top(px(c.name.y)).w(px(c.name_width))
-            .text_size(px(c.font)).line_height(px(16.)).truncate().text_color(rgb(text))
+        .child(div().absolute().left(px(c.name.x)).top(px(c.name.y)).w(px(c.name_width)).h(px(c.name_height))
+            .overflow_hidden().text_size(px(c.font)).line_height(px(16.)).text_color(rgb(text))
             .on_prepaint(track_shared_label(motion,entry.path.clone()))
-            .child(entry.name.clone()))
+            .when(c.wrap<1.,|label|label.child(div().absolute().inset_0().truncate().opacity(1.-c.wrap).child(entry.name.clone())))
+            .when(c.wrap>0.,|label|label.child(div().absolute().inset_0().line_clamp(2).opacity(c.wrap).child(entry.name.clone()))))
 }
 
 fn landing_ghost(ghost:crate::landing_motion::Ghost)->Div {
@@ -486,6 +487,7 @@ impl Explorer {
 
     fn group_view(&mut self, group: GroupId, cx: &mut Context<Self>) -> AnyElement {
         let now=std::time::Instant::now();
+        self.manual_drag.landings.scope(group.0,&self.pane_path(group),self.browser.group(group).map_or(0,|g|g.active_tab));
         let (opacity,commit)=self.motion.modes.get_mut(&group).map_or((1.,None),|m|{
             let (opacity,_,commit)=m.transition.sample(now,crate::theme::animations());
             if m.transition.active(){self.motion.late_frame.set(true);} (opacity,commit)
@@ -1453,7 +1455,7 @@ impl Explorer {
                         if top>=height{return None;}
                         let entry=&listing.entries[i];
                         Some(crate::column_reveal::RowSnapshot{path:entry.path.clone(),name:entry.name.clone(),
-                            directory:entry.is_directory,top:row_h+top,height:row_h,selected:self.is_selected(&entry.path)})
+                            directory:entry.is_directory,top,height:row_h,selected:self.is_selected(&entry.path)})
                     }).collect()
                 })};
                 if let Some(presence)=self.motion.column_presence.get_mut(&side){presence.snapshot(folder,snapshots);}
@@ -1525,6 +1527,7 @@ impl Explorer {
                             .border_b_1().border_color(rgb(BORDER))
                             .child(icon("fm/folder-fill.svg",FOLDER))
                             .child(div().min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).child(browser::display_name(&gone.path))))
+                        .child(div().absolute().left_0().right_0().top(px(row_height())).bottom_0().overflow_hidden()
                         .children(gone.rows.into_iter().map(|row|{
                             let (glyph,tint)=if row.directory {("fm/folder-fill.svg",FOLDER)}
                                 else{file_icon(row.path.extension().and_then(|v|v.to_str()))};
@@ -1534,7 +1537,7 @@ impl Explorer {
                                 .text_color(rgb(if row.selected{SELECTION_TEXT}else{TEXT}))
                                 .child(icon(glyph,if row.selected{SELECTION_TEXT}else{tint}))
                                 .child(div().min_w_0().truncate().text_size(px(ui::BODY_TEXT)).child(row.name))
-                        }))
+                        })))
                 }))
                 .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
@@ -1953,7 +1956,7 @@ impl Explorer {
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
         let morph=self.motion.spatial.get(&side).filter(|_|folder==self.pane_path(side))
-            .and_then(|m|m.shared_pose(&path,std::time::Instant::now()));
+            .and_then(|m|m.shared_pose(&path,m.sample_time()));
         let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
         let picture = if is_dir { None } else { self.thumb(&path, cx) };
@@ -1997,7 +2000,7 @@ impl Explorer {
             tile.child(div().w_full().flex().items_start().justify_center().gap_1()
                 .when_some(label, |name, dot| name.child(div().h(px(16.)).flex().items_center().child(dot)))
                 .child(div().min_w_0().text_center().line_clamp(2).line_height(px(16.))
-                    .on_prepaint(track_shared_label(self.motion.spatial.get(&side).cloned(),path.clone())).child(entry.name.clone())))
+                    .on_prepaint(track_shared_label(self.motion.spatial.get(&side).filter(|_|folder==self.pane_path(side)).cloned(),path.clone())).child(entry.name.clone())))
         };
         }
         if renaming {
@@ -2060,7 +2063,7 @@ impl Explorer {
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
         let morph=self.motion.spatial.get(&side).filter(|_|folder==self.pane_path(side))
-            .and_then(|m|m.shared_pose(&path,std::time::Instant::now()));
+            .and_then(|m|m.shared_pose(&path,m.sample_time()));
         let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
         // The selection sliding to this row: the part of it over each row
@@ -2160,7 +2163,7 @@ impl Explorer {
                 .child(text);
             let name = name_cell().flex().items_center().gap_1p5()
                 .child(div().min_w_0().truncate()
-                    .on_prepaint(track_shared_label(self.motion.spatial.get(&side).cloned(),path.clone())).child(entry.name.clone()));
+                    .on_prepaint(track_shared_label(self.motion.spatial.get(&side).filter(|_|folder==self.pane_path(side)).cloned(),path.clone())).child(entry.name.clone()));
             let name = match &stack {
                 Some(Stacked::Head { key, label, others, expanded }) => {
                     let (folder_key, key) = (folder.to_path_buf(), key.clone());

@@ -12,11 +12,18 @@ struct Flight {
     targets:HashMap<PathBuf,Rect>,committed:bool,
 }
 #[derive(Default)]
-struct State {flights:HashMap<u64,Flight>,viewports:HashMap<u64,Rect>}
+struct State {flights:HashMap<u64,Flight>,viewports:HashMap<u64,Rect>,scopes:HashMap<u64,(PathBuf,usize)>}
 #[derive(Clone,Default)]
 pub(crate) struct Landings(Rc<RefCell<State>>);
 pub(crate) struct Ghost {pub path:PathBuf,pub rect:Rect,pub alpha:f32,pub committed:bool}
 impl Landings {
+    pub(crate) fn scope(&self,side:u64,folder:&Path,tab:usize){
+        let mut state=self.0.borrow_mut();
+        if state.scopes.get(&side).is_some_and(|(old,old_tab)|old!=folder||*old_tab!=tab){
+            state.flights.remove(&side);
+        }
+        state.scopes.insert(side,(folder.to_path_buf(),tab));
+    }
     pub(crate) fn begin(&self,side:u64,folder:&Path,paths:&[PathBuf],origin:(f32,f32),now:Instant,committed:bool){
         if !origin.0.is_finite()||!origin.1.is_finite(){return;}
         let allowed=paths.iter().take(LIMIT).cloned().collect::<HashSet<_>>();
@@ -42,7 +49,7 @@ impl Landings {
     }
     pub(crate) fn prune(&self,ids:&[u64]){
         let mut state=self.0.borrow_mut();
-        state.flights.retain(|id,_|ids.contains(id));state.viewports.retain(|id,_|ids.contains(id));
+        state.flights.retain(|id,_|ids.contains(id));state.viewports.retain(|id,_|ids.contains(id));state.scopes.retain(|id,_|ids.contains(id));
     }
     pub(crate) fn advance(&self,now:Instant,animate:bool)->bool{
         let mut state=self.0.borrow_mut();
@@ -82,6 +89,14 @@ mod tests {
         assert!(l.ghosts(1,Path::new("b"),now).is_empty());assert!(l.ghosts(1,folder,now+SPAN).is_empty());
         assert!(!l.advance(now+SPAN,true));
     }
+    #[test]
+    fn switching_tabs_with_the_same_folder_drops_the_old_flight(){
+        let now=Instant::now();let l=Landings::default();let folder=Path::new("a");let path=folder.join("file");
+        l.scope(1,folder,0);l.viewport(1,rect());l.begin(1,folder,&[path.clone()],(0.,0.),now,true);
+        l.record(1,folder,&path,rect());assert_eq!(l.ghosts(1,folder,now).len(),1);
+        l.scope(1,folder,1);assert!(l.ghosts(1,folder,now).is_empty());assert!(!l.advance(now,true));
+    }
+
     #[test]
     fn bounds_resize_new_gesture_and_reduced_motion_release_flights(){
         let now=Instant::now();let l=Landings::default();let folder=Path::new("a");

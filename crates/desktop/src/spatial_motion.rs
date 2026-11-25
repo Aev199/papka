@@ -41,7 +41,7 @@ struct Slot { natural: Geometry, shown: Geometry, directory: bool, content:Optio
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub(crate) struct Content {
     pub icon:Position, pub icon_size:f32,
-    pub name:Position, pub name_width:f32, pub font:f32,
+    pub name:Position, pub name_width:f32, pub name_height:f32, pub wrap:f32, pub font:f32,
 }
 impl Content {
     pub(crate) fn layout(size:Position,label_chars:usize)->Self {
@@ -51,10 +51,10 @@ impl Content {
         if tile {
             let picture=(size.y-52.).max(16.);let icon_size=(picture/2.).round();
             Self{icon:Position{x:(size.x-icon_size)/2.,y:4.+(picture-icon_size)/2.},icon_size,
-                name:Position{x:(size.x-label)/2.,y:picture+8.},name_width:label,font}
+                name:Position{x:(size.x-label)/2.,y:picture+8.},name_width:label,name_height:32.,wrap:1.,font}
         } else {
             Self{icon:Position{x:8.,y:(size.y-16.)/2.},icon_size:16.,
-                name:Position{x:32.,y:(size.y-16.)/2.},name_width:label,font}
+                name:Position{x:32.,y:(size.y-16.)/2.},name_width:label,name_height:16.,wrap:0.,font}
         }
     }
     fn mix(self,target:Self,remaining:f32)->Self {
@@ -62,7 +62,8 @@ impl Content {
         Self{icon:target.icon.plus(self.icon.minus(target.icon).scale(remaining)),
             icon_size:value(self.icon_size,target.icon_size),
             name:target.name.plus(self.name.minus(target.name).scale(remaining)),
-            name_width:value(self.name_width,target.name_width),font:value(self.font,target.font)}
+            name_width:value(self.name_width,target.name_width),name_height:value(self.name_height,target.name_height),
+            wrap:value(self.wrap,target.wrap),font:value(self.font,target.font)}
     }
 }
 #[derive(Clone,Copy)]
@@ -80,6 +81,7 @@ pub(crate) struct Ghost {
 struct State {
     folder: PathBuf,
     frame_id: u64,
+    sampled_at:Option<Instant>,
     current: HashMap<PathBuf, Slot>,
     previous: HashMap<PathBuf, Slot>,
     source: HashMap<PathBuf, Slot>,
@@ -110,7 +112,7 @@ impl SpatialMotion {
             if let Some(label)=labels.get(path) {
                 let chars=path.file_name().map_or(1,|s|s.to_string_lossy().chars().count());
                 let mut content=slot.content.unwrap_or_else(||Content::layout(slot.shown.size,chars));
-                content.name=label.origin.minus(slot.shown.origin);content.name_width=label.size.x;
+                content.name=label.origin.minus(slot.shown.origin);content.name_width=label.size.x;content.name_height=label.size.y;
                 slot.content=Some(content);
             }
         }
@@ -153,6 +155,7 @@ impl SpatialMotion {
             state.target_labels=state.labels.clone();
         }
         state.labels.clear();
+        state.sampled_at=Some(now);
         state.previous = std::mem::take(&mut state.current);
         state.frame_id = state.frame_id.wrapping_add(1);
         (Frame { state: self.clone(), id: state.frame_id, at:now }, state.started.is_some())
@@ -160,6 +163,7 @@ impl SpatialMotion {
 }
 
 impl SpatialMotion {
+    pub(crate) fn sample_time(&self)->Instant {self.0.borrow().sampled_at.unwrap_or_else(Instant::now)}
     pub(crate) fn frame_id(&self)->u64 {self.0.borrow().frame_id}
     pub(crate) fn record_label(&self,id:u64,path:&Path,geometry:Geometry) {
         let mut state=self.0.borrow_mut();
@@ -186,7 +190,7 @@ impl SpatialMotion {
         let from=source.content.unwrap_or_else(||Content::layout(source.shown.size,chars));
         let mut to=Content::layout(target.natural.size,chars);
         if let Some(label)=state.target_labels.get(path) {
-            to.name=label.origin.minus(target.natural.origin);to.name_width=label.size.x;
+            to.name=label.origin.minus(target.natural.origin);to.name_width=label.size.x;to.name_height=label.size.y;
         }
         Some(SharedPose{size,content:from.mix(to,remaining)})
     }
@@ -238,6 +242,7 @@ impl SpatialMotion {
 }
 
 impl Frame {
+    pub(crate) fn sample_time(&self)->Instant {self.at}
     pub(crate) fn pose(&self, path: &Path, now: Instant) -> Option<(Position, Position)> {
         let state = self.state.0.borrow();
         if state.frame_id != self.id { return None; }
