@@ -46,10 +46,17 @@ use std::{collections::HashMap,path::{Path,PathBuf}};
 
 const PRESENCE_SPAN: Duration = Duration::from_millis(160);
 const DEPARTURE_LIMIT: usize = 8;
+const ROW_LIMIT: usize = 64;
+
+#[derive(Clone)]
+pub(crate) struct RowSnapshot {
+    pub path:PathBuf,pub name:String,pub directory:bool,
+    pub top:f32,pub height:f32,pub selected:bool,
+}
 
 #[derive(Clone)]
 struct Column {
-    path:PathBuf, x:f32, width:f32,
+    path:PathBuf, x:f32, width:f32, rows:Vec<RowSnapshot>,
 }
 
 struct Exit { column:Column, at:Instant, alpha:f32 }
@@ -59,7 +66,7 @@ impl Enter {
 }
 
 pub(crate) struct Departure {
-    pub path:PathBuf, pub x:f32, pub width:f32, pub alpha:f32,
+    pub path:PathBuf, pub x:f32, pub width:f32, pub alpha:f32, pub rows:Vec<RowSnapshot>,
 }
 
 /// Column presence is separate from auto-scroll. Only actual path additions
@@ -79,7 +86,8 @@ impl Presence {
         let reset = !animate || self.tab!=Some(tab) || (viewport-self.viewport).abs()>1.;
         let mut x=offset;
         let next:Vec<_>=folders.iter().zip(widths).map(|(path,&width)| {
-            let column=Column{path:path.clone(),x,width}; x+=width;column
+            let rows=self.columns.iter().find(|old|old.path==*path).map_or_else(Vec::new,|old|old.rows.clone());
+            let column=Column{path:path.clone(),x,width,rows}; x+=width;column
         }).collect();
         if reset {
             self.entering.clear();self.exiting.clear();
@@ -106,6 +114,13 @@ impl Presence {
         self.tab=Some(tab);self.viewport=viewport;self.columns=next;
     }
 
+    pub(crate) fn snapshot(&mut self,path:&Path,rows:Vec<RowSnapshot>) {
+        if let Some(column)=self.columns.iter_mut().find(|column|column.path==path) {
+            column.rows=rows.into_iter().filter(|row|row.top.is_finite()&&row.height.is_finite()&&row.height>0.)
+                .take(ROW_LIMIT).collect();
+        }
+    }
+
     pub(crate) fn entrance(&self,path:&Path,now:Instant)->(f32,f32) {
         let alpha=self.entering.get(path).map_or(1.,|enter|enter.alpha(now));
         (alpha,8.*(1.-alpha))
@@ -115,7 +130,7 @@ impl Presence {
         self.exiting.iter().filter_map(|exit| {
             let t=presence_alpha(now,exit.at);
             (t<1.).then(||Departure{path:exit.column.path.clone(),x:exit.column.x+8.*t,
-                width:exit.column.width,alpha:exit.alpha*(1.-t)})
+                width:exit.column.width,alpha:exit.alpha*(1.-t),rows:exit.column.rows.clone()})
         }).collect()
     }
 
@@ -133,6 +148,21 @@ fn presence_alpha(now:Instant,at:Instant)->f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn departed_columns_keep_bounded_passive_visible_contents() {
+        let now=Instant::now();let mut p=Presence::default();
+        let a=PathBuf::from("a");let b=PathBuf::from("a/b");
+        p.observe(0,&[a.clone(),b.clone()],&[200.,200.],400.,0.,now,true);
+        let rows=(0..100).map(|i|RowSnapshot{path:b.join(i.to_string()),name:i.to_string(),
+            directory:false,top:i as f32*24.,height:24.,selected:i==0}).collect();
+        p.snapshot(&b,rows);
+        p.observe(0,&[a],&[200.],400.,0.,now,true);
+        let gone=p.departures(now);assert_eq!(gone.len(),1);assert_eq!(gone[0].rows.len(),ROW_LIMIT);
+        assert!(gone[0].rows[0].selected);assert_eq!(gone[0].rows[0].name,"0");
+        assert_eq!(gone[0].rows[0].path,b.join("0"));
+        assert!(p.departures(now+PRESENCE_SPAN).is_empty());
+    }
 
     #[test]
     fn reveal_retargets_at_current_offset_and_finishes() {

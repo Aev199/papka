@@ -2,7 +2,7 @@
 #[path="../crates/desktop/src/motion_policy.rs"] mod motion_policy;
 #[path="../crates/desktop/src/column_reveal.rs"] mod column_reveal;
 #[path="../crates/desktop/src/mode_motion.rs"] mod mode_motion;
-mod motion {pub use crate::motion_policy::{MODE_FADE_OUT,MODE_FADE_IN,ease_out_fraction};}
+mod motion {pub(crate) use crate::motion_policy::{MODE_FADE_OUT,MODE_FADE_IN,ease_out_fraction};}
 use std::{path::PathBuf,time::{Duration,Instant}};
 fn main(){
     let factor=std::env::var("PAPKA_MOTION_SLOW").unwrap_or_default().parse::<u32>().unwrap_or(1);

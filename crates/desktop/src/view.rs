@@ -94,8 +94,20 @@ fn spatial_slot(frame: &crate::spatial_motion::Frame, path: &Path, body: AnyElem
         })
 }
 
+/// Independent shared icon/name tracks. The moving item's own root keeps
+/// selection and input; this visual has no second set of event handlers.
+fn shared_visual(entry:&Entry,pose:&crate::spatial_motion::SharedPose,text:u32,tint:u32)->Div {
+    let c=pose.content;let (glyph,_)=entry_icon(entry);
+    div().absolute().inset_0().overflow_hidden()
+        .child(svg().absolute().left(px(c.icon.x)).top(px(c.icon.y)).path(glyph)
+            .size(px(c.icon_size)).text_color(rgb(tint)))
+        .child(div().absolute().left(px(c.name.x)).top(px(c.name.y)).w(px(c.name_width))
+            .text_size(px(c.font)).line_height(px(16.)).truncate().text_color(rgb(text))
+            .child(entry.name.clone()))
+}
+
 /// Lightweight icon/name silhouette with no input listeners or image assets.
-fn spatial_ghost(ghost: crate::spatial_motion::Ghost) -> Div {
+fn spatial_ghost(ghost: crate::spatial_motion::Ghost,selected:bool) -> Div {
     let r=ghost.geometry;
     let (glyph,tint)=if ghost.directory {("fm/folder-fill.svg",FOLDER)}
         else {file_icon(ghost.path.extension().and_then(|v|v.to_str()))};
@@ -103,7 +115,8 @@ fn spatial_ghost(ghost: crate::spatial_motion::Ghost) -> Div {
     let tile=r.size.y>48.;
     let item=div().absolute().left(px(r.origin.x)).top(px(r.origin.y))
         .w(px(r.size.x)).h(px(r.size.y)).opacity(ghost.alpha).overflow_hidden()
-        .rounded(px(ui::CONTROL_RADIUS)).bg(rgb(SURFACE)).px_2().flex().items_center().gap_1();
+        .rounded(px(ui::CONTROL_RADIUS)).bg(rgb(if selected{if tile{ACCENT_SOFT}else{SELECTED}}else{SURFACE}))
+        .text_color(rgb(if selected&&!tile{SELECTION_TEXT}else{TEXT})).px_2().flex().items_center().gap_1();
     if tile {
         item.flex_col().justify_center().child(svg().path(glyph).size(px((r.size.y*0.35).clamp(16.,48.))).text_color(rgb(tint)))
             .child(div().w_full().text_center().truncate().text_size(px(ui::SECONDARY_TEXT)).child(name))
@@ -466,10 +479,13 @@ impl Explorer {
         if card {self.motion.spatial.remove(&group);self.motion.column_presence.remove(&group);self.motion.column_reveals.remove(&group);self.column_reveal_keys.remove(&group);}
         let body=if card {self.project_card_view(cx)} else {self.pane(group,cx)};
         let spatial=self.motion.spatial.get(&group).cloned();
+        let measuring=spatial.as_ref().is_some_and(|m|m.measuring());
+        let shared=spatial.is_some();
         let ghosts=spatial.as_ref().map_or_else(Vec::new,|m|m.ghosts(&self.pane_path(group),now));
         let body=div().relative().flex_1().min_h_0().overflow_hidden()
-            .child(div().size_full().opacity(opacity).child(body))
-            .children(ghosts.into_iter().map(spatial_ghost))
+            .child(div().size_full().opacity(if measuring{0.001}else if shared{1.}else{opacity}).child(body))
+            .children(ghosts.into_iter().map(|ghost|{let selected=self.is_selected(&ghost.path);spatial_ghost(ghost,selected)}))
+            .when(measuring,|body|body.child(crate::popup_motion::shield()))
             .when_some(spatial,|body,spatial|body.on_prepaint(move|bounds,_,_| {
                 use crate::spatial_motion::{Geometry,Position};
                 spatial.viewport(Geometry{origin:Position{x:bounds.origin.x/px(1.),y:bounds.origin.y/px(1.)},
@@ -1389,6 +1405,22 @@ impl Explorer {
             for (index, folder) in folders.iter().enumerate() {
                 // The folder of the next column is highlighted as the trail.
                 let trail = folders.get(index + 1).cloned();
+                // Cached metadata only. Retain the visible viewport, never live controls.
+                let snapshots=self.folder_view(side,folder).map_or_else(Vec::new,|(listing,order)|{
+                    let Some(handle)=self.scroll_handles.get(&(side,folder.clone())) else{return Vec::new();};
+                    let handle=handle.0.borrow();let scroll=&handle.base_handle;
+                    let height=scroll.bounds().size.height/px(1.);let offset=scroll.offset().y/px(1.);
+                    if height<=0. {return Vec::new();}
+                    let row_h=row_height();let first=((-offset).max(0.)/row_h).floor() as usize;
+                    order.iter().enumerate().skip(first).take(64).filter_map(|(position,&i)|{
+                        let top=position as f32*row_h+offset;
+                        if top>=height{return None;}
+                        let entry=&listing.entries[i];
+                        Some(crate::column_reveal::RowSnapshot{path:entry.path.clone(),name:entry.name.clone(),
+                            directory:entry.is_directory,top:row_h+top,height:row_h,selected:self.is_selected(&entry.path)})
+                    }).collect()
+                });
+                if let Some(presence)=self.motion.column_presence.get_mut(&side){presence.snapshot(folder,snapshots);}
                 let column = self.column(folder.clone(), side, trail, cx);
                 let weak = cx.weak_entity();
                 let reveal_scroll = scroll.clone();
@@ -1450,12 +1482,23 @@ impl Explorer {
             div().relative().flex_1().min_w_0().min_h_0().overflow_hidden().flex()
                 .child(column_scroll_area(gpui::SharedString::from(format!("columns-{}",side.0)), &scroll).child(group))
                 .children(departures.into_iter().map(|gone| {
-                    // Do not retain the old live column or its input handlers.
-                    div().absolute().left(px(gone.x)).top_0().bottom_0().w(px(gone.width)).opacity(gone.alpha*0.5)
-                        .bg(rgb(SURFACE)).border_r_1().border_color(rgb(BORDER))
-                        .px_2().py_1().flex().items_start().gap_2()
-                        .child(icon("fm/folder-fill.svg",FOLDER))
-                        .child(div().min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).child(browser::display_name(&gone.path)))
+                    // Full bounded row presentation, without old rows or handlers.
+                    div().absolute().left(px(gone.x)).top_0().bottom_0().w(px(gone.width)).opacity(gone.alpha)
+                        .overflow_hidden().bg(rgb(SURFACE)).border_r_1().border_color(rgb(BORDER))
+                        .child(div().h(px(row_height())).px_2().flex().items_center().gap_2()
+                            .border_b_1().border_color(rgb(BORDER))
+                            .child(icon("fm/folder-fill.svg",FOLDER))
+                            .child(div().min_w_0().truncate().text_size(px(ui::SECONDARY_TEXT)).child(browser::display_name(&gone.path))))
+                        .children(gone.rows.into_iter().map(|row|{
+                            let (glyph,tint)=if row.directory {("fm/folder-fill.svg",FOLDER)}
+                                else{file_icon(row.path.extension().and_then(|v|v.to_str()))};
+                            div().absolute().left_0().right_0().top(px(row.top)).h(px(row.height))
+                                .px_2().flex().items_center().gap_2().overflow_hidden()
+                                .when(row.selected,|item|item.bg(rgb(SELECTED)))
+                                .text_color(rgb(if row.selected{SELECTION_TEXT}else{TEXT}))
+                                .child(icon(glyph,if row.selected{SELECTION_TEXT}else{tint}))
+                                .child(div().min_w_0().truncate().text_size(px(ui::BODY_TEXT)).child(row.name))
+                        }))
                 }))
                 .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
@@ -1687,6 +1730,7 @@ impl Explorer {
                 self.motion.lists.remove(&motion_key);
             }
             if indices.is_empty() {
+                if folder==self.pane_path(side){self.motion.spatial.remove(&side);}
                 return column.child(
                     div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
                         .text_color(rgb(TEXT_DIM)).text_size(px(12.))
@@ -1714,6 +1758,10 @@ impl Explorer {
                 }else{self.motion.spatial.remove(&side);None}
             }else{None};
             let handle = self.scroll_handle(side, &folder);
+            if let Some(spatial)=self.motion.spatial.get(&side) {
+                let offset=handle.0.borrow().base_handle.offset();
+                spatial.observe_scroll(crate::spatial_motion::Position{x:offset.x/px(1.),y:offset.y/px(1.)});
+            }
             let manual_mode = self.manual_orders.enabled(&folder);
             let tiles = list_mode && self.thumbs_view(side);
             let columns = if tiles { crate::thumbs::columns(self.pane_width_for(side)) } else { 1 };
@@ -1868,6 +1916,8 @@ impl Explorer {
         let (picture_size, tile_h, tile_w) = (crate::thumbs::picture(), crate::thumbs::tile_height(), crate::thumbs::tile_width());
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
+        let morph=self.motion.spatial.get(&side).filter(|_|folder==self.pane_path(side))
+            .and_then(|m|m.shared_pose(&path,std::time::Instant::now()));
         let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
         let picture = if is_dir { None } else { self.thumb(&path, cx) };
@@ -1875,7 +1925,7 @@ impl Explorer {
         let right_target = is_dir && self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&path);
         let renaming = self.renaming && focused_pane && self.selected.as_ref() == Some(&path);
         let mut tile = div().id(SharedString::from(format!("tile-{}", path.display())))
-            .w(px(tile_w)).h(px(tile_h)).flex_none().p_1().flex().flex_col().items_center().gap_1()
+            .w(px(morph.as_ref().map_or(tile_w,|m|m.size.x))).h(px(morph.as_ref().map_or(tile_h,|m|m.size.y))).flex_none().p_1().flex().flex_col().items_center().gap_1()
             .rounded(px(4.)).cursor_pointer().text_size(px(12.)).text_color(rgb(if entry.hidden { TEXT_MUTED } else { TEXT }))
             .when(selected, |tile| tile.bg(rgb(if focused_pane { ACCENT_SOFT } else { HOVER })))
             .when(!selected && right_target, |tile| tile.bg(rgb(ACCENT_SOFT)))
@@ -1887,7 +1937,11 @@ impl Explorer {
                 let color=if committed {accent_alpha((strength*85.) as u8)}else{text_alpha((strength*40.) as u8)};
                 item.child(div().absolute().inset_0().rounded(px(ui::CONTROL_RADIUS)).bg(color))
             })
-            .child(div().relative().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
+            ;
+        if let Some(pose)=&morph {
+            tile=tile.child(shared_visual(entry,pose,if entry.hidden {TEXT_MUTED}else{TEXT},tint));
+        } else {
+        tile=tile.child(div().relative().w_full().h(px(picture_size)).flex_none().flex().items_center().justify_center()
                 .child(match picture {
                     Some(file) => img(file).max_w(px(tile_w - 12.)).max_h(px(picture_size)).object_fit(ObjectFit::Contain)
                         // A file that only looks like a picture keeps its icon.
@@ -1907,6 +1961,7 @@ impl Explorer {
                 .when_some(label, |name, dot| name.child(div().h(px(16.)).flex().items_center().child(dot)))
                 .child(div().min_w_0().text_center().line_clamp(2).line_height(px(16.)).child(entry.name.clone())))
         };
+        }
         if renaming {
             return tile.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         }
@@ -1966,6 +2021,8 @@ impl Explorer {
     fn row(&self, entry: &Entry, folder: &Path, side: GroupId, position: usize, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
+        let morph=self.motion.spatial.get(&side).filter(|_|folder==self.pane_path(side))
+            .and_then(|m|m.shared_pose(&path,std::time::Instant::now()));
         let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
         // The selection sliding to this row: the part of it over each row
@@ -1997,7 +2054,7 @@ impl Explorer {
         let metadata_text = ink_color(TEXT_MUTED);
         let tint = ink_color(tint);
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
-            .w_full().h(px(row_height())).pl(px(6.)).pr_2().flex().items_center().gap_2()
+            .w_full().h(px(morph.as_ref().map_or(row_height(),|m|m.size.y))).pl(px(6.)).pr_2().flex().items_center().gap_2()
             .border_l_2().border_color(rgb(bg.unwrap_or(base)))
             .text_size(px(13.)).text_color(rgb(text)).cursor_pointer()
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
@@ -2014,8 +2071,11 @@ impl Explorer {
             })
             // An older version sits indented under the newest one.
             .when(matches!(stack, Some(Stacked::Member { .. })), |row| row.child(div().w(px(16.)).flex_none()))
-            .group("file-row")
-            .child(match self.system_icon(&path).filter(|_| !is_dir) {
+            .group("file-row");
+        if let Some(pose)=&morph {
+            row=row.child(shared_visual(entry,pose,text,tint));
+        } else {
+        row=row.child(match self.system_icon(&path).filter(|_| !is_dir) {
                 // The program's own icon, as in Explorer.
                 Some(image) => img(image).size(px(16.)).flex_none().when(entry.hidden && !selected, |image| image.opacity(0.55)).into_any_element(),
                 None if is_dir && self.favorite_stars => {
@@ -2115,6 +2175,7 @@ impl Explorer {
                         .child(if is_dir { self.folder_size_label(&entry.path) } else { format_size(entry.size) })));
         } else if is_dir {
             row = row.child(small_icon("fm/chevron-right.svg", ink_color(TEXT_DIM)));
+        }
         }
         if is_dir {
             let internal_target = path.clone();

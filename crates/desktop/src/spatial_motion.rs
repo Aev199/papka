@@ -34,7 +34,39 @@ impl Geometry {
 }
 
 #[derive(Clone, Copy)]
-struct Slot { natural: Geometry, shown: Geometry, directory: bool }
+struct Slot { natural: Geometry, shown: Geometry, directory: bool, content:Option<Content> }
+
+/// Separate icon and label tracks inside the moving live item. Only bounded
+/// geometry is retained; no image assets, live controls or filesystem work.
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub(crate) struct Content {
+    pub icon:Position, pub icon_size:f32,
+    pub name:Position, pub name_width:f32, pub font:f32,
+}
+impl Content {
+    pub(crate) fn layout(size:Position,label_chars:usize)->Self {
+        let tile=size.y>48.;
+        let font=if tile{12.}else{13.};
+        let label=(label_chars.min(120) as f32*font*0.55).min((size.x-40.).max(1.));
+        if tile {
+            let picture=(size.y-52.).max(16.);let icon_size=(picture/2.).round();
+            Self{icon:Position{x:(size.x-icon_size)/2.,y:4.+(picture-icon_size)/2.},icon_size,
+                name:Position{x:(size.x-label)/2.,y:picture+8.},name_width:label,font}
+        } else {
+            Self{icon:Position{x:8.,y:(size.y-16.)/2.},icon_size:16.,
+                name:Position{x:32.,y:(size.y-16.)/2.},name_width:label,font}
+        }
+    }
+    fn mix(self,target:Self,remaining:f32)->Self {
+        let value=|a:f32,b:f32|b+(a-b)*remaining;
+        Self{icon:target.icon.plus(self.icon.minus(target.icon).scale(remaining)),
+            icon_size:value(self.icon_size,target.icon_size),
+            name:target.name.plus(self.name.minus(target.name).scale(remaining)),
+            name_width:value(self.name_width,target.name_width),font:value(self.font,target.font)}
+    }
+}
+#[derive(Clone,Copy)]
+pub(crate) struct SharedPose {pub size:Position,pub content:Content}
 
 /// Lightweight departure representation: never retains a live row or handler.
 pub(crate) struct Ghost {
@@ -53,6 +85,7 @@ struct State {
     source: HashMap<PathBuf, Slot>,
     viewport: Option<Geometry>,
     source_viewport: Option<Geometry>,
+    scroll:Option<Position>,
     started: Option<Instant>,
 }
 
@@ -62,7 +95,7 @@ pub(crate) struct SpatialMotion(Rc<RefCell<State>>);
 /// A render-frame token prevents delayed callbacks from a replaced view from
 /// polluting the current snapshot.
 #[derive(Clone)]
-pub(crate) struct Frame { state: SpatialMotion, id: u64 }
+pub(crate) struct Frame { state: SpatialMotion, id: u64, at:Instant }
 
 impl SpatialMotion {
     pub(crate) fn begin(&self, folder: &Path, now: Instant) {
@@ -71,6 +104,7 @@ impl SpatialMotion {
             state.current.clone()
         } else { HashMap::new() };
         state.source_viewport = state.viewport;
+        state.scroll=None;
         state.started = (!state.source.is_empty()).then_some(now);
         state.current.clear();
         state.previous.clear();
@@ -95,6 +129,7 @@ impl SpatialMotion {
             state.source.clear();
             state.started = None;
             state.viewport = None;
+            state.scroll=None;
             state.source_viewport = None;
         }
         if !animate || state.started.is_some_and(|start| now.saturating_duration_since(start) >= diagnostic_span(ITEM_REFLOW)) {
@@ -104,13 +139,47 @@ impl SpatialMotion {
         }
         state.previous = std::mem::take(&mut state.current);
         state.frame_id = state.frame_id.wrapping_add(1);
-        (Frame { state: self.clone(), id: state.frame_id }, state.started.is_some())
+        (Frame { state: self.clone(), id: state.frame_id, at:now }, state.started.is_some())
     }
 }
 
 impl SpatialMotion {
+    pub(crate) fn measuring(&self)->bool {
+        let state=self.0.borrow();
+        state.started.is_some() && state.previous.is_empty() && !state.source.is_empty()
+    }
+
+    pub(crate) fn shared_pose(&self,path:&Path,now:Instant)->Option<SharedPose> {
+        let state=self.0.borrow();
+        let start=state.started?;
+        let source=state.source.get(path)?;
+        let target=state.previous.get(path)?;
+        let chars=path.file_name().map_or(1,|s|s.to_string_lossy().chars().count());
+        let remaining=1.-ease_out(now.saturating_duration_since(start),diagnostic_span(ITEM_REFLOW));
+        if remaining<=0. || source.shown.origin.minus(target.natural.origin).x.abs()
+            .max(source.shown.origin.minus(target.natural.origin).y.abs())>MAX_TRAVEL {return None;}
+        let size=source.shown.mix(target.natural,remaining).size;
+        let from=source.content.unwrap_or_else(||Content::layout(source.shown.size,chars));
+        Some(SharedPose{size,content:from.mix(Content::layout(target.natural.size,chars),remaining)})
+    }
+
+    pub(crate) fn observe_scroll(&self,offset:Position) {
+        let mut state=self.0.borrow_mut();
+        if state.started.is_some() && state.scroll.is_some_and(|old|
+            (old.x-offset.x).abs().max((old.y-offset.y).abs())>0.75) {
+            state.started=None;state.source.clear();state.source_viewport=None;
+        }
+        state.scroll=Some(offset);
+    }
+
     pub(crate) fn viewport(&self, geometry: Geometry) {
-        if geometry.valid() { self.0.borrow_mut().viewport = Some(geometry); }
+        if !geometry.valid(){return;}
+        let mut state=self.0.borrow_mut();
+        if state.source_viewport.is_some_and(|old|
+            (old.size.x-geometry.size.x).abs().max((old.size.y-geometry.size.y).abs())>1.) {
+            state.started=None;state.source.clear();state.source_viewport=None;
+        }
+        state.viewport=Some(geometry);
     }
 
     pub(crate) fn ghosts(&self, folder: &Path, now: Instant) -> Vec<Ghost> {
@@ -120,7 +189,7 @@ impl SpatialMotion {
         if state.folder != folder || (viewport.size.x-source_viewport.size.x).abs()>1.
             || (viewport.size.y-source_viewport.size.y).abs()>1. { return Vec::new(); }
         // Wait until the first destination measurement is available.
-        if state.previous.is_empty() {return Vec::new();}
+        let measuring=state.previous.is_empty();
         let remaining = 1.-ease_out(now.saturating_duration_since(start),diagnostic_span(ITEM_REFLOW));
         if remaining <= 0. {return Vec::new();}
         let mut ghosts: Vec<_> = state.source.iter()
@@ -131,7 +200,7 @@ impl SpatialMotion {
                 let p=geometry.origin;let size=geometry.size;
                 if p.x>=viewport.size.x || p.y>=viewport.size.y || p.x+size.x<=0. || p.y+size.y<=0. {return None;}
                 geometry.origin.y -= 5.*(1.-remaining);
-                Some(Ghost { path:path.clone(),geometry,directory:slot.directory,alpha:0.65*remaining })
+                Some(Ghost { path:path.clone(),geometry,directory:slot.directory,alpha:if measuring{1.}else{0.65*remaining} })
             }).collect();
         ghosts.sort_by(|a,b|a.geometry.origin.y.total_cmp(&b.geometry.origin.y)
             .then_with(||a.geometry.origin.x.total_cmp(&b.geometry.origin.x)).then_with(||a.path.cmp(&b.path)));
@@ -167,7 +236,14 @@ impl Frame {
         if state.frame_id != self.id || (state.current.len() >= LIMIT && !state.current.contains_key(&path)) { return; }
         if !natural.valid() { return; }
         let shown = pose.map_or(natural, |(offset, size)| Geometry { origin: natural.origin.plus(offset), size });
-        state.current.insert(path, Slot { natural, shown, directory });
+        let chars=path.file_name().map_or(1,|s|s.to_string_lossy().chars().count());
+        let remaining=state.started.map(|start|1.-ease_out(self.at.saturating_duration_since(start),diagnostic_span(ITEM_REFLOW)));
+        let content=remaining.and_then(|remaining| {
+            let source=state.source.get(&path)?;
+            let from=source.content.unwrap_or_else(||Content::layout(source.shown.size,chars));
+            Some(from.mix(Content::layout(natural.size,chars),remaining))
+        });
+        state.current.insert(path, Slot { natural, shown, directory,content });
     }
 }
 
@@ -178,6 +254,31 @@ mod tests {
     fn path(s: &str) -> PathBuf { PathBuf::from(s) }
     fn rect(origin: Position) -> Geometry { Geometry { origin, size: p(200.,24.) } }
     fn offset(frame: &Frame, path: &Path, now: Instant) -> Position { frame.pose(path, now).map_or(Position::default(), |v|v.0) }
+
+    #[test]
+    fn icon_and_label_tracks_interpolate_independently_and_keep_endpoints() {
+        let row=Content::layout(p(400.,24.),12);
+        let tile=Content::layout(p(132.,148.),12);
+        assert_eq!(row.mix(tile,1.),row);assert_eq!(row.mix(tile,0.),tile);
+        let mid=row.mix(tile,0.5);
+        assert!(mid.icon_size>row.icon_size && mid.icon_size<tile.icon_size);
+        assert!(mid.name.y>row.name.y && mid.name.y<tile.name.y);
+        assert_ne!(mid.icon.y-row.icon.y,mid.name.y-row.name.y);
+        assert_eq!(mid.mix(row,1.),mid);
+    }
+
+    #[test]
+    fn scroll_and_viewport_changes_cancel_the_shared_transition() {
+        let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
+        let (old,_)=m.frame(folder,now,true);
+        old.record(path("a"),rect(p(10.,20.)),None);
+        m.viewport(Geometry{origin:p(0.,0.),size:p(400.,300.)});
+        m.begin(folder,now);assert!(m.active());
+        m.observe_scroll(p(0.,0.));m.observe_scroll(p(0.,-30.));assert!(!m.active());
+        let (frame,_)=m.frame(folder,now,true);frame.record(path("a"),rect(p(10.,20.)),None);
+        m.begin(folder,now);assert!(m.active());
+        m.viewport(Geometry{origin:p(0.,0.),size:p(500.,300.)});assert!(!m.active());
+    }
 
     #[test]
     fn matched_items_move_and_unmatched_items_do_not() {
@@ -250,7 +351,7 @@ mod tests {
         old.record(path("offscreen"),rect(p(20.,800.)),None);
         m.begin(folder,now);
         let (first,_)=m.frame(folder,now,true);
-        assert!(m.ghosts(folder,now).is_empty());
+        assert_eq!(m.ghosts(folder,now).len(),2);
         first.record(path("matching"),rect(p(40.,90.)),None);
         let (_next,_)=m.frame(folder,now,true);
         let ghosts=m.ghosts(folder,now);
