@@ -2,7 +2,7 @@ name: Windows portable EXE (manual)
 
 on:
   push:
-    branches: [feat/native-gpui-foundation]
+    branches: [feat/native-gpui-foundation, feat/ui-motion-2]
     paths: ['.github/beta-release-request.txt']
   workflow_dispatch:
     inputs:
@@ -46,7 +46,15 @@ jobs:
       - name: Stamp version
         run: |
           $commit = "${{ github.sha }}".Substring(0, 7)
-          "PAPKA_VERSION=0.1.${{ github.run_number }}" >> $env:GITHUB_ENV
+          $version = "0.1.${{ github.run_number }}"
+          if ("${{ github.event_name }}" -eq "push") {
+            $requested = @(Get-Content ".github/beta-release-request.txt" -Encoding UTF8 |
+              Where-Object { $_ -match '^version=0\.1\.[0-9]+$' } |
+              ForEach-Object { $_.Substring(8) })
+            if ($requested.Count -gt 1) { throw "Ambiguous requested version" }
+            if ($requested.Count -eq 1) { $version = $requested[0] }
+          }
+          "PAPKA_VERSION=$version" >> $env:GITHUB_ENV
           "PAPKA_COMMIT=$commit" >> $env:GITHUB_ENV
 
       - name: Install stable Rust
@@ -209,6 +217,13 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             Write-Warning "Release $tag already exists; nothing published."
             exit 0
+          }
+          # Push requests can carry the reviewed release notes as note= lines.
+          if (-not $env:NOTES.Trim() -and "${{ github.event_name }}" -eq "push") {
+            $requestNotes = @(Get-Content ".github/beta-release-request.txt" -Encoding UTF8 |
+              Where-Object { $_.StartsWith("note=") } | ForEach-Object { $_.Substring(5).Trim() } |
+              Where-Object { $_ })
+            if ($requestNotes.Count -gt 0) { $env:NOTES = $requestNotes -join ";" }
           }
           if ($env:NOTES.Trim()) {
             $notes = @($env:NOTES -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
