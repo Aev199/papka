@@ -31,6 +31,7 @@ fn main(){
     landing.viewport(1,landing_motion::Rect{x:0.,y:0.,w:400.,h:300.});
     landing.begin(1,folder,&[path.clone()],(100.,100.),now,true);
     landing.record(1,folder,&path,landing_motion::Rect{x:20.,y:30.,w:200.,h:24.});
+    assert_eq!(landing.ghosts(1,folder,now).len(),1);
     let end=now+landing_motion::SPAN*factor;
     assert!(landing.advance(end-Duration::from_millis(1),true));assert!(!landing.advance(end,true));
     use spatial_motion::{Geometry,Position};

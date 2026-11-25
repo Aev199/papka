@@ -8,7 +8,7 @@ impl Rect {
     fn valid(self)->bool {[self.x,self.y,self.w,self.h].iter().all(|v|v.is_finite())&&self.w>0.&&self.h>0.}
 }
 struct Flight {
-    folder:PathBuf,allowed:HashSet<PathBuf>,origin:(f32,f32),started:Instant,
+    folder:PathBuf,allowed:HashSet<PathBuf>,origin:(f32,f32),created:Instant,started:Option<Instant>,
     targets:HashMap<PathBuf,Rect>,committed:bool,
 }
 #[derive(Default)]
@@ -28,7 +28,7 @@ impl Landings {
         if !origin.0.is_finite()||!origin.1.is_finite(){return;}
         let allowed=paths.iter().take(LIMIT).cloned().collect::<HashSet<_>>();
         if allowed.is_empty(){return;}
-        self.0.borrow_mut().flights.insert(side,Flight{folder:folder.to_path_buf(),allowed,origin,started:now,targets:HashMap::new(),committed});
+        self.0.borrow_mut().flights.insert(side,Flight{folder:folder.to_path_buf(),allowed,origin,created:now,started:None,targets:HashMap::new(),committed});
     }
     pub(crate) fn cancel(&self,side:u64){self.0.borrow_mut().flights.remove(&side);}
     pub(crate) fn record(&self,side:u64,folder:&Path,path:&Path,rect:Rect){
@@ -53,13 +53,18 @@ impl Landings {
     }
     pub(crate) fn advance(&self,now:Instant,animate:bool)->bool{
         let mut state=self.0.borrow_mut();
-        state.flights.retain(|_,f|animate&&now.saturating_duration_since(f.started)<crate::motion_policy::diagnostic_span(SPAN));
+        state.flights.retain(|_,f|animate&&now.saturating_duration_since(f.started.unwrap_or(f.created))<crate::motion_policy::diagnostic_span(SPAN));
         !state.flights.is_empty()
     }
     pub(crate) fn ghosts(&self,side:u64,folder:&Path,now:Instant)->Vec<Ghost>{
-        let state=self.0.borrow();let Some(f)=state.flights.get(&side).filter(|f|f.folder==folder)else{return Vec::new();};
-        let Some(view)=state.viewports.get(&side)else{return Vec::new();};
-        let t=(now.saturating_duration_since(f.started).as_secs_f32()/crate::motion_policy::diagnostic_span(SPAN).as_secs_f32()).clamp(0.,1.);
+        let mut state=self.0.borrow_mut();
+        let Some(view)=state.viewports.get(&side).copied()else{return Vec::new();};
+        let Some(f)=state.flights.get_mut(&side).filter(|f|f.folder==folder)else{return Vec::new();};
+        if !f.targets.values().any(|target|target.x+target.w>view.x&&target.x<view.x+view.w
+            &&target.y+target.h>view.y&&target.y<view.y+view.h){return Vec::new();}
+        if f.started.is_none() && now.saturating_duration_since(f.created)>=crate::motion_policy::diagnostic_span(SPAN){return Vec::new();}
+        let started=*f.started.get_or_insert(now);
+        let t=(now.saturating_duration_since(started).as_secs_f32()/crate::motion_policy::diagnostic_span(SPAN).as_secs_f32()).clamp(0.,1.);
         if t>=1.{return Vec::new();}
         let t=crate::motion_policy::ease_out_fraction(t);
         let mut result=f.targets.iter().filter_map(|(path,target)|{
@@ -89,6 +94,18 @@ mod tests {
         assert!(l.ghosts(1,Path::new("b"),now).is_empty());assert!(l.ghosts(1,folder,now+SPAN).is_empty());
         assert!(!l.advance(now+SPAN,true));
     }
+    #[test]
+    fn delayed_target_measurement_starts_at_the_cursor_on_its_first_visible_frame(){
+        let now=Instant::now();let l=Landings::default();let folder=Path::new("a");let path=folder.join("file");
+        l.viewport(1,rect());l.begin(1,folder,&[path.clone()],(100.,100.),now,true);
+        assert!(l.ghosts(1,folder,now).is_empty());
+        l.record(1,folder,&path,Rect{x:20.,y:30.,w:200.,h:24.});
+        let visible=now+Duration::from_millis(50);
+        assert_eq!(l.ghosts(1,folder,visible)[0].rect.x,114.);
+        assert!(l.advance(now+SPAN+Duration::from_millis(10),true));
+        assert!(!l.advance(visible+SPAN,true));
+    }
+
     #[test]
     fn switching_tabs_with_the_same_folder_drops_the_old_flight(){
         let now=Instant::now();let l=Landings::default();let folder=Path::new("a");let path=folder.join("file");
