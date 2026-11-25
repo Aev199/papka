@@ -124,6 +124,7 @@ impl SpatialMotion {
                 let chars=path.file_name().map_or(1,|s|s.to_string_lossy().chars().count());
                 let mut content=slot.content.unwrap_or_else(||Content::layout(slot.shown.size,chars));
                 content.name=label.origin.minus(slot.shown.origin);content.name_width=label.size.x;content.name_height=label.size.y;
+                if slot.content.is_none() && slot.shown.size.y<=48. {content.icon.x=(content.name.x-24.).max(0.);}
                 slot.content=Some(content);
             }
         }
@@ -202,6 +203,7 @@ impl SpatialMotion {
         let mut to=Content::layout(target.natural.size,chars);
         if let Some(label)=state.target_labels.get(path) {
             to.name=label.origin.minus(target.natural.origin);to.name_width=label.size.x;to.name_height=label.size.y;
+            if target.natural.size.y<=48. {to.icon.x=(to.name.x-24.).max(0.);}
         }
         Some(SharedPose{size,content:from.mix(to,remaining)})
     }
@@ -285,7 +287,12 @@ impl Frame {
         let content=remaining.and_then(|remaining| {
             let source=state.source.get(&path)?;
             let from=source.content.unwrap_or_else(||Content::layout(source.shown.size,chars));
-            Some(from.mix(Content::layout(natural.size,chars),remaining))
+            let mut to=Content::layout(natural.size,chars);
+            if let Some(label)=state.target_labels.get(&path) {
+                to.name=label.origin.minus(natural.origin);to.name_width=label.size.x;to.name_height=label.size.y;
+                if natural.size.y<=48. {to.icon.x=(to.name.x-24.).max(0.);}
+            }
+            Some(from.mix(to,remaining))
         });
         state.current.insert(path, Slot { natural, shown, directory,content });
     }
@@ -298,6 +305,20 @@ mod tests {
     fn path(s: &str) -> PathBuf { PathBuf::from(s) }
     fn rect(origin: Position) -> Geometry { Geometry { origin, size: p(200.,24.) } }
     fn offset(frame: &Frame, path: &Path, now: Instant) -> Position { frame.pose(path, now).map_or(Position::default(), |v|v.0) }
+
+    #[test]
+    fn version_member_indent_is_preserved_in_the_shared_icon_track(){
+        let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
+        let (old,_)=m.frame(folder,now,true);
+        old.record(path("a"),Geometry{origin:p(100.,80.),size:p(400.,24.)},None);
+        m.record_label(m.frame_id(),Path::new("a"),Geometry{origin:p(156.,84.),size:p(50.,16.)});
+        m.begin(folder,now);
+        let (first,_)=m.frame(folder,now,true);
+        first.record(path("a"),Geometry{origin:p(20.,30.),size:p(132.,148.)},None);
+        let (_next,_)=m.frame(folder,now,true);
+        let pose=m.shared_pose(Path::new("a"),now).unwrap();
+        assert_eq!(pose.content.name.x,56.);assert_eq!(pose.content.icon.x,32.);
+    }
 
     #[test]
     fn shared_labels_use_measured_bounds_instead_of_character_estimates() {
