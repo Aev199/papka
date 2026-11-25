@@ -82,6 +82,7 @@ struct State {
     folder: PathBuf,
     frame_id: u64,
     sampled_at:Option<Instant>,
+    tab_key:Option<(usize,usize)>,
     current: HashMap<PathBuf, Slot>,
     previous: HashMap<PathBuf, Slot>,
     source: HashMap<PathBuf, Slot>,
@@ -102,6 +103,16 @@ pub(crate) struct SpatialMotion(Rc<RefCell<State>>);
 pub(crate) struct Frame { state: SpatialMotion, id: u64, at:Instant }
 
 impl SpatialMotion {
+    pub(crate) fn scope(&self,key:(usize,usize)){
+        let mut state=self.0.borrow_mut();
+        if state.tab_key.is_some_and(|old|old!=key) {
+            state.started=None;state.source.clear();state.current.clear();state.previous.clear();
+            state.labels.clear();state.target_labels.clear();state.source_viewport=None;state.scroll=None;
+            state.frame_id=state.frame_id.wrapping_add(1);
+        }
+        state.tab_key=Some(key);
+    }
+
     pub(crate) fn begin(&self, folder: &Path, now: Instant) {
         let mut state = self.0.borrow_mut();
         state.source = if state.folder == folder {
@@ -316,6 +327,16 @@ mod tests {
         assert!(mid.name.y>row.name.y && mid.name.y<tile.name.y);
         assert_ne!(mid.icon.y-row.icon.y,mid.name.y-row.name.y);
         assert_eq!(mid.mix(row,1.),mid);
+    }
+
+    #[test]
+    fn same_folder_in_a_different_tab_cannot_reuse_the_old_geometry(){
+        let now=Instant::now();let folder=Path::new("folder");let m=SpatialMotion::default();
+        m.scope((0,2));let (old,_)=m.frame(folder,now,true);
+        old.record(path("a"),rect(p(100.,80.)),None);m.begin(folder,now);assert!(m.active());
+        m.scope((1,2));assert!(!m.active());
+        old.record(path("a"),rect(p(100.,80.)),None);
+        m.begin(folder,now);assert!(!m.active());
     }
 
     #[test]
