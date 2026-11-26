@@ -108,7 +108,7 @@ impl Explorer {
             if groups.entry((target, replace)).or_default().add(&from.join(&row.relative)).is_err() { skipped += 1; }
         }
         self.transfers.queue.extend(groups.into_iter().filter(|(_, zone)| !zone.items().is_empty())
-            .map(|((target, replace), zone)| Transfer { zone, target, copy: true, keep_both: false, replace, restore_failed: false }));
+            .map(|((target, replace), zone)| Transfer { zone, target, copy: true, keep_both: false, replace, restore_failed: false, import:None }));
         if skipped > 0 { self.status = format!("Пропущено недоступных: {skipped}"); }
         self.start_queued(cx);
     }

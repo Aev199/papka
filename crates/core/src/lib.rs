@@ -81,3 +81,5 @@ pub mod inbox_preview;
 pub mod word_text;
 
 pub mod transfer_access;
+
+pub mod virtual_clipboard;

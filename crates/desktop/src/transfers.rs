@@ -16,6 +16,7 @@ pub(crate) struct Transfer {
     pub(crate) replace: bool,
     /// Items came from the Drop Zone and go back there if not done.
     pub(crate) restore_failed: bool,
+    pub(crate) import: Option<Arc<filemanager_core::virtual_clipboard::StagedFiles>>,
 }
 
 /// A failed job retains its own destination and conflict policy.
@@ -26,6 +27,7 @@ pub(crate) struct Retry {
     pub(crate) copy: bool,
     pub(crate) keep_both: bool,
     pub(crate) replace: bool,
+    pub(crate) import: Option<Arc<filemanager_core::virtual_clipboard::StagedFiles>>,
 }
 
 /// The running copy or move as its panel shows it.
@@ -118,6 +120,7 @@ pub(crate) struct Running {
     pub fraction:f64,
     accesses:Vec<filemanager_core::transfer_access::Access>,
     skipped:Option<String>,
+    import:Option<Arc<filemanager_core::virtual_clipboard::StagedFiles>>,
 }
 impl Transfer {
     fn accesses(&self)->Vec<filemanager_core::transfer_access::Access> {
@@ -178,13 +181,13 @@ impl Transfers {
         self.queue.remove(index)
     }
 
-    pub(crate) fn start_job(&mut self,action:&'static str,zone:&DropZone,target:PathBuf,copy:bool,numbered:bool,skipped:Option<String>)->u64 {
+    pub(crate) fn start_job(&mut self,action:&'static str,zone:&DropZone,target:PathBuf,copy:bool,numbered:bool,skipped:Option<String>,import:Option<Arc<filemanager_core::virtual_clipboard::StagedFiles>>)->u64 {
         self.sequence=self.sequence.wrapping_add(1);
         let id=self.sequence;
         self.begin(action,target.clone());
         let live=self.live.as_ref().unwrap().clone();
         self.running.push(Running{id,live,control:Arc::new(CopyControl::default()),fraction:0.,
-            accesses:filemanager_core::transfer_access::transfer(zone.items(),&target,copy,numbered),skipped});
+            accesses:filemanager_core::transfer_access::transfer(zone.items(),&target,copy,numbered),skipped,import});
         self.refresh_running();
         id
     }
@@ -194,6 +197,10 @@ impl Transfers {
         self.live=self.running.first().map(|job|job.live.clone());
         self.control=self.running.first().map(|job|job.control.clone());
         self.fraction=(!self.running.is_empty()).then(||self.running.iter().map(|job|job.fraction).sum::<f64>()/self.running.len() as f64);
+    }
+
+    pub(crate) fn import_for(&self,id:u64)->Option<Arc<filemanager_core::virtual_clipboard::StagedFiles>> {
+        self.running.iter().find(|job|job.id==id).and_then(|job|job.import.clone())
     }
 
     pub(crate) fn complete_job(&mut self,id:u64)->Option<String> {
@@ -272,20 +279,20 @@ mod tests {
     use super::*;
 
     fn transfer(target: &str) -> Transfer {
-        Transfer { zone: DropZone::default(), target: target.into(), copy: true, keep_both: false, replace: false, restore_failed: false }
+        Transfer { zone: DropZone::default(), target: target.into(), copy: true, keep_both: false, replace: false, restore_failed: false, import:None }
     }
 
     #[test]
     fn failed_jobs_keep_their_targets_and_policy_across_later_results() {
         let mut state = Transfers::default();
         let failure = Failure { path: "a/file".into(), error: "нет доступа".into() };
-        state.retries.push(Retry { items: vec!["a/file".into()], target: "first".into(), copy: true, keep_both: true, replace: false });
+        state.retries.push(Retry { items: vec!["a/file".into()], target: "first".into(), copy: true, keep_both: true, replace: false, import:None });
         state.finish("Ошибка".into(), "first".into(), vec![failure.clone()]);
         state.begin("Перемещение", "second".into());
         state.finish("Успешно".into(), "second".into(), Vec::new());
         assert_eq!(state.retry_count(), 1);
         assert_eq!(state.report.as_ref().unwrap().targets, [PathBuf::from("first")]);
-        state.retries.push(Retry { items: vec!["b/file".into()], target: "second".into(), copy: false, keep_both: false, replace: true });
+        state.retries.push(Retry { items: vec!["b/file".into()], target: "second".into(), copy: false, keep_both: false, replace: true, import:None });
         state.finish("Ошибка".into(), "second".into(), vec![failure]);
         assert_eq!(state.retry_count(), 2);
         assert_eq!(state.report.as_ref().unwrap().targets.len(), 2);
@@ -435,7 +442,7 @@ mod parallel_tests {
         fn transfer(&self,name:&str,target:&str,copy:bool)->Transfer {
             let source=self.0.join(name);std::fs::write(&source,b"data").unwrap();
             let mut zone=DropZone::default();zone.add(&source).unwrap();
-            Transfer{zone,target:self.0.join(target),copy,keep_both:false,replace:false,restore_failed:false}
+            Transfer{zone,target:self.0.join(target),copy,keep_both:false,replace:false,restore_failed:false,import:None}
         }
     }
     impl Drop for Temp {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
@@ -443,9 +450,9 @@ mod parallel_tests {
     fn independent_jobs_start_by_default_and_completion_preserves_other_control() {
         let temp=Temp::new();let mut state=Transfers::default();
         let a=temp.transfer("a","one",true);let b=temp.transfer("b","two",false);
-        let first=state.start_job("Копирование",&a.zone,a.target.clone(),true,false,None);
+        let first=state.start_job("Копирование",&a.zone,a.target.clone(),true,false,None,None);
         assert!(!state.must_wait(&b));
-        let second=state.start_job("Перемещение",&b.zone,b.target.clone(),false,false,None);
+        let second=state.start_job("Перемещение",&b.zone,b.target.clone(),false,false,None,None);
         let second_control=state.running[1].control.clone();
         state.running[0].control.set_paused(true);
         assert!(!second_control.is_paused());assert!(!state.all_paused());
@@ -463,7 +470,7 @@ mod parallel_tests {
         let temp=Temp::new();let mut state=Transfers::default();
         let a=temp.transfer("a","one",false);let blocked=temp.transfer("a","three",true);
         let independent=temp.transfer("b","two",true);
-        let id=state.start_job("Перемещение",&a.zone,a.target.clone(),false,false,None);
+        let id=state.start_job("Перемещение",&a.zone,a.target.clone(),false,false,None,None);
         state.running[0].control.set_paused(true);
         assert!(state.must_wait(&blocked));
         state.queue.push_back(blocked);state.queue.push_back(independent);

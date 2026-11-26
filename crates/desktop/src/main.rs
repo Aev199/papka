@@ -1003,6 +1003,13 @@ impl Explorer {
     /// Ctrl+V: files from the clipboard (ours or Explorer's) are copied, or
     /// moved after a cut, into the focused pane via the audited queue.
     fn clipboard_paste(&mut self, cx: &mut Context<Self>) {
+        let target=self.pane_path(self.active_side());
+        if self.refuse_in_archive(&target,cx){return;}
+        match filemanager_core::virtual_clipboard::capture() {
+            Ok(Some(ticket))=>{self.paste_virtual_files(ticket,target,cx);return;}
+            Ok(None)=>{},
+            Err(error)=>{self.status=format!("Буфер обмена недоступен: {error}");cx.notify();return;}
+        }
         let files = match clipboard::read_files() {
             Ok(Some(files)) => files,
             Ok(None) => {
@@ -1023,7 +1030,29 @@ impl Explorer {
             // A cut is consumed once, as in Explorer.
             let _ = clipboard::write_files(&[], false);
         }
-        self.request_transfer(Transfer { zone, target, copy: !files.cut, keep_both: false, replace: false, restore_failed: false }, cx);
+        self.request_transfer(Transfer { zone, target, copy: !files.cut, keep_both: false, replace: false, restore_failed: false, import:None }, cx);
+    }
+
+    fn paste_virtual_files(&mut self,ticket:filemanager_core::virtual_clipboard::Ticket,target:PathBuf,cx:&mut Context<Self>) {
+        self.status="Получение файлов из RDP / виртуального буфера Windows…".into();
+        let owner=self.hwnd;
+        let task=cx.background_spawn(async move{ticket.materialize(owner)});
+        cx.spawn(async move|weak,cx|{
+            let result=task.await;
+            let _=weak.update(cx,|this,cx|{
+                match result {
+                    Ok(staged)=>{
+                        let staged=Arc::new(staged);
+                        if let Some(zone)=this.zone_of(staged.paths(),cx) {
+                            this.request_transfer(Transfer{zone,target,copy:true,keep_both:false,replace:false,
+                                restore_failed:false,import:Some(staged)},cx);
+                        }
+                    }
+                    Err(error)=>{this.status=format!("Не удалось получить файлы из буфера Windows: {error}");cx.notify();}
+                }
+            });
+        }).detach();
+        cx.notify();
     }
 
     /// Files dropped on a folder: copied, or moved when `copy` is false.
@@ -1159,7 +1188,7 @@ impl Explorer {
         // if the transfer does not finish.
         let staged = paths.iter().all(|path| self.zone.items().contains(path));
         if staged { self.zone.remove(paths); }
-        self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, replace: false, restore_failed: staged }, cx);
+        self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, replace: false, restore_failed: staged, import:None }, cx);
     }
 
     #[cfg(windows)]
@@ -1217,7 +1246,7 @@ impl Explorer {
         }
         let zone = std::mem::take(&mut self.zone);
         let target = self.browser.active().active().path.clone();
-        self.request_transfer(Transfer { zone, target, copy, keep_both: false, replace: false, restore_failed: true }, cx);
+        self.request_transfer(Transfer { zone, target, copy, keep_both: false, replace: false, restore_failed: true, import:None }, cx);
     }
 
     /// Checks a transfer before running it: copying into the items' own
@@ -1340,11 +1369,11 @@ impl Explorer {
     }
 
     fn execute_transfer(&mut self, transfer: Transfer, cx: &mut Context<Self>) {
-        let Transfer { zone, target, copy, keep_both, replace, restore_failed } = transfer;
+        let Transfer { zone, target, copy, keep_both, replace, restore_failed, import } = transfer;
         if copy {
-            self.run_copy(zone, target, keep_both, replace, restore_failed, cx);
+            self.run_copy(zone, target, keep_both, replace, restore_failed, import, cx);
         } else {
-            self.run_move(zone, target, keep_both, replace, restore_failed, cx);
+            self.run_move(zone, target, keep_both, replace, restore_failed, import, cx);
         }
     }
 
@@ -1459,7 +1488,7 @@ impl Explorer {
         }
     }
 
-    fn run_copy(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, cx: &mut Context<Self>) {
+    fn run_copy(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, import:Option<Arc<filemanager_core::virtual_clipboard::StagedFiles>>, cx: &mut Context<Self>) {
         let audit=match self.parallel_transfer_audit() {
             Ok(audit)=>audit,Err(error)=>{
                 if restore_failed {for path in zone.items(){let _=self.zone.add(path);}}
@@ -1468,7 +1497,7 @@ impl Explorer {
             }
         };
         let skipped=self.transfers.skipped_note.take();
-        let id=self.transfers.start_job("Копирование",&zone,target.clone(),true,keep_both,skipped);
+        let id=self.transfers.start_job("Копирование",&zone,target.clone(),true,keep_both,skipped,import);
         let control=self.transfers.running.iter().find(|job|job.id==id).unwrap().control.clone();
         self.status="Копирование…".into();
         self.start_job_progress(id,cx);
@@ -1497,9 +1526,10 @@ impl Explorer {
                         this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
+                let import=this.transfers.import_for(id);
                 let skipped_note=this.transfers.complete_job(id);
                 if errors > 0 && !zone.items().is_empty() {
-                    this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: true, keep_both, replace });
+                    this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: true, keep_both, replace, import:import.clone() });
                 }
                 this.load_directory(target.clone(), true, cx);
                 this.finish_transfer("Скопировано", ok, cancelled, target, failures, skipped_note, cx);
@@ -1516,7 +1546,7 @@ impl Explorer {
 
     /// Same-volume rename or verified cross-volume transfer. Each item is prepared again and
     /// journaled before any disk change.
-    fn run_move(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, cx: &mut Context<Self>) {
+    fn run_move(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, import:Option<Arc<filemanager_core::virtual_clipboard::StagedFiles>>, cx: &mut Context<Self>) {
         let audit=match self.parallel_transfer_audit() {
             Ok(audit)=>audit,Err(error)=>{
                 if restore_failed {for path in zone.items(){let _=self.zone.add(path);}}
@@ -1525,7 +1555,7 @@ impl Explorer {
             }
         };
         let skipped=self.transfers.skipped_note.take();
-        let id=self.transfers.start_job("Перемещение",&zone,target.clone(),false,keep_both,skipped);
+        let id=self.transfers.start_job("Перемещение",&zone,target.clone(),false,keep_both,skipped,import);
         let control=self.transfers.running.iter().find(|job|job.id==id).unwrap().control.clone();
         self.start_job_progress(id,cx);
         self.status="Перемещение…".into();
@@ -1558,9 +1588,10 @@ impl Explorer {
                         this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
+                let import=this.transfers.import_for(id);
                 let skipped_note=this.transfers.complete_job(id);
                 if failed > 0 && !zone.items().is_empty() {
-                    this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: false, keep_both, replace });
+                    this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: false, keep_both, replace, import:import.clone() });
                 }
                 this.load_directory(target.clone(), true, cx);
                 for source in &sources {
@@ -1898,7 +1929,7 @@ impl Explorer {
             missing += retry.items.iter().filter(|path| zone.add(path).is_err()).count();
             if zone.items().is_empty() { continue; }
             self.request_transfer(Transfer { zone, target: retry.target, copy: retry.copy,
-                keep_both: retry.keep_both, replace: retry.replace, restore_failed: false }, cx);
+                keep_both: retry.keep_both, replace: retry.replace, restore_failed: false, import:retry.import }, cx);
         }
         if missing > 0 { self.status = format!("Недоступно и пропущено: {missing}"); }
         cx.notify();
