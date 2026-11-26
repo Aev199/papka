@@ -1439,7 +1439,7 @@ impl Explorer {
     /// A copy or move ended: one short line below, and the panel with
     /// every error in full. A clean result leaves the screen by itself.
     fn finish_transfer(&mut self, done: &'static str, ok: usize, cancelled: usize, target: PathBuf,
-        failures: Vec<transfers::Failure>, cx: &mut Context<Self>) {
+        failures: Vec<transfers::Failure>, skipped_note:Option<String>, cx: &mut Context<Self>) {
         let title = transfers::report_title(done, ok, failures.len(), cancelled);
         // Items that did not get through flash red where they still are.
         self.motion.flash_as(motion::Flash::Failed, failures.iter().map(|failure| failure.path.clone()).collect::<Vec<_>>());
@@ -1450,7 +1450,7 @@ impl Explorer {
         } else {
             format!("{title}.")
         };
-        if let Some(note) = self.transfers.skipped_note.take() { self.status = format!("{} {note}.", self.status); }
+        if let Some(note) = skipped_note { self.status = format!("{} {note}.", self.status); }
         if let Some(id) = self.transfers.finish(title, target, failures) {
             cx.spawn(async move |weak, cx| {
                 cx.background_executor().timer(Duration::from_secs(6)).await;
@@ -1497,12 +1497,12 @@ impl Explorer {
                         this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
-                this.transfers.skipped_note=this.transfers.complete_job(id);
+                let skipped_note=this.transfers.complete_job(id);
                 if errors > 0 && !zone.items().is_empty() {
                     this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: true, keep_both, replace });
                 }
                 this.load_directory(target.clone(), true, cx);
-                this.finish_transfer("Скопировано", ok, cancelled, target, failures, cx);
+                this.finish_transfer("Скопировано", ok, cancelled, target, failures, skipped_note, cx);
                 if !created.is_empty() {
                     this.motion.flash(created.iter().filter_map(|receipt| receipt.destination.clone()));
                     let label = format!("копирование ({})", created.len());
@@ -1558,7 +1558,7 @@ impl Explorer {
                         this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
-                this.transfers.skipped_note=this.transfers.complete_job(id);
+                let skipped_note=this.transfers.complete_job(id);
                 if failed > 0 && !zone.items().is_empty() {
                     this.transfers.retries.push(transfers::Retry { items: zone.items().to_vec(), target: target.clone(), copy: false, keep_both, replace });
                 }
@@ -1567,7 +1567,7 @@ impl Explorer {
                     this.refresh_parent_of(source, cx);
                 }
                 let show_result=filemanager_core::path_utils::same_path(&this.pane_path(this.active_side()),&target);
-                this.finish_transfer("Перемещено", moved, cancelled, target, failures, cx);
+                this.finish_transfer("Перемещено", moved, cancelled, target, failures, skipped_note, cx);
                 if moved > 0 {
                     this.motion.flash(receipts.iter().filter_map(|receipt| receipt.destination.clone()));
                     if show_result {this.selected = normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));}
