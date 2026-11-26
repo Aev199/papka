@@ -22,7 +22,7 @@ const SETTING_FLAGS: [&str; 9] = [
     "Светлая тема",
     "Боковая панель",
     "Панель сведений",
-    "Показывать скрытые файлы",
+    "Показывать скрытые файлы и папки",
     "Значки программ у файлов, как в Проводнике",
     "Показывать только последнюю версию файла",
     "Звёздочка избранного у папок",
@@ -510,7 +510,8 @@ impl Explorer {
                     .child(div().size(px(ui::CHECKBOX_SIZE)).flex_none().rounded_sm().flex().items_center().justify_center()
                         .when(on, |b| b.bg(rgb(SELECTED)).child(gpui::svg().path("fm/check.svg").size(px(ui::CHECKMARK_SIZE)).text_color(rgb(SELECTION_TEXT))))
                         .when(!on, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
-                    .child(div().min_w_0().truncate().child(SETTING_FLAGS[index]))
+                    .child(div().flex_1().min_w_0().truncate().child(SETTING_FLAGS[index]))
+                    .when(index==3,|row|row.child(div().flex_none().text_color(rgb(TEXT_MUTED)).child("Ctrl+H")))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) {
                             s.selected = index;

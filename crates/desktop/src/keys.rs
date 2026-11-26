@@ -1039,10 +1039,20 @@ impl Explorer {
         if self.selected.is_some() || !self.marked.is_empty() { self.recycle(cx); }
     }
 
-    pub(crate) fn key_toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_hidden = !self.show_hidden;
-        self.status = if self.show_hidden { "Скрытые файлы показаны" } else { "Скрытые файлы скрыты" }.into();
+    /// One action for the keyboard, status-bar eye and folder context menu.
+    pub(crate) fn toggle_hidden_files(&mut self,cx:&mut Context<Self>) {
+        self.show_hidden=!self.show_hidden;
+        self.marquee=None;
+        self.motion.cancel_plate();
+        self.status=if self.show_hidden {"Скрытые файлы и папки показаны"}else{"Скрытые файлы и папки скрыты"}.into();
+        let saved=self.workspaces.as_ref().ok_or_else(||std::io::Error::other("Хранилище настроек недоступно"))
+            .and_then(|store|store.save_show_hidden(self.show_hidden));
+        if let Err(error)=saved {self.status.push_str(&format!(". Настройка не сохранена: {error}"));}
         cx.notify();
+    }
+
+    pub(crate) fn key_toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_hidden_files(cx);
     }
 
     pub(crate) fn key_switch_pane(&mut self, _: &SwitchPane, window: &mut Window, cx: &mut Context<Self>) {

@@ -134,3 +134,16 @@ fn panel_and_tab_commands_expose_group_and_shortcut() {
         assert!(!command.shortcut.is_empty());
     }
 }
+
+#[test]
+fn quick_hidden_switch_survives_reopen_without_resetting_other_preferences() {
+    let dir=tempfile::tempdir().unwrap();let db=dir.path().join("prefs.sqlite");
+    let store=WorkspaceStore::open(&db).unwrap();
+    store.save_show_hidden(true).unwrap();
+    assert_eq!(store.load_preferences().unwrap(),Preferences{show_hidden:true,..Preferences::default()});
+    let prefs=Preferences{light:true,show_hidden:true,show_sidebar:false,show_inspector:true};
+    store.save_preferences(&prefs).unwrap();store.save_show_hidden(false).unwrap();
+    assert_eq!(WorkspaceStore::open(&db).unwrap().load_preferences().unwrap(),Preferences{show_hidden:false,..prefs});
+    let command=commands("скрытые папки").into_iter().find(|c|c.id==CommandId::ToggleHidden).unwrap();
+    assert_eq!(command.shortcut,"Ctrl+H");
+}

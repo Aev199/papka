@@ -280,6 +280,14 @@ impl WorkspaceStore {
             params![prefs.light,prefs.show_hidden,prefs.show_sidebar,prefs.show_inspector]).map_err(db_error)?;
         Ok(())
     }
+    /// Persist the quick hidden-items switch without overwriting other preferences.
+    pub fn save_show_hidden(&self,show_hidden:bool)->io::Result<()> {
+        let defaults=crate::interface::Preferences::default();
+        self.connection()?.execute("INSERT INTO interface_preferences(id,light,show_hidden,show_sidebar,show_inspector)
+            VALUES(1,?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET show_hidden=excluded.show_hidden",
+            params![defaults.light,show_hidden,defaults.show_sidebar,defaults.show_inspector]).map_err(db_error)?;
+        Ok(())
+    }
     pub fn load_preferences(&self) -> io::Result<crate::interface::Preferences> {
         let result = self.connection()?.query_row("SELECT light,show_hidden,show_sidebar,show_inspector
             FROM interface_preferences WHERE id=1", [], |row| {

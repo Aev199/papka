@@ -2975,10 +2975,9 @@ impl Explorer {
             .child(bar_button("bar-split", "fm/split.svg", "Разделить окно (Ctrl+\\)", split)
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_split(cx))))
             .child(bar_button("bar-hidden", if self.show_hidden { "fm/eye.svg" } else { "fm/eye-off.svg" },
-                "Скрытые файлы (Ctrl+.)", self.show_hidden)
+                "Скрытые файлы и папки (Ctrl+H, Ctrl+.)", self.show_hidden)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_hidden = !this.show_hidden;
-                    cx.notify();
+                    this.toggle_hidden_files(cx);
                 })))
             .child(bar_button("bar-list", "fm/list.svg", "Список (Ctrl+1)", !self.miller(self.active_side()) && !self.thumbs_view(self.active_side()))
                 .on_click(cx.listener(|this, _, _, cx| this.set_view(false, false, cx))))
@@ -3382,11 +3381,10 @@ impl Explorer {
                             this.refresh_visible_directories(cx);
                         })))
                     .child(Self::menu_item("m-hidden", if self.show_hidden { "fm/eye-off.svg" } else { "fm/eye.svg" },
-                        if self.show_hidden { "Не показывать скрытые" } else { "Показать скрытые" }, "Ctrl+H", false, true)
+                        if self.show_hidden { "Скрыть скрытые файлы и папки" } else { "Показать скрытые файлы и папки" }, "Ctrl+H", false, true)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.context_menu = None;
-                            this.show_hidden = !this.show_hidden;
-                            cx.notify();
+                            this.toggle_hidden_files(cx);
                         })))
                     .child(Self::menu_item("m-folder-tab", "fm/plus.svg", "Открыть в новой вкладке", "", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {

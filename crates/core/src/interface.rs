@@ -125,7 +125,7 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
         (TerminalAdmin, "Терминал от администратора", "Ctrl+F10", FILES),
         (Rename, "Переименовать выбранное", "F2", FILES),
         (Compare, "Сравнить с соседней панелью", "", FILES),
-        (ToggleHidden, "Показать скрытые файлы", "Ctrl+.", VIEW),
+        (ToggleHidden, "Показать скрытые файлы и папки", "Ctrl+H", VIEW),
         (Sidebar, "Боковая панель", "Ctrl+B", VIEW),
         (Inspector, "Панель сведений", "Ctrl+I", VIEW),
         (List, "Вид список", "Ctrl+1", VIEW),
