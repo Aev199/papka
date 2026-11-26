@@ -90,7 +90,7 @@ mod platform {
         });
         if !present {return Ok(None);}
         unchanged(before,sequence())?;
-        Ok(Some(Ticket{sequence:before,prefer_streams:allow_paths}))
+        Ok(Some(Ticket{sequence:before,prefer_streams:true}))
     }
 
     #[windows::core::implement(windows::Win32::UI::Shell::IFileOperationProgressSink)]
