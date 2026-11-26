@@ -1,6 +1,6 @@
-Parallel transfers by default / Windows acceptance candidate
-Source: 12658cf870b473bed2425c9dff193c7c6a8d7e9f
-Verified CI: https://github.com/Aev199/papka/actions/runs/45634234376
-Independent copy/move batches start immediately with per-job progress, pause and cancel.
-Overlapping paths queue; OS executor gate and audited revalidation remain active.
-Test build only; do not publish an update-channel release.
+Parallel transfers by default / final Windows acceptance candidate
+Source: 153d8c03c0c05ebd1f141c773d456eca365f9401
+Verified Windows CI: https://github.com/Aev199/papka/actions/runs/45879754521
+Requested rebuild: 2026-11-26.
+Includes independent job progress/pause/cancel, path reservations and isolated completion notes.
+Test candidate based on beta 106; no update-channel release publication.
