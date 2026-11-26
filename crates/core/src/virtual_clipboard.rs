@@ -3,7 +3,7 @@
 use std::{io,path::{Path,PathBuf}};
 
 #[derive(Clone,Copy,Debug)]
-pub struct Ticket {sequence:u32}
+pub struct Ticket {sequence:u32,prefer_streams:bool}
 #[derive(Debug)]
 pub struct StagedFiles {_directory:tempfile::TempDir,paths:Vec<PathBuf>}
 impl StagedFiles {pub fn paths(&self)->&[PathBuf] {&self.paths}}
@@ -19,7 +19,12 @@ fn unchanged(expected:u32,actual:u32)->io::Result<()> {
 
 /// Probe format availability only; never request remote file contents on the UI thread.
 pub fn capture()->io::Result<Option<Ticket>> {
-    #[cfg(windows)] {platform::capture()}
+    #[cfg(windows)] {platform::capture(false)}
+    #[cfg(not(windows))] {Ok(None)}
+}
+/// Retry through descriptors only when a provider's advertised paths are unavailable.
+pub fn capture_for_missing_paths()->io::Result<Option<Ticket>> {
+    #[cfg(windows)] {platform::capture(true)}
     #[cfg(not(windows))] {Ok(None)}
 }
 impl Ticket {
@@ -75,8 +80,9 @@ mod platform {
     impl Drop for Ole {fn drop(&mut self){unsafe{OleUninitialize()};}}
     fn wide(value:&std::ffi::OsStr)->Vec<u16> {value.encode_wide().chain(Some(0)).collect()}
     fn sequence()->u32 {unsafe{GetClipboardSequenceNumber()}}
-    pub(super) fn capture()->io::Result<Option<Ticket>> {
+    pub(super) fn capture(allow_paths:bool)->io::Result<Option<Ticket>> {
         let before=sequence();
+        if !allow_paths && unsafe{IsClipboardFormatAvailable(15)}!=0{return Ok(None);}
         let present=virtual_format(|name|{
             let name:Vec<_>=name.encode_utf16().chain(Some(0)).collect();
             let format=unsafe{RegisterClipboardFormatW(name.as_ptr())};
@@ -84,7 +90,7 @@ mod platform {
         });
         if !present {return Ok(None);}
         unchanged(before,sequence())?;
-        Ok(Some(Ticket{sequence:before}))
+        Ok(Some(Ticket{sequence:before,prefer_streams:allow_paths}))
     }
 
     #[windows::core::implement(windows::Win32::UI::Shell::IFileOperationProgressSink)]
@@ -270,9 +276,12 @@ mod platform {
         Ok(())
     }
 
-    fn stage(data:&IDataObject,owner:Option<isize>,silent:bool)->io::Result<StagedFiles> {
+    fn stage(data:&IDataObject,owner:Option<isize>,silent:bool,prefer_streams:bool)->io::Result<StagedFiles> {
         let directory=tempfile::Builder::new().prefix("Papka-clipboard-").tempdir()?;
-        if let Some(entries)=descriptors(data)? {extract(data,&entries,directory.path(),owner,silent)?;}
+        let paths=windows::Win32::System::Com::FORMATETC{cfFormat:15,dwAspect:1,lindex:-1,tymed:1,..Default::default()};
+        let native=unsafe{data.QueryGetData(&paths)}.is_ok();
+        if native && !prefer_streams {copy_data(data,directory.path(),owner,silent)?;}
+        else if let Some(entries)=descriptors(data)? {extract(data,&entries,directory.path(),owner,silent)?;}
         else {copy_data(data,directory.path(),owner,silent)?;}
         let mut paths=std::fs::read_dir(directory.path())?.map(|e|e.map(|e|e.path())).collect::<io::Result<Vec<_>>>()?;
         paths.sort();
@@ -286,7 +295,7 @@ mod platform {
             unchanged(ticket.sequence,sequence())?;
             let data=unsafe{OleGetClipboard()}.map_err(io::Error::other)?;
             unchanged(ticket.sequence,sequence())?;
-            stage(&data,owner,false)
+            stage(&data,owner,false,ticket.prefer_streams)
         })?.join().map_err(|_|io::Error::other("Windows clipboard worker failed"))?
     }
 
@@ -359,7 +368,7 @@ mod platform {
                 let data:IDataObject=VirtualData{descriptor:register("FileGroupDescriptorW"),contents:register("FileContents"),group}.into();
                 let hdrop=FORMATETC{cfFormat:15,dwAspect:1,lindex:-1,tymed:1,..Default::default()};
                 assert!(unsafe{data.QueryGetData(&hdrop)}.is_err());
-                let staged=stage(&data,None,true).unwrap();
+                let staged=stage(&data,None,true,false).unwrap();
                 assert_eq!(std::fs::read(staged._directory.path().join("Данные.txt")).unwrap(),b"file");
                 assert_eq!(std::fs::read(staged._directory.path().join("Папка/nested.txt")).unwrap(),b"nested");
             }).join().unwrap();
@@ -384,7 +393,7 @@ mod platform {
                 let raw:Vec<*const ITEMIDLIST>=pidls.0.iter().map(|p|*p as *const _).collect();
                 let items=unsafe{SHCreateShellItemArrayFromIDLists(&raw)}.unwrap();
                 let data:IDataObject=unsafe{items.BindToHandler(None,&BHID_DataObject)}.unwrap();
-                let staged=stage(&data,None,true).unwrap();
+                let staged=stage(&data,None,true,false).unwrap();
                 assert_eq!(staged.paths().len(),2);
                 assert_eq!(std::fs::read(staged._directory.path().join("Файл.txt")).unwrap(),b"file");
                 assert_eq!(std::fs::read(staged._directory.path().join("Папка/nested.txt")).unwrap(),b"nested");
@@ -396,7 +405,7 @@ mod platform {
                 assert_eq!(std::fs::read(destination.path().join("Папка/nested.txt")).unwrap(),b"nested");
                 assert_eq!(std::fs::read(&file).unwrap(),b"file","provider source must never be moved");
                 std::fs::remove_file(&file).unwrap();
-                assert!(stage(&data,None,true).is_err(),"a partial provider failure must not become a successful import");
+                assert!(stage(&data,None,true,false).is_err(),"a partial provider failure must not become a successful import");
             }).join().unwrap();
         }
     }

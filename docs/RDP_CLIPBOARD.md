@@ -37,3 +37,8 @@ RDP может отдавать FileGroupDescriptorW/FileContents без лок�
 - https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-copyitems
 - https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-olegetclipboard
 - https://learn.microsoft.com/en-us/windows/win32/shell/clipboard
+
+Обычный CF_HDROP имеет приоритет, чтобы Ctrl+X из Проводника сохранял семантику
+перемещения. Если объявленные пути недоступны и есть дескрипторы, выполняется
+виртуальный импорт. У Shell-объектов с CF_HDROP тестируется прежний путь,
+а у объектов без CF_HDROP — прямое потоковое чтение.

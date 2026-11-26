@@ -1013,6 +1013,9 @@ impl Explorer {
         let files = match clipboard::read_files() {
             Ok(Some(files)) => files,
             Ok(None) => {
+                if let Ok(Some(ticket))=filemanager_core::virtual_clipboard::capture_for_missing_paths() {
+                    self.paste_virtual_files(ticket,target,cx);return;
+                }
                 self.status = "В буфере обмена нет файлов".into();
                 cx.notify();
                 return;
@@ -1025,7 +1028,12 @@ impl Explorer {
         };
         let target = self.browser.active().active().path.clone();
         if self.refuse_in_archive(&target, cx) { return; }
-        let Some(zone) = self.zone_of(&files.paths, cx) else { return };
+        let Some(zone) = self.zone_of(&files.paths, cx) else {
+            if let Ok(Some(ticket))=filemanager_core::virtual_clipboard::capture_for_missing_paths() {
+                self.paste_virtual_files(ticket,target,cx);
+            }
+            return;
+        };
         if files.cut {
             // A cut is consumed once, as in Explorer.
             let _ = clipboard::write_files(&[], false);
