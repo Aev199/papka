@@ -29,6 +29,37 @@ impl Ticket {
     }
 }
 
+#[derive(Debug)]
+struct Descriptor {path:PathBuf,directory:bool,size:Option<u64>,modified:Option<u64>,attributes:u32}
+fn bad_descriptor()->io::Error {io::Error::new(io::ErrorKind::InvalidData,"Некорректный список виртуальных файлов")}
+fn parse_descriptors(bytes:&[u8])->io::Result<Vec<Descriptor>> {
+    let count=u32::from_le_bytes(bytes.get(..4).ok_or_else(bad_descriptor)?.try_into().unwrap())as usize;
+    if count==0 || count>100_000 || bytes.len()<4+count*592 {return Err(bad_descriptor());}
+    let mut result=Vec::with_capacity(count);let mut names=std::collections::HashSet::new();
+    for data in bytes[4..].chunks_exact(592).take(count) {
+        let value=|offset|u32::from_le_bytes(data[offset..offset+4].try_into().unwrap());
+        let flags=value(0);let attributes=if flags&4!=0{value(36)}else{0};let directory=attributes&16!=0;
+        let units:Vec<_>=data[72..].chunks_exact(2).map(|b|u16::from_le_bytes([b[0],b[1]])).take_while(|c|*c!=0).collect();
+        let name=String::from_utf16(&units).map_err(|_|bad_descriptor())?.replace('\\',"/");
+        let name=if directory{name.trim_end_matches('/')}else{name.as_str()};
+        if name.is_empty() {return Err(bad_descriptor());}
+        let mut path=PathBuf::new();
+        for part in name.split('/') {
+            let device=part.split('.').next().unwrap_or("").to_ascii_uppercase();
+            let reserved=["CON","PRN","AUX","NUL","CONIN$","CONOUT$"].contains(&device.as_str())
+                || device.strip_prefix("COM").or_else(||device.strip_prefix("LPT")).is_some_and(|n|matches!(n,"1"|"2"|"3"|"4"|"5"|"6"|"7"|"8"|"9"|"¹"|"²"|"³"));
+            if part.is_empty() || part=="." || part==".." || (part.ends_with('.')||part.ends_with(' ')) || reserved
+                || part.chars().any(|c|c<' '||"<>:\"|?*".contains(c)) {return Err(bad_descriptor());}
+            path.push(part);
+        }
+        if !names.insert(name.to_lowercase()){return Err(bad_descriptor());}
+        let size=(!directory && flags&64!=0).then(||((value(64)as u64)<<32)|value(68)as u64);
+        let modified=(flags&32!=0).then(||((value(60)as u64)<<32)|value(56)as u64);
+        result.push(Descriptor{path,directory,size,modified,attributes});
+    }
+    Ok(result)
+}
+
 #[cfg(windows)]
 mod platform {
     use super::*;
@@ -112,9 +143,137 @@ mod platform {
         }
         Ok(())
     }
+    struct Medium(windows::Win32::System::Com::STGMEDIUM);
+    impl Drop for Medium {fn drop(&mut self){unsafe{windows::Win32::System::Ole::ReleaseStgMedium(&mut self.0)};}}
+    fn format(name:&str,tymed:u32,index:i32)->windows::Win32::System::Com::FORMATETC {
+        let name:Vec<_>=name.encode_utf16().chain(Some(0)).collect();
+        windows::Win32::System::Com::FORMATETC{cfFormat:(unsafe{RegisterClipboardFormatW(name.as_ptr())})as u16,
+            dwAspect:1,lindex:index,tymed,..Default::default()}
+    }
+    fn memory<T>(medium:&Medium,read:impl FnOnce(&[u8])->io::Result<T>)->io::Result<T> {
+        if medium.0.tymed!=1{return Err(bad_descriptor());}
+        use windows_sys::Win32::System::Memory::{GlobalLock,GlobalUnlock,GlobalSize};
+        let handle=unsafe{medium.0.u.hGlobal}.0;
+        struct Unlock(*mut core::ffi::c_void);
+        impl Drop for Unlock {fn drop(&mut self){unsafe{GlobalUnlock(self.0)};}}
+        let length=unsafe{GlobalSize(handle)};let pointer=unsafe{GlobalLock(handle)}as *const u8;
+        if pointer.is_null(){return Err(io::Error::last_os_error());}
+        let _unlock=Unlock(handle);
+        read(unsafe{std::slice::from_raw_parts(pointer,length)})
+    }
+    fn descriptors(data:&IDataObject)->io::Result<Option<Vec<Descriptor>>> {
+        for (name,unicode)in [("FileGroupDescriptorW",true),("FileGroupDescriptor",false)] {
+            let request=format(name,1,-1);
+            if unsafe{data.QueryGetData(&request)}.is_err(){continue;}
+            let medium=Medium(unsafe{data.GetData(&request)}.map_err(io::Error::other)?);
+            return memory(&medium,|bytes|{
+                if bytes.len()>64*1024*1024{return Err(bad_descriptor());}
+                if unicode {return parse_descriptors(bytes);}
+                let count=u32::from_le_bytes(bytes.get(..4).ok_or_else(bad_descriptor)?.try_into().unwrap())as usize;
+                if count==0||count>100_000||bytes.len()<4+332*count{return Err(bad_descriptor());}
+                let mut wide=(count as u32).to_le_bytes().to_vec();
+                for item in bytes[4..].chunks_exact(332).take(count) {
+                    wide.extend_from_slice(&item[..72]);
+                    let name=&item[72..];let length=name.iter().position(|b|*b==0).unwrap_or(name.len());
+                    let mut units=[0u16;260];
+                    let written=unsafe{windows_sys::Win32::Globalization::MultiByteToWideChar(0,0,name.as_ptr(),length as i32,units.as_mut_ptr(),259)};
+                    if written==0{return Err(bad_descriptor());}
+                    for unit in units {wide.extend_from_slice(&unit.to_le_bytes());}
+                }
+                parse_descriptors(&wide)
+            }).map(Some);
+        }
+        Ok(None)
+    }
+    struct Progress {dialog:Option<windows::Win32::UI::Shell::IProgressDialog>,last:std::time::Instant}
+    impl Progress {
+        fn new(owner:Option<isize>,silent:bool)->io::Result<Self> {
+            let dialog=if silent{None}else{unsafe{
+                use windows::Win32::UI::Shell::{IProgressDialog,CLSID_ProgressDialog,PROGDLG_AUTOTIME};
+                let dialog:IProgressDialog=CoCreateInstance(&CLSID_ProgressDialog,None,CLSCTX_ALL).map_err(io::Error::other)?;
+                let title:Vec<_>="Получение файлов из буфера Windows".encode_utf16().chain(Some(0)).collect();
+                dialog.SetTitle(PCWSTR(title.as_ptr())).map_err(io::Error::other)?;
+                dialog.StartProgressDialog(owner.map(|h|HWND(h as *mut _)),None::<&IUnknown>,PROGDLG_AUTOTIME,None).map_err(io::Error::other)?;
+                Some(dialog)
+            }};
+            Ok(Self{dialog,last:std::time::Instant::now()})
+        }
+        fn update(&mut self,path:&Path,done:u64,total:u64,force:bool)->io::Result<()> {
+            if !force && self.last.elapsed()<std::time::Duration::from_millis(100){return Ok(());}
+            self.last=std::time::Instant::now();
+            if let Some(dialog)=&self.dialog {unsafe{
+                if dialog.HasUserCancelled().as_bool(){return Err(io::Error::new(io::ErrorKind::Interrupted,"Получение файлов отменено"));}
+                let name=wide(path.as_os_str());dialog.SetLine(1,PCWSTR(name.as_ptr()),true,None).map_err(io::Error::other)?;
+                dialog.SetProgress64(done,total.max(1)).map_err(io::Error::other)?;
+            }}
+            Ok(())
+        }
+    }
+    impl Drop for Progress {fn drop(&mut self){if let Some(dialog)=&self.dialog {let _=unsafe{dialog.StopProgressDialog()};}}}
+    fn extract(data:&IDataObject,entries:&[Descriptor],target:&Path,owner:Option<isize>,silent:bool)->io::Result<()> {
+        use std::io::Write;
+        let bytes_total=entries.iter().filter(|e|!e.directory).try_fold(0u64,|sum,e|sum.checked_add(e.size?));
+        let total=bytes_total.unwrap_or(entries.len()as u64);let mut completed=0u64;
+        let mut progress=Progress::new(owner,silent)?;
+        for (index,entry)in entries.iter().enumerate() {
+            progress.update(&entry.path,if bytes_total.is_some(){completed}else{index as u64},total,true)?;
+            let path=target.join(&entry.path);
+            if entry.directory {std::fs::create_dir_all(&path)?;continue;}
+            if let Some(parent)=path.parent(){std::fs::create_dir_all(parent)?;}
+            let medium=Medium(unsafe{data.GetData(&format("FileContents",4,index as i32))}
+                .or_else(|_|unsafe{data.GetData(&format("FileContents",1,index as i32))}).map_err(io::Error::other)?);
+            let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+            let mut copied=0u64;
+            match medium.0.tymed {
+                4=>{
+                    let stream=unsafe{&*medium.0.u.pstm}.as_ref().ok_or_else(bad_descriptor)?;
+                    let mut buffer=[0u8;65536];
+                    loop {
+                        let mut read=0u32;
+                        unsafe{stream.Read(buffer.as_mut_ptr().cast(),buffer.len()as u32,Some(&mut read))}.ok().map_err(io::Error::other)?;
+                        if read as usize>buffer.len(){return Err(bad_descriptor());}if read==0{break;}
+                        copied=copied.checked_add(read as u64).ok_or_else(bad_descriptor)?;
+                        if entry.size.is_some_and(|size|copied>size){return Err(bad_descriptor());}
+                        file.write_all(&buffer[..read as usize])?;
+                        progress.update(&entry.path,if bytes_total.is_some(){completed.saturating_add(copied)}else{index as u64},total,false)?;
+                    }
+                }
+                1=>memory(&medium,|bytes|{
+                    let count=entry.size.map_or(Ok(bytes.len()),usize::try_from).map_err(|_|bad_descriptor())?;
+                    if count>bytes.len(){return Err(bad_descriptor());}
+                    for block in bytes[..count].chunks(65536) {
+                        file.write_all(block)?;copied+=block.len()as u64;
+                        progress.update(&entry.path,if bytes_total.is_some(){completed.saturating_add(copied)}else{index as u64},total,false)?;
+                    }Ok(())
+                })?,
+                _=>return Err(io::Error::other("Неподдерживаемый поток виртуального файла")),
+            }
+            if entry.size.is_some_and(|size|size!=copied){return Err(io::Error::new(io::ErrorKind::UnexpectedEof,"Файл получен не полностью"));}
+            file.sync_all()?;drop(file);completed=completed.saturating_add(copied);
+        }
+        // Apply directory dates only after writing their descendants.
+        let mut metadata:Vec<_>=entries.iter().collect();metadata.sort_by_key(|e|std::cmp::Reverse(e.path.components().count()));
+        for entry in metadata {
+            let path=target.join(&entry.path);
+            if let Some(ticks)=entry.modified {
+                let time=filetime::FileTime::from_unix_time((ticks/10_000_000)as i64-11_644_473_600,((ticks%10_000_000)*100)as u32);
+                filetime::set_file_mtime(&path,time)?;
+            }
+            if entry.attributes&6!=0 {
+                use std::os::windows::fs::MetadataExt;
+                let flags=std::fs::metadata(&path)?.file_attributes()|entry.attributes&6;
+                let name=wide(path.as_os_str());
+                if unsafe{windows_sys::Win32::Storage::FileSystem::SetFileAttributesW(name.as_ptr(),flags)}==0{return Err(io::Error::last_os_error());}
+            }
+        }
+        progress.update(Path::new("Готово"),total,total,true)?;
+        Ok(())
+    }
+
     fn stage(data:&IDataObject,owner:Option<isize>,silent:bool)->io::Result<StagedFiles> {
         let directory=tempfile::Builder::new().prefix("Papka-clipboard-").tempdir()?;
-        copy_data(data,directory.path(),owner,silent)?;
+        if let Some(entries)=descriptors(data)? {extract(data,&entries,directory.path(),owner,silent)?;}
+        else {copy_data(data,directory.path(),owner,silent)?;}
         let mut paths=std::fs::read_dir(directory.path())?.map(|e|e.map(|e|e.path())).collect::<io::Result<Vec<_>>>()?;
         paths.sort();
         if paths.is_empty(){return Err(io::Error::other("Windows не вернул файлы из буфера обмена"));}
@@ -252,5 +411,30 @@ mod tests {
     }
     #[test] fn changed_or_unavailable_clipboard_is_not_pasted() {
         assert!(unchanged(5,5).is_ok());assert!(unchanged(5,6).is_err());assert!(unchanged(0,0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    fn group(names:&[&str])->Vec<u8> {
+        let mut bytes=vec![0;4+names.len()*592];bytes[..4].copy_from_slice(&(names.len()as u32).to_le_bytes());
+        for (i,name)in names.iter().enumerate(){
+            let start=4+i*592;bytes[start..start+4].copy_from_slice(&68u32.to_le_bytes());
+            for (j,c)in name.encode_utf16().enumerate(){bytes[start+72+j*2..start+74+j*2].copy_from_slice(&c.to_le_bytes());}
+        }
+        bytes
+    }
+    #[test] fn names_cannot_escape_staging_or_address_devices_and_streams() {
+        for name in ["../file","/root","C:/file","file:stream","a/../file","NUL.txt","COM1","COM¹.txt","CONIN$","a.","a ","a//file",""] {
+            assert!(parse_descriptors(&group(&[name])).is_err(),"{name}");
+        }
+        assert!(parse_descriptors(&group(&["A.txt","a.txt"])).is_err());
+        assert!(parse_descriptors(&[255;4]).is_err());
+    }
+    #[test] fn unicode_relative_names_and_declared_sizes_are_decoded() {
+        let bytes=group(&["Папка/Данные.txt"]);let entries=parse_descriptors(&bytes).unwrap();
+        assert_eq!(entries[0].path,Path::new("Папка").join("Данные.txt"));
+        assert_eq!(entries[0].size,Some(0));assert!(!entries[0].directory);
     }
 }
