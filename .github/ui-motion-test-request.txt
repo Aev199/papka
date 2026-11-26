@@ -1,6 +1,6 @@
-Parallel transfers by default / final Windows acceptance candidate
-Source: 153d8c03c0c05ebd1f141c773d456eca365f9401
-Verified Windows CI: https://github.com/Aev199/papka/actions/runs/45879754521
-Requested rebuild: 2026-11-26.
-Includes independent job progress/pause/cancel, path reservations and isolated completion notes.
-Test candidate based on beta 106; no update-channel release publication.
+Combined acceptance candidate / parallel transfers, hidden items, RDP virtual clipboard
+Source: 44ea2f5c3b158f65060229f3447e8b6342cb3c87
+Final source CI runs automatically on the source commit. Build remains a test candidate.
+Includes independent copy/move controls, persisted Ctrl+H visibility, OLE descriptor/stream import.
+Windows tests cover virtual file streams without CF_HDROP and native Shell clipboard objects.
+Real RDP connection must be checked manually. Based on beta 106; no update-channel publication.
