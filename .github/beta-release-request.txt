@@ -1,11 +1,11 @@
 version=0.1.107
 channel=beta
-Verified source: 71c130205ebd38d74aeff07dac71b994d39c2b55
-Verified Windows CI: https://github.com/Aev199/papka/actions/runs/45952667522
-Verified portable build: https://github.com/Aev199/papka/actions/runs/45952667484
-User requested a new beta with all changes, including the tab drag fix, on 2026-11-27.
+Source: 82ee840dbcc413769678421766386c1158afc85a
+User requested publication with all changes on 2026-11-27, then added an option to disable file history recording.
+Release pipeline must check all targets and pass core, CLI and desktop tests before publication.
 note=Независимые копирование и перенос запускаются параллельно в одном окне с отдельными паузой и отменой
 note=Операции с пересекающимися путями ожидают завершения конфликтующей операции
 note=Поддержка вставки файлов и папок из буфера обмена RDP
 note=Показ скрытых файлов и папок по Ctrl+H с сохранением настройки после перезапуска
 note=Исправлена анимация переноса вкладок в нескольких панелях — место вставки отображается только под указателем
+note=В настройках можно отключить запись истории изменений файлов с сохранением прежних записей и автообновления папок
