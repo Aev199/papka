@@ -1,11 +1,9 @@
-version=0.1.107
+version=0.1.108
 channel=beta
-Source: 82ee840dbcc413769678421766386c1158afc85a
-User requested publication with all changes on 2026-11-27, then added an option to disable file history recording.
-Release pipeline must check all targets and pass core, CLI and desktop tests before publication.
-note=Независимые копирование и перенос запускаются параллельно в одном окне с отдельными паузой и отменой
-note=Операции с пересекающимися путями ожидают завершения конфликтующей операции
-note=Поддержка вставки файлов и папок из буфера обмена RDP
-note=Показ скрытых файлов и папок по Ctrl+H с сохранением настройки после перезапуска
-note=Исправлена анимация переноса вкладок в нескольких панелях — место вставки отображается только под указателем
-note=В настройках можно отключить запись истории изменений файлов с сохранением прежних записей и автообновления папок
+Verified source: d8b90b4fcb3e66114b6ecc6ff53ebe81467d2f93
+Verified Windows CI: https://github.com/Aev199/papka/actions/runs/45975445036
+Verified portable build: https://github.com/Aev199/papka/actions/runs/45975444965
+User requested a new beta on 2026-11-27.
+note=Исправлено удаление независимых файлов и папок во время копирования и переноса
+note=Источники, назначения и родительские папки активных, приостановленных и ожидающих передач защищены от удаления
+note=Удаление сохраняет журнал операций и не меняет паузу или отмену работающих передач
