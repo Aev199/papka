@@ -143,7 +143,7 @@ pub(crate) struct Transfers {
     pub(crate) copying: bool,
     /// Share of the running copy or move done, 0..=1, for the progress bar.
     pub(crate) fraction: Option<f64>,
-    /// An exclusive non-transfer operation (rename, delete, Undo) is running.
+    /// A non-transfer operation is running; new transfers wait until it completes.
     pub(crate) busy: bool,
     pub(crate) control: Option<Arc<CopyControl>>,
     /// Items a transfer could not finish (e.g. the network dropped): their
@@ -162,6 +162,17 @@ impl Transfers {
     /// Activity that blocks commands requiring exclusive ownership (Undo, rename).
     pub(crate) fn occupied(&self) -> bool {
         self.copying || self.busy || self.pending.is_some()
+    }
+
+    /// Deletion writes the entire selected tree. Protect running (including
+    /// paused), queued and conflict-dialog transfers before confirmation.
+    pub(crate) fn deletion_conflicts(&self, paths: &[PathBuf]) -> bool {
+        use filemanager_core::transfer_access::{Access, conflicts};
+        let accesses: Vec<_> = paths.iter().map(|path| Access::new(path, true)).collect();
+        (self.copying && self.running.is_empty())
+            || self.running.iter().any(|job| conflicts(&accesses, &job.accesses))
+            || self.queue.iter().any(|job| conflicts(&accesses, &job.accesses()))
+            || self.pending.as_ref().is_some_and(|(job, _)| conflicts(&accesses, &job.accesses()))
     }
 
     fn can_run(&self,transfer:&Transfer)->bool {
@@ -465,6 +476,31 @@ mod parallel_tests {
         assert!(Arc::ptr_eq(state.control.as_ref().unwrap(),&second_control));
         state.complete_job(second);assert!(!state.copying);assert!(state.control.is_none());
     }
+    #[test]
+    fn independent_deletion_is_allowed_while_paused_transfers_keep_their_paths() {
+        let temp=Temp::new();let mut state=Transfers::default();
+        let a=temp.transfer("a","one",true);
+        let id=state.start_job("Копирование",&a.zone,a.target.clone(),true,false,None,None);
+        state.running[0].control.set_paused(true);
+        assert!(!state.deletion_conflicts(&[temp.0.join("unrelated")]));
+        for path in [temp.0.join("a"),temp.0.join("one/a"),temp.0.join("one"),temp.0.clone()] {
+            assert!(state.deletion_conflicts(&[path]));
+        }
+        let queued=temp.transfer("queued","two",false);
+        state.queue.push_back(queued);
+        assert!(state.deletion_conflicts(&[temp.0.join("queued")]));
+        assert!(state.deletion_conflicts(&[temp.0.join("two")]));
+        let pending=temp.transfer("pending","three",true);
+        state.pending=Some((pending,Vec::new()));
+        assert!(state.deletion_conflicts(&[temp.0.join("pending")]));
+        assert!(state.deletion_conflicts(&[temp.0.join("three/pending")]));
+        assert!(!state.deletion_conflicts(&[temp.0.join("unrelated")]));
+        assert!(state.running[0].control.is_paused());
+        assert!(!state.running[0].control.is_cancelled());
+        state.complete_job(id);
+        assert!(!state.deletion_conflicts(&[temp.0.join("a")]));
+    }
+
     #[test]
     fn paused_paths_stay_reserved_and_unrelated_jobs_bypass_waiting_head() {
         let temp=Temp::new();let mut state=Transfers::default();

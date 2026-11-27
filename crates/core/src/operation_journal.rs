@@ -124,7 +124,7 @@ impl OperationJournal {
         Ok(lock)
     }
 
-    /// One window may run disjoint copy/move batches under a shared OS gate.
+    /// One window may run disjoint transfer and deletion batches under a shared OS gate.
     /// Other windows, Undo and crash recovery still require exclusive ownership.
     pub fn parallel_session(&self)->io::Result<Self> {
         if self.parallel.is_some() {return Err(io::Error::other("Parallel session already active"));}
@@ -140,10 +140,10 @@ impl OperationJournal {
         };
         let mut accesses=Vec::new();
         for plan in plans {
-            if !matches!(plan.action,Action::Copy|Action::Move) {
-                return Err(io::Error::other("Only copy and move may use a parallel session"));
+            if !matches!(plan.action,Action::Copy|Action::Move|Action::Recycle|Action::Delete) {
+                return Err(io::Error::other("This action requires exclusive executor ownership"));
             }
-            accesses.push(crate::transfer_access::Access::new(&plan.source,plan.action==Action::Move));
+            accesses.push(crate::transfer_access::Access::new(&plan.source,plan.action!=Action::Copy));
             if let Some(target)=&plan.destination {accesses.push(crate::transfer_access::Access::new(target,true));}
         }
         let mut active=executor.active.lock().unwrap_or_else(|e|e.into_inner());

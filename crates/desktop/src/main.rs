@@ -1969,7 +1969,7 @@ impl Explorer {
             cx.notify();
             return;
         }
-        if self.transfers.copying || self.transfers.busy {
+        if self.transfers.busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
@@ -1977,6 +1977,13 @@ impl Explorer {
         let paths = self.selection();
         if paths.is_empty() {
             self.status = "Выберите файл".into();
+            cx.notify();
+            return;
+        }
+
+        if self.transfers.deletion_conflicts(&paths) {
+            self.confirm_recycle = None;
+            self.status = "Удаление невозможно: эти файлы или папки используются текущей или ожидающей передачей".into();
             cx.notify();
             return;
         }
@@ -2017,15 +2024,24 @@ impl Explorer {
     /// Deletes what `plans` name, already confirmed: to the Recycle Bin
     /// where there is one, through the journal, undone with Ctrl+Z.
     pub(crate) fn run_recycle(&mut self, plans: Vec<(PathBuf, Plan)>, cx: &mut Context<Self>) {
-        if self.transfers.copying || self.transfers.busy {
+        if self.transfers.busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
         }
-        let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.status = "Операция отклонена: журнал SQLite недоступен".into();
+        let paths: Vec<_> = plans.iter().map(|(_, plan)| plan.source.clone()).collect();
+        if self.transfers.deletion_conflicts(&paths) {
+            self.status = "Удаление невозможно: эти файлы или папки используются текущей или ожидающей передачей".into();
             cx.notify();
             return;
+        }
+        let audit = match self.parallel_transfer_audit() {
+            Ok(audit) => audit,
+            Err(error) => {
+                self.status = format!("Удаление невозможно: {error}");
+                cx.notify();
+                return;
+            }
         };
         self.transfers.busy = true;
         self.status = "Удаление…".into();
@@ -2039,6 +2055,9 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let results = task.await;
             let _ = weak.update(cx, |this, cx| {
+                // Release an otherwise idle session so Undo and other windows
+                // can acquire the OS gate after this deletion completes.
+                if this.transfers.running.is_empty() { this.transfers.parallel = None; }
                 this.transfers.busy = false;
                 this.start_queued(cx);
                 let mut done = 0;

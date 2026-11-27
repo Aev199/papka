@@ -1636,7 +1636,7 @@ mod tests {
 mod parallel_transfer_tests {
     use super::*;
     #[test]
-    fn independent_move_finishes_while_copy_is_paused_and_cancel_is_local() {
+    fn independent_move_and_delete_finish_while_copy_is_paused_and_cancel_is_local() {
         let temp=tempfile::tempdir().unwrap();
         let a=temp.path().join("a.txt");let b=temp.path().join("b.txt");
         fs::write(&a,b"first").unwrap();fs::write(&b,b"second").unwrap();
@@ -1661,16 +1661,55 @@ mod parallel_transfer_tests {
         let mut independent=OperationQueue::default();
         independent.submit(Plan::prepare(Action::Move,&b,Some(&out.join("b.txt"))).unwrap());
         let moved=independent.run_all_audited(&CopyControl::default(),&session);
+        let disposable=temp.path().join("disposable.txt");
+        fs::write(&disposable,b"unrelated to either transfer").unwrap();
+        let mut deletion=OperationQueue::default();
+        deletion.submit(Plan::prepare(Action::Delete,&disposable,None).unwrap());
+        let removed=deletion.run_all_audited(&CopyControl::default(),&session);
+        let still_paused=control.is_paused() && !control.is_cancelled();
         let external_blocked=journal.lock_executor().is_err();
         control.cancel();control.set_paused(false);
         let copied=worker.join().unwrap();
         assert!(started,"paused copy must acquire its lease before the second task");
         assert_eq!(blocked[0].1.as_ref().unwrap_err().kind(),io::ErrorKind::WouldBlock);
         assert!(moved[0].1.is_ok(),"{:?}",moved[0].1);
+        assert!(removed[0].1.is_ok(),"{:?}",removed[0].1);
+        assert!(!disposable.exists());
+        assert!(still_paused,"deletion must not pause, resume or cancel the copy");
         assert_eq!(fs::read(out.join("b.txt")).unwrap(),b"second");assert!(!b.exists());
         assert!(copied[0].1.is_err());assert!(a.exists());assert!(!out.join("a.txt").exists());
         assert!(external_blocked,"other windows and Undo must retain the OS gate");
         drop(session);
+        assert!(journal.lock_executor().is_ok());
+    }
+
+    #[test]
+    fn deletion_cannot_touch_transfer_sources_destinations_or_ancestor_trees() {
+        let temp=tempfile::tempdir().unwrap();
+        let source_dir=temp.path().join("source");let out=temp.path().join("out");
+        fs::create_dir(&source_dir).unwrap();fs::create_dir(&out).unwrap();
+        let source=source_dir.join("data.txt");fs::write(&source,b"keep").unwrap();
+        let journal=crate::operation_journal::OperationJournal::open(temp.path().join("audit.sqlite")).unwrap();
+        let session=journal.parallel_session().unwrap();
+        let copy=Plan::prepare(Action::Copy,&source,Some(&out.join("data.txt"))).unwrap();
+        let lease=session.lock_batch(std::iter::once(&copy)).unwrap();
+        // The destination file does not exist yet: deleting its parent must
+        // still be rejected before any audit intent or filesystem mutation.
+        for path in [&source,&source_dir,&out] {
+            for action in [Action::Delete,Action::Recycle] {
+                let mut queue=OperationQueue::default();
+                queue.submit(Plan::prepare(action,path,None).unwrap());
+                let result=queue.run_all_audited(&CopyControl::default(),&session);
+                assert_eq!(result[0].1.as_ref().unwrap_err().kind(),io::ErrorKind::WouldBlock);
+            }
+        }
+        assert_eq!(fs::read(&source).unwrap(),b"keep");assert!(out.is_dir());
+        assert!(journal.recent(100).unwrap().is_empty());
+        // Disjoint Recycle and Delete plans both share the session gate.
+        let independent=temp.path().join("independent.txt");fs::write(&independent,b"x").unwrap();
+        let recycle=Plan::prepare(Action::Recycle,&independent,None).unwrap();
+        drop(session.lock_batch(std::iter::once(&recycle)).unwrap());
+        drop(lease);drop(session);
         assert!(journal.lock_executor().is_ok());
     }
 

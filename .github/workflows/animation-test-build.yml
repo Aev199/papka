@@ -23,7 +23,7 @@ jobs:
         run: |
           $commit = (git rev-parse --short HEAD)
           if ("${{ github.ref_name }}" -eq "feat/ui-motion-2") {
-            "PAPKA_VERSION=0.1.106" >> $env:GITHUB_ENV
+            "PAPKA_VERSION=0.1.107" >> $env:GITHUB_ENV
           } else {
             "PAPKA_VERSION=0.1.104" >> $env:GITHUB_ENV
           }

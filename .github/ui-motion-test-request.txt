@@ -1,5 +1,5 @@
-Tab-strip hover isolation regression candidate
-Includes parallel transfers, hidden items and RDP virtual clipboard from accepted source 41d1dce.
-Fix: only the strip under the pointer updates tab-reorder preview; unrelated panes cannot steal it.
-Regression tests cover four panes, callback order, cross-pane insertion and leaving all strips.
-Beta 107 publication was cancelled on user report. This is a test build only.
+Deletion during concurrent transfers regression candidate, based on beta 107.
+Independent Delete/Recycle batches share the audited executor session with active copy/move.
+Running, paused, queued and conflict-dialog transfer paths remain protected, including ancestor trees.
+Tests verify deletion alongside a paused copy, source/destination protection and unchanged controls.
+All earlier beta 107 changes retained. Test build only; no update-channel publication.
