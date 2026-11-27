@@ -1,6 +1,5 @@
-Combined acceptance candidate / parallel transfers, hidden items, RDP virtual clipboard
-Source: 44ea2f5c3b158f65060229f3447e8b6342cb3c87
-Final source CI runs automatically on the source commit. Build remains a test candidate.
-Includes independent copy/move controls, persisted Ctrl+H visibility, OLE descriptor/stream import.
-Windows tests cover virtual file streams without CF_HDROP and native Shell clipboard objects.
-Real RDP connection must be checked manually. Based on beta 106; no update-channel publication.
+Tab-strip hover isolation regression candidate
+Includes parallel transfers, hidden items and RDP virtual clipboard from accepted source 41d1dce.
+Fix: only the strip under the pointer updates tab-reorder preview; unrelated panes cannot steal it.
+Regression tests cover four panes, callback order, cross-pane insertion and leaving all strips.
+Beta 107 publication was cancelled on user report. This is a test build only.

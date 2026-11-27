@@ -27,7 +27,12 @@ pub(crate) struct TabReorder {
 }
 
 impl TabReorder {
-    pub fn set_target(&mut self, target: Target) -> bool {
+    pub fn set_target(&mut self, target: Target, hovered: bool) -> bool {
+        // GPUI dispatches drag moves to every registered strip. A non-hovered
+        // strip must neither replace nor clear another strip's preview.
+        if !hovered {
+            return false;
+        }
         if self.target == Some(target) {
             return false;
         }
@@ -199,15 +204,49 @@ mod tests {
         let mut reorder = TabReorder::default();
         let widths = [30., 50., 20.];
         // Boundary 3 is before-removal; moving tab 0 lands at final index 2.
-        reorder.set_target(target(id(1), 0, id(1), 3, 30.));
+        reorder.set_target(target(id(1), 0, id(1), 3, 30.), true);
         let (offsets, extra, _) = reorder.sample(id(1), &widths, now, false);
         assert_eq!(offsets, vec![78., -34., -34.]);
         assert_eq!(extra, 0.);
         assert_eq!(reorder.destination(id(1), id(1), 0, widths.len()), Some(2));
         assert_eq!(reorder.destination(id(2), id(1), 0, widths.len()), None);
 
-        reorder.set_target(target(id(1), 0, id(1), 2, 30.));
+        reorder.set_target(target(id(1), 0, id(1), 2, 30.), true);
         assert_eq!(reorder.destination(id(1), id(1), 0, widths.len()), Some(1));
+    }
+
+    #[test]
+    fn non_hovered_strips_cannot_steal_preview_in_either_dispatch_order() {
+        let now = Instant::now();
+        let widths = [100., 120., 80.];
+        // Four panes, including vertically stacked strips with the same x.
+        for hovered in 1..=4 {
+            for reverse in [false, true] {
+                let mut reorder = TabReorder::default();
+                let mut groups: Vec<u64> = (1..=4).collect();
+                if reverse { groups.reverse(); }
+                for group in groups {
+                    reorder.set_target(target(id(hovered), 0, id(group), 3, 100.), group == hovered);
+                }
+                assert_eq!(reorder.target.unwrap().to, id(hovered));
+                for group in 1..=4 {
+                    let (offsets, extra, _) = reorder.sample(id(group), &widths, now, false);
+                    assert_eq!(extra, 0.);
+                    assert_eq!(offsets, if group == hovered {vec![208., -104., -104.]} else {vec![0.; 3]});
+                }
+                // Moving into another pane deliberately still opens its gap.
+                let destination = if hovered == 4 {1} else {hovered + 1};
+                reorder.set_target(target(id(hovered), 0, id(destination), 1, 100.), true);
+                assert!(!reorder.set_target(target(id(hovered), 0, id(hovered), 2, 100.), false));
+                assert_eq!(reorder.destination(id(destination), id(hovered), 0, 3), Some(1));
+                assert_eq!(reorder.sample(id(destination), &widths, now, false).0, vec![0., 104., 104.]);
+                // After leaving all strips the root clears the preview. The
+                // remaining non-hovered callbacks must not recreate it.
+                reorder.clear();
+                assert!(!reorder.set_target(target(id(hovered), 0, id(hovered), 2, 100.), false));
+                assert!(reorder.target.is_none());
+            }
+        }
     }
 
     #[test]
@@ -215,11 +254,11 @@ mod tests {
         let now = Instant::now();
         let mut reorder = TabReorder::default();
         let widths = [30., 40., 50.];
-        reorder.set_target(target(id(1), 0, id(1), 3, 30.));
+        reorder.set_target(target(id(1), 0, id(1), 3, 30.), true);
         reorder.sample(id(1), &widths, now, true);
         let mid = now + Duration::from_millis(60);
         let before = reorder.sample(id(1), &widths, mid, true).0;
-        reorder.set_target(target(id(1), 0, id(1), 1, 30.));
+        reorder.set_target(target(id(1), 0, id(1), 1, 30.), true);
         let after = reorder.sample(id(1), &widths, mid, true).0;
         assert_eq!(before, after);
         assert!(reorder.clear());
@@ -237,15 +276,15 @@ mod tests {
     fn cross_pane_insertion_accounts_for_gap_and_end_spacer() {
         let now = Instant::now();
         let mut reorder = TabReorder::default();
-        reorder.set_target(target(id(1), 1, id(2), 1, 45.));
+        reorder.set_target(target(id(1), 1, id(2), 1, 45.), true);
         let (offsets, extra, _) = reorder.sample(id(2), &[20., 30., 40.], now, false);
         assert_eq!(offsets, vec![0., 49., 49.]);
         assert_eq!(extra, 45.);
-        reorder.set_target(target(id(1), 1, id(2), 3, 45.));
+        reorder.set_target(target(id(1), 1, id(2), 3, 45.), true);
         let (offsets, extra, _) = reorder.sample(id(2), &[20., 30., 40.], now, false);
         assert_eq!(offsets, vec![0., 0., 0.]);
         assert_eq!(extra, 45.);
-        reorder.set_target(target(id(1), 7, id(2), 0, 45.));
+        reorder.set_target(target(id(1), 7, id(2), 0, 45.), true);
         assert_eq!(reorder.destination(id(2), id(1), 7, 3), Some(0));
     }
 
@@ -254,13 +293,13 @@ mod tests {
         let now=Instant::now();let mut reorder=TabReorder::default();
         reorder.sample(id(1),&[30.,40.],now,false);
         reorder.sample(id(2),&[50.],now,false);
-        reorder.set_target(target(id(1),1,id(2),0,40.));
+        reorder.set_target(target(id(1),1,id(2),0,40.), true);
         assert!(!reorder.invalidate_changed_counts(&[(id(1),2),(id(2),1),(id(3),9)]));
         assert!(reorder.invalidate_changed_counts(&[(id(1),3),(id(2),1)]));
         assert!(reorder.target.is_none());
         reorder.sample(id(1),&[30.,40.],now,false);
         reorder.sample(id(2),&[50.],now,false);
-        reorder.set_target(target(id(1),1,id(2),0,40.));
+        reorder.set_target(target(id(1),1,id(2),0,40.), true);
         assert!(reorder.invalidate_changed_counts(&[(id(1),2),(id(2),2)]));
     }
 
@@ -270,10 +309,10 @@ mod tests {
         assert!(!reorder.invalidate_changed_counts(&[(id(1),1)]));
         reorder.sample(id(1),&[30.],now,false);
         reorder.sample(id(2),&[40.],now,false);
-        reorder.set_target(target(id(1),0,id(2),0,30.));
+        reorder.set_target(target(id(1),0,id(2),0,30.), true);
         assert!(reorder.invalidate_changed_counts(&[(id(1),1)]));
         reorder.sample(id(1),&[30.],now,false);
-        reorder.set_target(target(id(1),2,id(1),0,30.));
+        reorder.set_target(target(id(1),2,id(1),0,30.), true);
         assert!(reorder.invalidate_changed_counts(&[(id(1),1)]));
     }
 
@@ -281,7 +320,7 @@ mod tests {
     fn disabled_animations_and_reset_are_immediate() {
         let now = Instant::now();
         let mut reorder = TabReorder::default();
-        reorder.set_target(target(id(1), 0, id(1), 2, 25.));
+        reorder.set_target(target(id(1), 0, id(1), 2, 25.), true);
         let (offsets, _, active) = reorder.sample(id(1), &[25., 35.], now, false);
         assert_eq!(offsets, vec![39., -29.]);
         assert!(!active);

@@ -365,7 +365,7 @@ impl Explorer {
                 let boundary=(0..count).find(|&i|crate::motion::tab_place(&drag_scroll,i).is_some_and(|(left,width)|x<left+width/2.)).unwrap_or(count);
                 let width=this.tab_scroll.get(&drag.group).and_then(|scroll|crate::motion::tab_place(scroll,drag.index)).map_or(120.,|(_,w)|w);
                 let target=crate::tab_reorder::Target{from:drag.group,index:drag.index,to:group,boundary,width};
-                if this.motion.tab_reorder.set_target(target) {cx.notify();}
+                if this.motion.tab_reorder.set_target(target,event.bounds.contains(&event.event.position)) {cx.notify();}
             }))
             .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {
                 cx.stop_propagation();
