@@ -579,6 +579,32 @@ mod tests {
     }
 
     #[test]
+    fn pausing_history_keeps_live_listing_notifications_and_old_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("visible");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("existing.txt");
+        fs::write(&path, b"before").unwrap();
+        let journal = Arc::new(Journal::open(temp.path().join("journal.sqlite3")).unwrap());
+        journal.observe(&path).unwrap();
+        let before = journal.events(&path, 20).unwrap();
+        let watch = DirectoryWatch::start(vec![root.clone()], Some(journal.clone())).unwrap();
+        until(&watch, |change| change.ready.contains(&root));
+        // Even a worker retaining the old Arc must stop recording.
+        journal.set_recording_enabled(false);
+        fs::write(&path, b"updated while history is disabled").unwrap();
+        until(&watch, |change| change.paths.contains(&path));
+        let created = root.join("created.txt");
+        fs::write(&created, b"new").unwrap();
+        until(&watch, |change| change.paths.contains(&created));
+        fs::remove_file(&path).unwrap();
+        until(&watch, |change| change.paths.contains(&path));
+        assert_eq!(journal.events(&path, 20).unwrap(), before);
+        assert!(journal.events(&created, 20).unwrap().is_empty());
+        assert!(crate::browser::scan_directory(&root, 20).unwrap().entries.iter().any(|entry| entry.path == created));
+    }
+
+    #[test]
     fn selected_save_notification_is_published_after_history_commit() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("visible");

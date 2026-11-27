@@ -18,7 +18,7 @@ pub(crate) struct Palette {
     pub folders: Option<crate::jump::Folders>,
 }
 /// Check boxes of the settings window, in the order arrows walk them.
-const SETTING_FLAGS: [&str; 9] = [
+const SETTING_FLAGS: [&str; 10] = [
     "Светлая тема",
     "Боковая панель",
     "Панель сведений",
@@ -28,9 +28,10 @@ const SETTING_FLAGS: [&str; 9] = [
     "Звёздочка избранного у папок",
     "Проверять обновления раз в день",
     "Как в Windows: светлая или тёмная по системе",
+    "Записывать историю изменений файлов",
 ];
 /// The order arrows walk the check boxes in, as they are shown.
-const SETTING_ORDER: [usize; 9] = [0, 8, 1, 2, 3, 4, 5, 6, 7];
+const SETTING_ORDER: [usize; 10] = [0, 8, 1, 2, 3, 4, 5, 6, 9, 7];
 
 fn flag_value(s: &Settings, index: usize) -> bool {
     match index {
@@ -42,6 +43,7 @@ fn flag_value(s: &Settings, index: usize) -> bool {
         5 => s.stack_versions,
         6 => s.favorite_stars,
         8 => s.system_theme,
+        9 => s.history_recording,
         _ => s.update_auto,
     }
 }
@@ -56,6 +58,7 @@ fn toggle_flag(s: &mut Settings, index: usize) {
         5 => &mut s.stack_versions,
         6 => &mut s.favorite_stars,
         8 => &mut s.system_theme,
+        9 => &mut s.history_recording,
         _ => &mut s.update_auto,
     };
     *flag = !*flag;
@@ -73,6 +76,7 @@ pub(crate) struct Settings {
     pub system_icons: bool,
     pub stack_versions: bool,
     pub favorite_stars: bool,
+    pub history_recording: bool,
     /// «Оформление»: theme by Windows, row density, folder colour, tile size.
     pub system_theme: bool,
     pub density: usize,
@@ -316,6 +320,7 @@ impl Explorer {
             system_icons: self.icons.enabled,
             stack_versions: self.stack_versions,
             favorite_stars: self.favorite_stars,
+            history_recording: !self.history_paused,
             system_theme: self.system_theme,
             density: crate::appearance::density(),
             folder_color: theme::folder_color(),
@@ -373,6 +378,8 @@ impl Explorer {
         let system_icons = settings.system_icons;
         let stack_versions = settings.stack_versions;
         let favorite_stars = settings.favorite_stars;
+        let history_recording = settings.history_recording;
+        let recording = self.history_recording.clone();
         let look = crate::appearance::Look { system_theme: settings.system_theme, density: settings.density,
             folder_color: settings.folder_color, tile_size: settings.tile_size, animations: settings.animations == 0 };
         cx.spawn(async move |weak, cx| {
@@ -383,7 +390,12 @@ impl Explorer {
                     )?;
                     store.save_preferences(&prefs)?;
                     store.set_value(theme::ACCENT_DARK_KEY, theme::ACCENT_SCHEMES[accent_dark].key)?;
-                    store.set_value(theme::ACCENT_LIGHT_KEY, theme::ACCENT_SCHEMES[accent_light].key)
+                    store.set_value(theme::ACCENT_LIGHT_KEY, theme::ACCENT_SCHEMES[accent_light].key)?;
+                    store.set_history_recording_enabled(history_recording)?;
+                    // Wait for any old observation off the UI thread. Merely
+                    // detaching the watcher would leave inspector jobs writing.
+                    *filemanager_core::guard::lock(&recording) = history_recording;
+                    Ok::<(), std::io::Error>(())
                 })
                 .await;
             let _ = weak.update(cx, |this, cx| {
@@ -397,6 +409,9 @@ impl Explorer {
                     this.set_system_icons(system_icons);
                     this.set_stack_versions(stack_versions);
                     this.set_favorite_stars(favorite_stars);
+                    this.history_paused = !history_recording;
+                    this.watched_root = history_recording.then(|| this.browser.active().active().path.clone());
+                    this.configure_live_watch();
                     this.show_hidden = prefs.show_hidden;
                     this.show_sidebar = prefs.show_sidebar;
                     this.show_inspector = prefs.show_inspector;
@@ -578,7 +593,9 @@ impl Explorer {
             look = look.child(choices("tile-size", "Размер миниатюр", &crate::thumbs::SIZES, settings.tile_size, |s, i| s.tile_size = i, cx));
             body = body.child(look)
                 .child(section("ФАЙЛЫ").child(check(3, cx)).child(check(4, cx)).child(check(5, cx))
-                    .child(self.version_rules_row(cx)).child(check(6, cx)));
+                    .child(self.version_rules_row(cx)).child(check(6, cx)).child(check(9, cx))
+                    .child(div().px_2().text_size(px(ui::CAPTION_TEXT)).text_color(rgb(TEXT_DIM))
+                        .child("История хранится локально. При отключении новые изменения не записываются, прежние записи сохраняются.")));
 
             // Updates: daily checks and the channel.
             {

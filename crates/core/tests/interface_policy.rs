@@ -147,3 +147,20 @@ fn quick_hidden_switch_survives_reopen_without_resetting_other_preferences() {
     let command=commands("скрытые папки").into_iter().find(|c|c.id==CommandId::ToggleHidden).unwrap();
     assert_eq!(command.shortcut,"Ctrl+H");
 }
+
+#[test]
+fn history_recording_preference_defaults_on_and_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("workspace.sqlite3");
+    let store = WorkspaceStore::open(&db).unwrap();
+    assert!(store.history_recording_enabled().unwrap());
+    store.set_value("unrelated", "keep").unwrap();
+    store.set_history_recording_enabled(false).unwrap();
+    drop(store);
+    let store = WorkspaceStore::open(&db).unwrap();
+    assert!(!store.history_recording_enabled().unwrap());
+    assert_eq!(store.value("unrelated").unwrap().as_deref(), Some("keep"));
+    store.set_history_recording_enabled(true).unwrap();
+    drop(store);
+    assert!(WorkspaceStore::open(&db).unwrap().history_recording_enabled().unwrap());
+}

@@ -264,6 +264,15 @@ impl WorkspaceStore {
         Ok(())
     }
     /// Small interface values kept between sessions (column widths, hidden places).
+    /// Existing installations keep recording until explicitly disabled.
+    pub fn history_recording_enabled(&self) -> io::Result<bool> {
+        Ok(self.value("history_recording")?.is_none_or(|flag| flag != "0"))
+    }
+
+    pub fn set_history_recording_enabled(&self, enabled: bool) -> io::Result<()> {
+        self.set_value("history_recording", if enabled { "1" } else { "0" })
+    }
+
     pub fn value(&self, name: &str) -> io::Result<Option<String>> {
         self.connection()?.query_row("SELECT value FROM app_values WHERE name=?1",params![name],|r|r.get(0)).optional().map_err(db_error)
     }

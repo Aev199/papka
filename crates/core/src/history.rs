@@ -3,12 +3,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 use chrono::{DateTime, Utc};
 
-pub struct Journal { database: PathBuf }
+pub struct Journal { database: PathBuf, recording: Arc<Mutex<bool>> }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
@@ -118,9 +118,14 @@ fn ignored(path: &Path) -> bool {
 
 impl Journal {
     pub fn open(database: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open_with_recording(database, Arc::new(Mutex::new(true)))
+    }
+
+    /// A shared gate also covers preferences changed during database startup.
+    pub fn open_with_recording(database: impl AsRef<Path>, recording: Arc<Mutex<bool>>) -> io::Result<Self> {
         let database = database.as_ref().to_path_buf();
         if let Some(parent) = database.parent() { fs::create_dir_all(parent)?; }
-        let journal = Self { database };
+        let journal = Self { database, recording };
         journal.connect()?.execute_batch("
             CREATE TABLE IF NOT EXISTS observed (
                 path TEXT PRIMARY KEY, size INTEGER NOT NULL, modified_ns INTEGER NOT NULL
@@ -140,6 +145,13 @@ impl Journal {
         crate::path_utils::app_data_dir().join("native-history.sqlite3")
     }
 
+    /// Serializes with observations, including work already queued by the
+    /// watcher or inspector. When this returns disabled, no writer can commit
+    /// another automatic history entry until recording is enabled again.
+    pub fn set_recording_enabled(&self, enabled: bool) {
+        *crate::guard::lock(&self.recording) = enabled;
+    }
+
     pub(crate) fn is_database_path(&self, path: &Path) -> bool {
         path == self.database || ["-journal", "-wal", "-shm"].iter().any(|suffix| {
             let mut sidecar = self.database.as_os_str().to_os_string();
@@ -157,10 +169,12 @@ impl Journal {
     /// Called on filesystem events; a repeated notification with unchanged
     /// size and modification time produces no additional history entry.
     pub fn observe(&self, path: &Path) -> io::Result<bool> {
+        let recording = crate::guard::lock(&self.recording);
+        if !*recording { return Ok(false); }
         if ignored(path) || self.is_database_path(path) { return Ok(false); }
         let metadata = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return self.mark_missing(path),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return self.mark_missing_inner(path),
             // A file the user may not read is simply not part of their history.
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(false),
             Err(e) => return Err(e),
@@ -224,6 +238,12 @@ impl Journal {
     }
 
     pub fn mark_missing(&self, path: &Path) -> io::Result<bool> {
+        let recording = crate::guard::lock(&self.recording);
+        if !*recording { return Ok(false); }
+        self.mark_missing_inner(path)
+    }
+
+    fn mark_missing_inner(&self, path: &Path) -> io::Result<bool> {
         let path = path.to_string_lossy().into_owned();
         let mut connection = self.connect()?;
         let tx = connection.transaction().map_err(sqlite_error)?;
@@ -466,6 +486,33 @@ mod tests {
         let events = journal.events(&path, 10).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "observed");
+    }
+
+    #[test]
+    fn disabled_recording_preserves_history_and_skips_all_automatic_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing.txt");
+        fs::write(&path, b"before").unwrap();
+        let journal = Journal::open(temp.path().join("history.sqlite3")).unwrap();
+        assert!(journal.observe(&path).unwrap());
+        let before = journal.events(&path, 100).unwrap();
+        journal.set_recording_enabled(false);
+        fs::write(&path, b"changed while disabled").unwrap();
+        assert!(!journal.observe(&path).unwrap());
+        fs::remove_file(&path).unwrap();
+        assert!(!journal.observe(&path).unwrap());
+        assert!(!journal.mark_missing(&path).unwrap());
+        let new = temp.path().join("new.txt");
+        fs::write(&new, b"new").unwrap();
+        assert!(!journal.observe(&new).unwrap());
+        assert_eq!(journal.events(&path, 100).unwrap(), before);
+        assert!(journal.events(&new, 100).unwrap().is_empty());
+        let observed: i64 = journal.connect().unwrap().query_row(
+            "SELECT count(*) FROM observed", [], |row| row.get(0)).unwrap();
+        assert_eq!(observed, 1, "disabled observations must not update the baseline either");
+        journal.set_recording_enabled(true);
+        assert!(journal.observe(&new).unwrap());
+        assert_eq!(journal.events(&new, 100).unwrap().len(), 1);
     }
 
     #[test]

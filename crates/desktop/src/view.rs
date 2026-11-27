@@ -2760,10 +2760,14 @@ impl Explorer {
         if let Some(reason) = &self.live_watch_error {
             section = section.child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(DANGER)).child(reason.clone()));
         }
+        if self.history_paused {
+            section = section.child(div().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_MUTED))
+                .child("Запись истории отключена в настройках. Ниже — ранее сохранённые изменения."));
+        }
         let rows: &[crate::feed::FeedRow] = if self.feed.folder.as_ref() == Some(&current) { &self.feed.rows } else { &[] };
         if rows.is_empty() {
             return section.child(div().pt_1().text_size(px(ui::SECONDARY_TEXT)).text_color(rgb(TEXT_DIM))
-                .child("Изменений нет. Папка замечает изменения в папках, пока они открыты в ней; содержимое файлов не сохраняется."))
+                .child(if self.history_paused {"Сохранённых изменений за этот период нет."} else {"Изменений нет. Папка замечает изменения в папках, пока они открыты в ней; содержимое файлов не сохраняется."}))
                 .into_any_element();
         }
         let mut day = String::new();

@@ -527,8 +527,9 @@ struct Explorer {
     live_watch_started: bool,
     live_watch_error: Option<String>,
     watched_root: Option<PathBuf>,
-    /// Set by «Остановить»: history stays off until switched on again.
+    /// Persisted recording preference; listing notifications remain active.
     history_paused: bool,
+    history_recording: Arc<std::sync::Mutex<bool>>,
     /// Visible folders the OS would not watch (no access, offline share).
     unwatched_folders: std::collections::HashSet<PathBuf>,
     /// Validated Recycle plans awaiting confirmation. Confirming submits
@@ -672,6 +673,7 @@ impl Explorer {
             .is_none_or(|flag| flag != "0");
         let favorite_stars = workspaces.as_ref().and_then(|store| store.value(FAVORITE_STARS).ok().flatten())
             .is_none_or(|flag| flag != "0");
+        let history_recording = workspaces.as_ref().and_then(|store| store.history_recording_enabled().ok()).unwrap_or(true);
         let system_icons = workspaces.as_ref().and_then(|store| store.value(icons::ENABLED_KEY).ok().flatten())
             .is_none_or(|flag| flag != "0");
         let search_depth = workspaces.as_ref().and_then(|store| store.value(search_panel::DEPTH_KEY).ok().flatten())
@@ -777,7 +779,7 @@ impl Explorer {
             operation_review_epoch: 0,
             operation_alerts: Vec::new(),
             watcher: None, live_watch_started: false, live_watch_error: None,
-            watched_root: None, history_paused: false, unwatched_folders: Default::default(), confirm_recycle: None,
+            watched_root: None, history_paused: !history_recording, history_recording: Arc::new(std::sync::Mutex::new(history_recording)), unwatched_folders: Default::default(), confirm_recycle: None,
             status: prefs_error.unwrap_or_else(|| {
                 // The last run ended on an error: said once, with where the log is.
                 match filemanager_core::guard::take_pending(&filemanager_core::path_utils::app_data_dir()) {
@@ -2099,7 +2101,8 @@ impl Explorer {
         }
         self.live_watch_started = true;
         // SQLite startup and notify registration both happen off the UI.
-        let journal_task = cx.background_spawn(async { Journal::open(Journal::default_path()).map(Arc::new) });
+        let recording = self.history_recording.clone();
+        let journal_task = cx.background_spawn(async move { Journal::open_with_recording(Journal::default_path(), recording).map(Arc::new) });
         cx.spawn(async move |weak, cx| {
             let result = journal_task.await;
             let _ = weak.update(cx, |this, cx| {
@@ -2107,11 +2110,11 @@ impl Explorer {
                     Ok(journal) => {
                         this.journal = Some(journal);
                         this.inspector.dirty = true;
-                        // History is recorded by default; «Остановить» pauses it.
+                        // Honour the saved recording preference at startup.
                         if !this.history_paused && this.watched_root.is_none() {
                             this.watched_root = Some(this.browser.active().active().path.clone());
-                            this.configure_live_watch();
                         }
+                        this.configure_live_watch();
                     }
                     Err(error) => {
                         let reason = format!("История недоступна: {error}");
